@@ -50,10 +50,12 @@ func TestCapturePropagatesThroughNormaProvider(t *testing.T) {
 	defer srv.Close()
 
 	cfg := Config{
-		Format:  llm.FormatAnthropic,
-		BaseURL: srv.URL,
-		APIKey:  "test-key",
-		Model:   "claude-test",
+		Format:    llm.FormatAnthropic,
+		BaseURL:   srv.URL,
+		APIKey:    "test-key",
+		Model:     "claude-test",
+		Stream:    true,
+		MaxTokens: 1024,
 	}
 	prov, err := cfg.NewProvider()
 	if err != nil {

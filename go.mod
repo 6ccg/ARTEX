@@ -2,6 +2,8 @@ module github.com/Autumn-27/artex
 
 go 1.26.3
 
+replace github.com/lqqyt2423/go-mitmproxy => ./third_party/go-mitmproxy
+
 require (
 	github.com/Autumn-27/norma v0.4.3
 	github.com/golang-jwt/jwt/v5 v5.3.1
