@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"log"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -30,31 +29,27 @@ type sideRun struct {
 	done   chan struct{}
 }
 type sideQuestionState struct {
-	mu           sync.Mutex
-	commands     sync.Mutex // short admission / clear operations only, never inference
-	pending      map[string]sidequestion.Snapshot
-	latest       map[string]sidequestion.Snapshot
-	seen         map[string][2]int64
-	runs         map[string]sideRun
-	done         chan struct{}
-	outputTokens int
+	mu       sync.Mutex
+	commands sync.Mutex // short admission / clear operations only, never inference
+	pending  map[string]sidequestion.Snapshot
+	latest   map[string]sidequestion.Snapshot
+	seen     map[string][2]int64
+	runs     map[string]sideRun
+	done     chan struct{}
 }
 
 func sideModel(cfg agent.Config, id int64, name string) sidequestion.Model {
-	b, _ := json.Marshal([]any{cfg.Format, cfg.BaseURL, cfg.Model, cfg.ThinkingType, cfg.ReasoningEffort, cfg.Stream, cfg.MaxTokensField, cfg.SessionHeaderKey})
+	b, _ := json.Marshal([]any{cfg.Format, cfg.BaseURL, cfg.Model, cfg.ThinkingType, cfg.ReasoningEffort, cfg.Stream, cfg.MaxTokens, cfg.MaxTokensField, cfg.SessionHeaderKey})
 	h := sha256.Sum256(b)
 	return sidequestion.Model{ProfileID: id, Name: name, Format: string(cfg.Format), Model: cfg.Model, Identity: hex.EncodeToString(h[:]), Streaming: cfg.Stream, WindowTokens: cfg.CompactionWindow()}
 }
 
 func bindSideProvider(p llm.Provider, cfg agent.Config, id int64, name string) llm.Provider {
-	return sidequestion.Bind(p, sideModel(cfg, id, name))
+	return cfg.ConfigureProvider(sidequestion.Bind(p, sideModel(cfg, id, name)))
 }
 
 func (s *Server) initSideQuestions() {
 	s.side = &sideQuestionState{pending: map[string]sidequestion.Snapshot{}, latest: map[string]sidequestion.Snapshot{}, seen: map[string][2]int64{}, runs: map[string]sideRun{}, done: make(chan struct{})}
-	if n, err := strconv.Atoi(os.Getenv("ARTEX_BTW_MAX_OUTPUT_TOKENS")); err == nil && n >= 256 && n <= 32768 {
-		s.side.outputTokens = n
-	}
 	if s.m.pg == nil {
 		close(s.side.done)
 		return
@@ -657,7 +652,7 @@ func (s *Server) runSide(ctx context.Context, cancel context.CancelFunc, e sideq
 			Save: func(ctx context.Context, memory sidequestion.Memory) error {
 				return s.m.pg.SaveSideMemory(ctx, e, memory)
 			},
-		}, sidequestion.ContextOptions{OutputTokens: s.side.outputTokens}, func(a sidequestion.Answer, info sidequestion.ContextInfo) {
+		}, func(a sidequestion.Answer, info sidequestion.ContextInfo) {
 			phaseChanged := e.Context.Phase != info.Phase
 			e.Answer, e.Usage, e.Context = a.Text, a.Usage, info
 			if phaseChanged || time.Since(lastSave) >= 250*time.Millisecond {

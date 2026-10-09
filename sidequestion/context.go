@@ -43,18 +43,17 @@ type Replay struct {
 	Save   func(context.Context, Memory) error
 }
 
-type ContextOptions struct{ OutputTokens int }
-
 type contextBuilder struct {
-	service  SideQuestionService
-	replay   Replay
-	memory   Memory
-	recent   []Exchange
-	info     ContextInfo
-	usage    llm.Usage
-	calls    int
-	window   int
-	onUpdate func(Answer, ContextInfo)
+	service   SideQuestionService
+	replay    Replay
+	memory    Memory
+	recent    []Exchange
+	info      ContextInfo
+	usage     llm.Usage
+	calls     int
+	window    int
+	maxTokens int
+	onUpdate  func(Answer, ContextInfo)
 }
 
 func (b *contextBuilder) progress(phase string) {
@@ -90,8 +89,9 @@ func (b *contextBuilder) summarize(ctx context.Context, prior, text string) (str
 		if b.calls >= 12 {
 			return "", errors.New("旁路上下文整理已达到本次处理上限，请缩小问题范围后重试")
 		}
+		reserved := outputBudget(llm.CompletionRequest{MaxTokens: b.maxTokens})
 		overhead := EstimateInputTokens(llm.CompletionRequest{System: []string{summaryInstruction}, Messages: []llm.Message{llm.UserText("[此前摘要]\n" + prior + "\n[新材料片段]\n")}})
-		chunkBytes := min(32000, b.window-2048-overhead-512) * 3
+		chunkBytes := min(32000, b.window-reserved-overhead-512) * 3
 		if chunkBytes < 1024 {
 			return "", ErrContextBudget
 		}
@@ -101,10 +101,10 @@ func (b *contextBuilder) summarize(ctx context.Context, prior, text string) (str
 		}
 		part := text[:n]
 		req := llm.CompletionRequest{
-			System: []string{summaryInstruction}, Thinking: "disabled", MaxTokens: 2048,
+			System: []string{summaryInstruction}, MaxTokens: b.maxTokens,
 			Messages: []llm.Message{llm.UserText("[此前摘要]\n" + prior + "\n[新材料片段]\n" + part)},
 		}
-		if EstimateInputTokens(req)+req.MaxTokens+512 > b.window {
+		if EstimateInputTokens(req)+reserved+512 > b.window {
 			return "", ErrContextBudget
 		}
 		b.calls++
@@ -251,18 +251,18 @@ func (b *contextBuilder) compactSnapshot(ctx context.Context, base []llm.Message
 	return snapshotSummaryMessages(summary, base[start:]), nil
 }
 
-func (b *contextBuilder) prepare(ctx context.Context, snapshot Snapshot, question string, options ContextOptions, force bool) (llm.CompletionRequest, error) {
+func (b *contextBuilder) prepare(ctx context.Context, snapshot Snapshot, question string, force bool) (llm.CompletionRequest, error) {
 	req, err := CloneRequest(snapshot.Request)
 	if err != nil {
 		return req, err
 	}
-	req.MaxTokens = outputBudget(req, options.OutputTokens)
 	base := llm.MessagesForAPI(req.Messages)
-	limit := inputBudget(snapshot, req.MaxTokens)
+	reserved := outputBudget(req)
+	limit := inputBudget(snapshot, reserved)
 	if force {
 		limit /= 2
 	}
-	b.info.InputBudget, b.info.OutputTokens = limit, req.MaxTokens
+	b.info.InputBudget, b.info.OutputTokens = limit, reserved
 	// Reserve a bounded history allowance, so long side conversations cannot
 	// crowd all primary evidence out. Both count and token limits are enforced.
 	historyLimit := min(16000, max(0, limit/4))
@@ -332,12 +332,12 @@ func isContextOverflow(err error) bool {
 
 // Respond owns preparation and at most one overflow recovery. No tools, main
 // transcript or model-failover chain are introduced by the summary calls.
-func (s SideQuestionService) Respond(ctx context.Context, snapshot Snapshot, question string, replay Replay, options ContextOptions, update func(Answer, ContextInfo)) (out Answer, info ContextInfo, err error) {
+func (s SideQuestionService) Respond(ctx context.Context, snapshot Snapshot, question string, replay Replay, update func(Answer, ContextInfo)) (out Answer, info ContextInfo, err error) {
 	window := snapshot.Model.WindowTokens
 	if window <= 0 {
 		window = 200000
 	}
-	b := &contextBuilder{service: s, replay: replay, memory: replay.Memory, window: window, onUpdate: update}
+	b := &contextBuilder{service: s, replay: replay, memory: replay.Memory, window: window, maxTokens: snapshot.Request.MaxTokens, onUpdate: update}
 	defer func() { info = b.info; out.Usage.Add(b.usage) }()
 	b.progress("preparing")
 	if err = b.loadHistory(ctx); err != nil {
@@ -346,7 +346,7 @@ func (s SideQuestionService) Respond(ctx context.Context, snapshot Snapshot, que
 	previousSize := 0
 	for attempt := 0; attempt < 2; attempt++ {
 		var req llm.CompletionRequest
-		req, err = b.prepare(ctx, snapshot, question, options, attempt > 0)
+		req, err = b.prepare(ctx, snapshot, question, attempt > 0)
 		if err != nil {
 			return
 		}

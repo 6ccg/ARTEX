@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/intercept"
 	"github.com/Autumn-27/norma/llm"
@@ -39,16 +40,17 @@ func TestReviewCompletionSendsCurrentCallWithoutHistory(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := &reviewCaptureProvider{}
+	profile := agent.Config{Stream: true, MaxTokens: 3072}
 	prompt := intercept.EffectiveJudgePrompt(intercept.DefaultJudgePrompt)
-	reply, err := reviewCompletion(ctx, p, prompt, input)
+	reply, err := reviewCompletion(ctx, bindSideProvider(p, profile, 1, "review"), prompt, input)
 	if err != nil || intercept.ParseVerdict(reply).Action != "ask" {
 		t.Fatalf("%s %v", reply, err)
 	}
 	if len(p.request.System) != 1 || p.request.System[0] != prompt || len(p.request.Messages) != 1 {
 		t.Fatal("wrong review request roles")
 	}
-	if !strings.Contains(prompt, intercept.JudgeOutputContract) || p.request.MaxTokens < 1024 {
-		t.Fatal("review request cannot return a complete explanation")
+	if !strings.Contains(prompt, intercept.JudgeOutputContract) || p.request.MaxTokens != profile.MaxTokens || p.request.Thinking != "" || p.request.Temperature != nil {
+		t.Fatal("review request differs from the configured model profile")
 	}
 	body := p.request.Messages[0].Content[0].Text
 	var got intercept.ReviewInput

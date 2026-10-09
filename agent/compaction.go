@@ -510,13 +510,11 @@ func buildCompressionInput(g *coldGraph, b block, nodeByID map[int64]*db.Node) s
 }
 
 // compress runs the §4 body LLM call on one block. Uses the same model the agent
-// runs on; thinking disabled (a pure summarization step).
+// runs on, with the same model parameters as every other call.
 func (c *Compactor) compress(ctx context.Context, g *coldGraph, b block, nodeByID map[int64]*db.Node) (string, error) {
 	req := llm.CompletionRequest{
-		System:    []string{compressionSystemPrompt},
-		Messages:  []llm.Message{llm.UserText(buildCompressionInput(g, b, nodeByID))},
-		MaxTokens: 1500,
-		Thinking:  "disabled",
+		System:   []string{compressionSystemPrompt},
+		Messages: []llm.Message{llm.UserText(buildCompressionInput(g, b, nodeByID))},
 	}
 	msg, _, _, err := c.prov.Complete(ctx, req)
 	if err != nil {
