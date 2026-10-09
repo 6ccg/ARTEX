@@ -11,6 +11,9 @@ Patch: a failed SOCKS5 `DialContext` returns a nil connection. Return that error
 without calling `Close` on the nil connection. The SOCKS5 dialer already closes
 the underlying connection on failure.
 
+MITM patch: when a TLS client omits SNI (normal for an IP URL), use the CONNECT
+target's hostname for certificate generation. This preserves correct IP SANs.
+
 Regression check:
 
 ```sh

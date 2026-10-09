@@ -21,6 +21,25 @@ git fetch upstream
 
 上游目前是最终版本的源码备份，继承的 Docker 镜像地址不代表本分支构建；本分支可按下方本地构建方式使用。
 
+### Docker 强制全局代理
+
+Docker 部署使用应用容器和独立的 `egress` 网关。全局代理仍在后台“系统设置”填写；Agent 无需代理参数，清空环境变量或使用 `--noproxy` 也不能直连。代理为空或不可用时阻断外网。内部数据库与管理访问保留。
+
+MITM 流量捕获保持独立开关，继续负责 HTTPS 解密、记录与流量查询；它的出网也经过网关。SOCKS5 出口的 UDP 能力取决于服务器，HTTP/HTTPS 出口只支持 TCP；DNS 通过代理内的 HTTPS 转发。SOCKS/HTTP 不能承载原始 SYN 扫描或 ICMP。
+
+源码构建（准备好 Go 与 Node）：
+
+```bash
+cd web && npm ci && npm run build:static && cd ..
+mkdir -p server/webui/dist dist/amd64
+cp -r web/out/. server/webui/dist/
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -tags embedui -o dist/amd64/artex ./cmd/artex
+docker compose build
+docker compose up -d
+```
+
+首次部署前由 `install.sh` 生成 `jwt.key`；已有实例迁移时先保留容器的 `/app/jwt.key` 到项目根目录，再启动新容器，保持登录会话有效。应用和网关只在启动阶段配置网络；Agent 子进程不具备修改网络规则的能力。
+
 ---
 
 ## 截图预览

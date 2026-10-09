@@ -18,6 +18,7 @@ import (
 
 	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/config"
+	"github.com/Autumn-27/artex/egress"
 	"github.com/Autumn-27/artex/selfupdate"
 	"github.com/Autumn-27/artex/server"
 )
@@ -52,11 +53,29 @@ func main() {
 
 func run() int {
 	var (
-		addr    = flag.String("addr", ":8787", "HTTP listen address")
-		dataDir = flag.String("data", filepath.Join(config.BaseDir(), "data"), "data directory for SQLite stores (default: data/ next to the executable)")
-		proxy   = flag.String("proxy", "127.0.0.1:8788", "traffic recording proxy address (empty to disable)")
+		addr          = flag.String("addr", ":8787", "HTTP listen address")
+		dataDir       = flag.String("data", filepath.Join(config.BaseDir(), "data"), "data directory for SQLite stores (default: data/ next to the executable)")
+		proxy         = flag.String("proxy", "127.0.0.1:8788", "traffic recording proxy address (empty to disable)")
+		egressService = flag.Bool("egress-service", false, "run the Docker egress gateway")
+		egressHealth  = flag.Bool("egress-healthcheck", false, "check the Docker egress gateway")
 	)
 	flag.Parse()
+	if *egressHealth {
+		if err := egress.HealthCheck(); err != nil {
+			log.Print(err)
+			return 1
+		}
+		return 0
+	}
+	if *egressService {
+		ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+		defer stop()
+		if err := egress.Serve(ctx); err != nil {
+			log.Print(err)
+			return 1
+		}
+		return 0
+	}
 
 	// hand the build version to the server package so GET /api/health can report it
 	// to the frontend top bar.

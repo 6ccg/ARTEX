@@ -30,6 +30,7 @@ export default function SystemSettingsPage() {
   const [proxyInput, setProxyInput] = React.useState("");
   const [savingProxy, setSavingProxy] = React.useState(false);
   const [globalProxyInput, setGlobalProxyInput] = React.useState("");
+  const [transparentProxy, setTransparentProxy] = React.useState(false);
   const [savingGlobalProxy, setSavingGlobalProxy] = React.useState(false);
   const [testing, setTesting] = React.useState(false);
   const [loaded, setLoaded] = React.useState(false);
@@ -55,6 +56,7 @@ export default function SystemSettingsPage() {
     setTavilyKeySet(!!s.tavily_key_set);
     setProxyInput(s.web_search_proxy ?? "");
     setGlobalProxyInput(s.global_proxy ?? "");
+    setTransparentProxy(!!s.global_proxy_transparent);
     setPyInterp(s.python_interpreter ?? "");
     setWorkers(String(s.workers ?? 3));
     setInjectPlanner(s.constraints_inject_planner !== false);
@@ -226,7 +228,7 @@ export default function SystemSettingsPage() {
       .setSettings({ global_proxy: globalProxyInput.trim() })
       .then((s) => {
         apply(s);
-        toast.success(globalProxyInput.trim() ? "已保存全局代理" : "已清除全局代理（改为直连）");
+        toast.success(globalProxyInput.trim() ? "已保存全局代理" : s.global_proxy_transparent ? "已清除全局代理（外网访问已阻断）" : "已清除全局代理（改为直连）");
       })
       .catch((e) => toast.error("保存失败：" + (e as Error).message))
       .finally(() => setSavingGlobalProxy(false));
@@ -330,6 +332,12 @@ export default function SystemSettingsPage() {
               全局代理
             </CardTitle>
             <CardDescription>
+              {transparentProxy ? <>
+                容器内的 Agent、脚本、浏览器和模型请求自动经过全局代理，无需工具自行配置。清空代理变量或使用直连选项也不能绕过。
+                <br />
+                支持 <b>http / https / socks5</b> 和 <code>user:pass</code> 认证。代理未配置或不可用时阻断外网，不回退直连。
+                UDP 转发需要出口代理支持；HTTP / HTTPS 代理只支持 TCP。开启流量捕获时，MITM 仍负责 HTTPS 解密和记录。
+              </> : <>
               所有 Agent 的<b>目标流量</b>经此代理出网（隐藏源 IP / 走跳板）。支持 <b>http / https / socks5</b>，可带{" "}
               <code>user:pass</code> 认证。留空=直连。
               <br />
@@ -339,6 +347,7 @@ export default function SystemSettingsPage() {
               <b>提示</b>：socks5 在<b>关闭捕获</b>时依赖各命令行工具对 <code>ALL_PROXY</code> 的支持（curl
               可用，部分工具可能忽略）； 若主要用 socks5，建议开启流量捕获——此路径由 MITM
               亲自拨号，工具无感知、稳定生效。
+              </>}
             </CardDescription>
           </CardHeader>
           <CardContent className="flex flex-col gap-2">
@@ -359,7 +368,7 @@ export default function SystemSettingsPage() {
               </Button>
             </div>
             <p className="text-muted-foreground text-xs">
-              {globalProxyInput.trim() ? "已配置 · 所有目标流量经此代理出网" : "未配置 · 目标流量直连出网"}
+              {globalProxyInput.trim() ? "已配置 · 所有目标流量经此代理出网" : transparentProxy ? "未配置 · 外网访问已阻断" : "未配置 · 目标流量直连出网"}
             </p>
           </CardContent>
         </Card>
