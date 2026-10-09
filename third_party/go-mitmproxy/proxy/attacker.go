@@ -347,7 +347,11 @@ func (a *attacker) httpsTlsDial(ctx context.Context, cconn net.Conn, conn net.Co
 				}
 			}
 
-			c, err := a.ca.GetCert(chi.ServerName)
+			name := chi.ServerName
+			if name == "" {
+				name, _, _ = net.SplitHostPort(connCtx.ServerConn.Address)
+			}
+			c, err := a.ca.GetCert(name)
 			if err != nil {
 				return nil, err
 			}
@@ -412,7 +416,11 @@ func (a *attacker) httpsLazyAttack(ctx context.Context, cconn net.Conn, req *htt
 		SessionTicketsDisabled: true, // 设置此值为 true ，确保每次都会调用下面的 GetConfigForClient 方法
 		GetConfigForClient: func(chi *tls.ClientHelloInfo) (*tls.Config, error) {
 			connCtx.ClientConn.clientHello = chi
-			c, err := a.ca.GetCert(chi.ServerName)
+			name := chi.ServerName
+			if name == "" {
+				name = req.URL.Hostname()
+			}
+			c, err := a.ca.GetCert(name)
 			if err != nil {
 				return nil, err
 			}

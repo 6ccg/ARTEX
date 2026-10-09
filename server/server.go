@@ -3530,6 +3530,7 @@ func (s *Server) settingsPayload() map[string]any {
 		"tavily_key_set":                       strings.TrimSpace(tavilyKey) != "",
 		"web_search_proxy":                     proxy,             // 独立出口代理(http/https/socks5)，空=直连
 		"global_proxy":                         s.m.GlobalProxy(), // 全局出口代理(http/https/socks5)，所有目标流量走它，空=直连
+		"global_proxy_transparent":             s.m.TransparentProxy(),
 		"show_egress_ip":                       s.m.pg.GetBool(settingShowEgressIP, false),
 		"python_interpreter":                   strings.TrimSpace(pyStored), // 用户/自动设的值(空=用运行时检测)
 		"workers":                              s.m.Workers(),               // 并发工作 agent 数(默认3)；对之后启动的任务生效
@@ -3831,7 +3832,7 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, 400, err.Error())
 			return
 		}
-		changed = true // capture-off egress is baked into agents at build time → rebuild
+		changed = changed || !s.m.TransparentProxy()
 	}
 	if req.ShowEgressIP != nil {
 		if err := s.m.pg.SetBool(settingShowEgressIP, *req.ShowEgressIP); err != nil {

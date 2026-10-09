@@ -17,6 +17,7 @@ import (
 
 	"github.com/Autumn-27/artex/agent"
 	pgdb "github.com/Autumn-27/artex/db"
+	"github.com/Autumn-27/artex/egress"
 	"github.com/Autumn-27/artex/enrich"
 	"github.com/Autumn-27/artex/guard"
 	"github.com/Autumn-27/artex/intercept"
@@ -254,11 +255,10 @@ type Manager struct {
 	braveKey         string
 	tavilyKey        string
 	webSearchProxy   string
-	// globalProxy is the egress proxy all target traffic routes through
-	// (http/https/socks5, optional user:pass). Empty = direct. When traffic
-	// capture is on it becomes the MITM's upstream; when capture is off it is
-	// injected into agent bash env / WebFetch directly. See ProxyAddr.
+	// Docker sends all application traffic through the mandatory gateway.
+	// Local runs use the same URL through the tool proxy and MITM upstream.
 	globalProxy string
+	network     *egress.Client
 }
 
 // Settings keys the UI toggles at runtime.
@@ -554,6 +554,17 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 		log.Printf("[llmusage] create table: %v", err)
 	}
 	m := &Manager{dir: dir, pg: pg, assets: pg.Assets(), tasks: map[string]*Task{}, interceptor: intercept.New(pg)}
+	m.network = egress.FromEnvironment()
+	if v, ok, _ := pg.GetSetting(settingGlobalProxy); ok {
+		m.globalProxy = strings.TrimSpace(v)
+	}
+	if m.network != nil {
+		if err := m.network.Apply(m.globalProxy); err != nil {
+			pg.Close()
+			return nil, err
+		}
+		log.Printf("[network] mandatory container proxy configured")
+	}
 	if proxyAddr != "" {
 		tr, err := traffic.Open(filepath.Join(dir, "traffic"), proxyAddr)
 		if err != nil {
@@ -608,14 +619,8 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 	if v, ok, _ := pg.GetSetting(settingWebSearchProxy); ok {
 		m.webSearchProxy = v
 	}
-	// Global egress proxy (default: direct). When capture is on, feed it to the
-	// MITM as its upstream so recorded traffic exits through it; when capture is
-	// off, ProxyAddr hands it to agents directly (bash env / WebFetch).
-	if v, ok, _ := pg.GetSetting(settingGlobalProxy); ok {
-		m.globalProxy = strings.TrimSpace(v)
-	}
 	if m.traffic != nil {
-		if err := m.traffic.SetUpstreamProxy(m.globalProxy); err != nil {
+		if err := m.traffic.SetUpstreamProxy(m.ApplicationProxy()); err != nil {
 			log.Printf("[proxy] 全局代理 %q 无效，已忽略: %v", m.globalProxy, err)
 		}
 	}
@@ -975,21 +980,28 @@ func (m *Manager) Assets() *pgdb.AssetStore  { return m.assets }
 func (m *Manager) PG() *pgdb.DB              { return m.pg }
 func (m *Manager) Traffic() *traffic.Traffic { return m.traffic }
 
-// ProxyAddr returns the egress proxy address agents route target traffic through:
-//   - capture ON  → the recording MITM proxy (which itself exits via the global
-//     proxy when one is set); agents also get its CA (see ProxyCACert).
-//   - capture OFF → the global egress proxy directly (empty CA — real target
-//     certs), or "" when no global proxy is set (direct, no recording).
-//
-// So the global proxy takes effect in both modes: at the MITM's upstream when
-// capturing, in the agent's own bash env / WebFetch when not.
+// ProxyAddr supplies only the recording proxy in Docker: the gateway owns egress.
+// Local runs also use the configured URL when recording is disabled.
 func (m *Manager) ProxyAddr() string {
 	if m.traffic != nil && m.TrafficEnabled() {
 		return m.traffic.ProxyAddr()
 	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
+	if m.network != nil {
+		return ""
+	}
 	return m.globalProxy
+}
+
+func (m *Manager) TransparentProxy() bool { return m.network != nil }
+
+// ApplicationProxy is empty when the gateway already routes every socket.
+func (m *Manager) ApplicationProxy() string {
+	if m.network != nil {
+		return ""
+	}
+	return m.GlobalProxy()
 }
 
 // ProxyCACert returns the CA cert path agents must trust to verify HTTPS through
@@ -1004,17 +1016,15 @@ func (m *Manager) ProxyCACert() string {
 	return m.traffic.CACertPath()
 }
 
-// GlobalProxy returns the configured global egress proxy URL (empty = direct).
+// GlobalProxy returns the saved global egress proxy URL.
 func (m *Manager) GlobalProxy() string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.globalProxy
 }
 
-// SetGlobalProxy validates, persists and applies the global egress proxy
-// (http/https/socks5, optional user:pass; empty = direct). It updates the MITM's
-// upstream immediately; callers must rebuild agents (applyLLM) afterwards so the
-// capture-off path (bash env / WebFetch) picks up the change too.
+// SetGlobalProxy applies the URL to the gateway before saving it. An empty URL
+// blocks external Docker traffic; local runs use direct connections instead.
 func (m *Manager) SetGlobalProxy(raw string) error {
 	raw = strings.TrimSpace(raw)
 	if raw != "" {
@@ -1022,14 +1032,22 @@ func (m *Manager) SetGlobalProxy(raw string) error {
 			return err
 		}
 	}
+	if m.network != nil {
+		if err := m.network.Apply(raw); err != nil {
+			return err
+		}
+	}
 	if err := m.pg.SetSetting(settingGlobalProxy, raw); err != nil {
+		if m.network != nil {
+			_ = m.network.Apply(m.GlobalProxy())
+		}
 		return err
 	}
 	m.mu.Lock()
 	m.globalProxy = raw
 	m.mu.Unlock()
 	if m.traffic != nil {
-		if err := m.traffic.SetUpstreamProxy(raw); err != nil {
+		if err := m.traffic.SetUpstreamProxy(m.ApplicationProxy()); err != nil {
 			return err
 		}
 	}
