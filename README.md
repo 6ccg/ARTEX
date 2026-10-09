@@ -7,9 +7,19 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 
 🌐 **在线 Demo**： [https://artex-demo.vercel.app/](https://artex-demo.vercel.app/)
 
-📦 **该仓库为ARTEX最后一个版本纯源码备份，docker部署源失效自行让AI本地构建即可**
-
 </div>
+
+本仓库是个人维护的私有分支：[6ccg/ARTEX](https://github.com/6ccg/ARTEX)。
+上游源码来自 [mhtsec/ARTEX](https://github.com/mhtsec/ARTEX)，保留完整提交历史；初始基线为 `5c0dbd4`。Go module 路径沿用上游，避免无关的导入路径改动。
+
+克隆后可配置上游远程，后续本地改动提交到 `origin`：
+
+```bash
+git remote add upstream https://github.com/mhtsec/ARTEX.git
+git fetch upstream
+```
+
+上游目前是最终版本的源码备份，继承的 Docker 镜像地址不代表本分支构建；本分支可按下方本地构建方式使用。
 
 ---
 
@@ -71,7 +81,7 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 ### 方式一：一键安装脚本（推荐）
 
 ```bash
-git clone https://github.com/Autumn-27/ARTEX.git
+git clone https://github.com/6ccg/ARTEX.git
 cd ARTEX
 ./install.sh
 ```
@@ -86,7 +96,7 @@ cd ARTEX
 ### 方式二：Docker Compose（手动）
 
 ```bash
-git clone https://github.com/Autumn-27/ARTEX.git
+git clone https://github.com/6ccg/ARTEX.git
 cd ARTEX
 cp .env.example .env          # 填 POSTGRES_PASSWORD、可选 ANTHROPIC_API_KEY
 docker compose up -d          # 拉取 autumn27/artex 镜像 + postgres
