@@ -14,8 +14,10 @@ services:
       retries: 10
     restart: unless-stopped
     networks:
-      - default
-      - isolated
+      default:
+      isolated:
+        ipv4_address: 172.30.254.3
+        ipv6_address: fd30:254::3
 
   egress:
     image: 6ccg/artex-egress:local
@@ -89,7 +91,9 @@ services:
     dns:
       - 172.30.255.2
     networks:
-      - isolated
+      isolated:
+        ipv4_address: 172.30.254.4
+        ipv6_address: fd30:254::4
 
 networks:
   isolated:
