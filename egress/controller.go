@@ -36,6 +36,9 @@ func Open(raw string) (*Controller, error) {
 	if err := installForwardGuard(); err != nil {
 		return nil, err
 	}
+	if err := installChannelRoutes(); err != nil {
+		return nil, err
+	}
 	dir, err := os.MkdirTemp("/run", "artex-network-")
 	if err != nil {
 		return nil, err

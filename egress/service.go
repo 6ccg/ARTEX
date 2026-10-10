@@ -9,8 +9,19 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 )
+
+func installChannelRoutes() error {
+	for _, family := range []string{"-4", "-6"} {
+		_ = exec.Command("ip", family, "rule", "del", "pref", "8998").Run()
+		if output, err := exec.Command("ip", family, "rule", "add", "pref", "8998", "fwmark", "0x8791", "lookup", "main").CombinedOutput(); err != nil {
+			return fmt.Errorf("configure independent AI/search routes: %w: %s", err, output)
+		}
+	}
+	return nil
+}
 
 func installIngressRoutes() error {
 	interfaces, err := net.Interfaces()
@@ -65,36 +76,83 @@ func installForwardGuard() error {
 }
 
 func Serve(ctx context.Context) error {
-	stored, _ := os.ReadFile("/run/artex-global-proxy")
-	core, err := Open(strings.TrimSpace(string(stored)))
+	var settings ProxySettings
+	if stored, err := os.ReadFile("/run/artex-proxies.json"); err == nil {
+		if err := json.Unmarshal(stored, &settings); err != nil {
+			return err
+		}
+	}
+	if err := SetLLMProxy(settings.LLM); err != nil {
+		return err
+	}
+	if err := SetSearchProxy(settings.Search); err != nil {
+		return err
+	}
+	core, err := Open(settings.Execution)
 	if err != nil {
 		return err
 	}
 	defer core.Close()
+	var settingsMu sync.Mutex
 	mux := http.NewServeMux()
+	modelTransport := channelTransport(&llmProxy)
+	defer modelTransport.CloseIdleConnections()
+	searchTransport := channelTransport(&searchProxy)
+	defer searchTransport.CloseIdleConnections()
+	mux.Handle("/llm", llmHandler(modelTransport))
+	mux.Handle("/independent", independentHandler(false))
+	mux.Handle("/probe", independentHandler(true))
+	mux.HandleFunc("POST /search/probe", searchProbeHandler)
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintln(w, `{"ok":true}`)
 	})
 	mux.HandleFunc("PUT /proxy", func(w http.ResponseWriter, r *http.Request) {
-		var req struct {
-			URL string `json:"url"`
-		}
+		var req proxyPatch
 		if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8192)).Decode(&req); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		if err := core.Apply(strings.TrimSpace(req.URL)); err != nil {
+		settingsMu.Lock()
+		defer settingsMu.Unlock()
+		next := settings
+		for _, field := range []struct {
+			input  *string
+			output *string
+		}{{req.Execution, &next.Execution}, {req.LLM, &next.LLM}, {req.Search, &next.Search}} {
+			if field.input != nil {
+				*field.output = strings.TrimSpace(*field.input)
+				if _, err := ParseProxy(*field.output); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+			}
+		}
+		if err := core.Apply(next.Execution); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		if err := os.WriteFile("/run/artex-global-proxy", []byte(strings.TrimSpace(req.URL)), 0o600); err != nil {
+		_ = SetLLMProxy(next.LLM)
+		_ = SetSearchProxy(next.Search)
+		modelTransport.CloseIdleConnections()
+		searchTransport.CloseIdleConnections()
+		settings = next
+		stored, _ := json.Marshal(settings)
+		if err := os.WriteFile("/run/artex-proxies.json", stored, 0o600); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 		w.WriteHeader(http.StatusNoContent)
 	})
-	server := &http.Server{Addr: ":8790", Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	searchHandler := searchProxyHandler(searchTransport, &searchProxy, ctx)
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodConnect || r.URL.IsAbs() {
+			searchHandler.ServeHTTP(w, r)
+			return
+		}
+		mux.ServeHTTP(w, r)
+	})
+	server := &http.Server{Addr: ":8790", Handler: handler, ReadHeaderTimeout: 5 * time.Second}
 	done := make(chan error, 1)
 	go func() { done <- server.ListenAndServe() }()
 	select {

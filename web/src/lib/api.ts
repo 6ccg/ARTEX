@@ -52,8 +52,6 @@ import type {
   FindingsPage,
   FindingTraffic,
   FindingTrafficDetail,
-  RepeaterSendRequest,
-  RepeaterSendResponse,
   IntelligencePage,
   IntentAsset,
   InterceptApprovalFilter,
@@ -80,6 +78,8 @@ import type {
   NotificationMeta,
   PromptVar,
   PromptVersion,
+  RepeaterSendRequest,
+  RepeaterSendResponse,
   SessionTokenUsage,
   Settings,
   Severity,
@@ -88,6 +88,7 @@ import type {
   SSProject,
   SSTask,
   Stats,
+  SystemMetrics,
   Task,
   TaskArchive,
   TaskArchivePage,
@@ -116,7 +117,6 @@ import type {
   UsageStats,
   WorkspaceFile,
   WorkspaceListing,
-  SystemMetrics,
 } from "@/lib/types";
 
 function getToken(): string | null {
@@ -369,11 +369,19 @@ export const api = {
     }),
   taskTemplates: () => get<{ templates: TaskTemplate[] }>("/task-templates").then((r) => arr(r.templates)),
   createTaskTemplate: (
-    input: Pick<TaskTemplate, "name" | "description" | "goal" | "remark" | "category_id" | "intercept_rules" | "worker_count">,
+    input: Pick<
+      TaskTemplate,
+      "name" | "description" | "goal" | "remark" | "category_id" | "intercept_rules" | "worker_count"
+    >,
   ) => post<TaskTemplate>("/task-templates", input),
   updateTaskTemplate: (
     id: number,
-    input: Partial<Pick<TaskTemplate, "name" | "description" | "goal" | "remark" | "category_id" | "intercept_rules" | "worker_count">>,
+    input: Partial<
+      Pick<
+        TaskTemplate,
+        "name" | "description" | "goal" | "remark" | "category_id" | "intercept_rules" | "worker_count"
+      >
+    >,
   ) => patch<TaskTemplate>(`/task-templates/${id}`, input),
   deleteTaskTemplate: (id: number) => del<{ deleted: number }>(`/task-templates/${id}`),
   updateTaskLLMProfiles: (id: string, llmProfileIds: number[], activeLLMProfileId?: number) =>
@@ -1064,7 +1072,6 @@ export const api = {
       provider: string;
       model: string;
       base_url: string;
-      proxy?: string;
       key_set: boolean;
       rate_per_second?: number;
       rate_per_minute?: number;
@@ -1079,15 +1086,13 @@ export const api = {
     api_key: string,
     rate_per_second = 0,
     rate_per_minute = 0,
-    proxy = "",
     context_window_k = 0,
-  ) => post("/llm", { provider, model, base_url, proxy, api_key, rate_per_second, rate_per_minute, context_window_k }),
+  ) => post("/llm", { provider, model, base_url, api_key, rate_per_second, rate_per_minute, context_window_k }),
   testLLM: (
     provider: string,
     model: string,
     base_url: string,
     api_key: string,
-    proxy = "",
     thinking_type = "",
     reasoning_effort = "",
     profile_id?: number,
@@ -1099,7 +1104,6 @@ export const api = {
       provider,
       model,
       base_url,
-      proxy,
       api_key,
       thinking_type,
       reasoning_effort,
@@ -1114,7 +1118,6 @@ export const api = {
     format: string;
     model: string;
     base_url?: string;
-    proxy?: string;
     api_key?: string; // blank on update keeps the existing key
     rate_per_second?: number;
     rate_per_minute?: number;
@@ -1138,12 +1141,11 @@ export const api = {
   // 全局重试策略（五层各自的次数+间隔）。全 0 = 全部走内置默认。
   llmRetryPolicy: () => get<LLMRetryPolicy>("/llm/retry-policy"),
   saveLLMRetryPolicy: (p: LLMRetryPolicy) => post<LLMRetryPolicy>("/llm/retry-policy", p),
-  fetchLLMModels: (provider: string, base_url: string, api_key: string, proxy = "", profile_id?: number) =>
+  fetchLLMModels: (provider: string, base_url: string, api_key: string, profile_id?: number) =>
     post<{ ok: boolean; error?: string; models?: string[] }>("/llm/models", {
       provider,
       base_url,
       api_key,
-      proxy,
       profile_id,
     }),
 

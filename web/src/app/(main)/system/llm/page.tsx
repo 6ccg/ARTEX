@@ -314,7 +314,6 @@ function ProfileSheet({
   const [format, setFormat] = React.useState<"anthropic" | "openai" | "openai-responses">("anthropic");
   const [model, setModel] = React.useState("");
   const [baseUrl, setBaseUrl] = React.useState("");
-  const [proxy, setProxy] = React.useState("");
   const [apiKey, setApiKey] = React.useState("");
   const [keyHint, setKeyHint] = React.useState("");
   const [rps, setRps] = React.useState("0");
@@ -343,7 +342,6 @@ function ProfileSheet({
     setFormat(profile?.format === "openai" || profile?.format === "openai-responses" ? profile.format : "anthropic");
     setModel(profile?.model ?? "");
     setBaseUrl(profile?.base_url ?? "");
-    setProxy(profile?.proxy ?? "");
     setRps(String(profile?.rate_per_second ?? 0));
     setRpm(String(profile?.rate_per_minute ?? 0));
     setCw(String(profile?.context_window_k ?? 0));
@@ -369,7 +367,7 @@ function ProfileSheet({
     setLoadingModels(true);
     setModels([]);
     try {
-      const r = await api.fetchLLMModels(format, baseUrl, apiKey, proxy, profileId);
+      const r = await api.fetchLLMModels(format, baseUrl, apiKey, profileId);
       if (r.ok && r.models && r.models.length > 0) {
         setModels(r.models);
         setModelsOpen(true);
@@ -395,7 +393,6 @@ function ProfileSheet({
         model,
         baseUrl,
         apiKey,
-        proxy,
         toStore(thinkingType),
         toStore(effort),
         profileId,
@@ -429,7 +426,6 @@ function ProfileSheet({
         format,
         model: model.trim(),
         base_url: baseUrl.trim(),
-        proxy: proxy.trim(),
         api_key: apiKey,
         rate_per_second: Number(rps) || 0,
         rate_per_minute: Number(rpm) || 0,
@@ -563,20 +559,9 @@ function ProfileSheet({
             />
           </div>
 
-          <div className="grid gap-2">
-            <Label htmlFor="p-proxy">代理（可选）</Label>
-            <Input
-              id="p-proxy"
-              className="font-mono"
-              placeholder="socks5://user:pass@127.0.0.1:1080 · http://127.0.0.1:8080"
-              value={proxy}
-              onChange={(e) => setProxy(e.target.value)}
-            />
-            <p className="text-muted-foreground text-xs">
-              仅 LLM 出站请求走此代理，支持 http/https/socks5，可带账号密码（如
-              socks5://user:pass@host:port，密码含特殊字符需 URL 编码）；留空表示不使用代理（直连）。
-            </p>
-          </div>
+          <p className="text-muted-foreground text-xs">
+            模型列表、连接测试和模型调用统一使用“系统设置 → AI 请求代理”，留空时直连。
+          </p>
 
           <div className="grid gap-2">
             <Label htmlFor="p-session-header">自定义会话头（可选）</Label>
@@ -931,7 +916,6 @@ export default function LLMPage() {
                       <span>
                         {p.rate_per_second}/s · {p.rate_per_minute}/min
                       </span>
-                      {p.proxy && <span className="truncate">代理 {p.proxy}</span>}
                       {p.reasoning_effort && (
                         <span>思考 {p.reasoning_effort === "off" ? "关" : p.reasoning_effort}</span>
                       )}

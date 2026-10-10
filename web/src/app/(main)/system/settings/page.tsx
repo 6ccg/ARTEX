@@ -53,6 +53,9 @@ export default function SystemSettingsPage() {
   const [savingTavilyKey, setSavingTavilyKey] = React.useState(false);
   const [proxyInput, setProxyInput] = React.useState("");
   const [savingProxy, setSavingProxy] = React.useState(false);
+  const [llmProxyInput, setLLMProxyInput] = React.useState("");
+  const [savingLLMProxy, setSavingLLMProxy] = React.useState(false);
+  const [transparentProxy, setTransparentProxy] = React.useState(false);
   const [globalProxyInput, setGlobalProxyInput] = React.useState("");
   const [savingGlobalProxy, setSavingGlobalProxy] = React.useState(false);
   const [savingEgressVisibility, setSavingEgressVisibility] = React.useState(false);
@@ -109,6 +112,8 @@ export default function SystemSettingsPage() {
     setBraveKeySet(!!s.brave_key_set);
     setTavilyKeySet(!!s.tavily_key_set);
     setProxyInput(s.web_search_proxy ?? "");
+    setLLMProxyInput(s.llm_proxy ?? "");
+    setTransparentProxy(!!s.global_proxy_transparent);
     const savedProxy = s.global_proxy ?? "";
     setGlobalProxyInput(savedProxy);
     setPyInterp(s.python_interpreter ?? "");
@@ -407,10 +412,22 @@ export default function SystemSettingsPage() {
       .setSettings({ web_search_proxy: proxyInput.trim() })
       .then((s) => {
         apply(s);
-        toast.success(proxyInput.trim() ? "已保存出口代理" : "已清除出口代理（改为直连）");
+        toast.success(proxyInput.trim() ? "已保存搜索代理" : "已清除搜索代理（改为直连）");
       })
       .catch((e) => toast.error("保存失败：" + (e as Error).message))
       .finally(() => setSavingProxy(false));
+  };
+
+  const saveLLMProxy = () => {
+    setSavingLLMProxy(true);
+    api
+      .setSettings({ llm_proxy: llmProxyInput.trim() })
+      .then((s) => {
+        apply(s);
+        toast.success(llmProxyInput.trim() ? "已保存 AI 请求代理" : "已清除 AI 请求代理（改为直连）");
+      })
+      .catch((e) => toast.error("保存失败：" + (e as Error).message))
+      .finally(() => setSavingLLMProxy(false));
   };
 
   const saveGlobalProxy = () => {
@@ -422,7 +439,7 @@ export default function SystemSettingsPage() {
         // 保存后链路变了，旧结果（尤其"尚未保存"）立刻失效。
         clearEgressReport();
         if (showEgressIp) void probeEgress().catch(() => undefined);
-        toast.success(globalProxyInput.trim() ? "已保存全局代理" : "已清除全局代理（改为直连）");
+        toast.success(globalProxyInput.trim() ? "已保存执行环境代理" : "已清除执行环境代理（改为直连）");
       })
       .catch((e) => toast.error("保存失败：" + (e as Error).message))
       .finally(() => setSavingGlobalProxy(false));
@@ -708,24 +725,34 @@ export default function SystemSettingsPage() {
             </Card>
 
             <Card
-              className={`${isSettingVisible("traffic", "全局代理 出口 IP socks5 http https") ? "" : "hidden"} mb-4 break-inside-avoid md:mb-6`}
+              className={`${isSettingVisible("traffic", "AI 执行环境 全局代理 出口 IP socks5 http https") ? "" : "hidden"} mb-4 break-inside-avoid md:mb-6`}
             >
               <CardHeader>
                 <CardTitle className="flex items-center gap-2 text-base">
                   <RadioTowerIcon className="size-4" />
-                  全局代理
+                  AI 执行环境代理（全局代理）
                 </CardTitle>
                 <CardDescription>
-                  所有 Agent 的<b>目标流量</b>经此代理出网（隐藏源 IP / 走跳板）。支持 <b>http / https / socks5</b>
-                  ，可带 <code>user:pass</code> 认证。留空=直连。
-                  <br />
-                  开启<b>流量捕获</b>时，它作为记录代理的<b>上游</b>
-                  （流量仍全量落库，再经此代理出网）；关闭捕获时，直接注入 Agent 的 bash / WebFetch
-                  出网。与网络搜索代理、LLM 代理相互独立。
-                  <br />
-                  <b>提示</b>：socks5 在<b>关闭捕获</b>时依赖各命令行工具对 <code>ALL_PROXY</code> 的支持——curl
-                  可用，python urllib 等会直接报错； 若主要用 socks5，建议开启流量捕获——此路径由 MITM
-                  亲自拨号，工具无感知、稳定生效。
+                  {transparentProxy ? (
+                    <>
+                      命令、脚本、浏览器和 WebFetch 的目标流量由透明网关统一出网，AI 请求和联网搜索使用各自的代理设置。
+                      支持 http / https / socks5 和账号密码认证。留空时直连；配置的代理失败时不回退直连。
+                      开启流量捕获时，MITM 仍负责 HTTPS 解密和记录。
+                    </>
+                  ) : (
+                    <>
+                      所有 Agent 的<b>目标流量</b>经此代理出网（隐藏源 IP / 走跳板）。支持 <b>http / https / socks5</b>
+                      ，可带 <code>user:pass</code> 认证。留空=直连。
+                      <br />
+                      开启<b>流量捕获</b>时，它作为记录代理的<b>上游</b>
+                      （流量仍全量落库，再经此代理出网）；关闭捕获时，直接注入 Agent 的 bash / WebFetch
+                      出网。与网络搜索代理、LLM 代理相互独立。
+                      <br />
+                      <b>提示</b>：socks5 在<b>关闭捕获</b>时依赖各命令行工具对 <code>ALL_PROXY</code> 的支持——curl
+                      可用，python urllib 等会直接报错； 若主要用 socks5，建议开启流量捕获——此路径由 MITM
+                      亲自拨号，工具无感知、稳定生效。
+                    </>
+                  )}
                 </CardDescription>
               </CardHeader>
               <CardContent className="flex flex-col gap-2">
@@ -1052,6 +1079,40 @@ export default function SystemSettingsPage() {
             </Card>
 
             <Card
+              className={`${isSettingVisible("network", "AI 请求代理 LLM 模型 http https socks5") ? "" : "hidden"} mb-4 break-inside-avoid md:mb-6`}
+            >
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2 text-base">
+                  <RadioTowerIcon className="size-4" />
+                  AI 请求代理
+                </CardTitle>
+                <CardDescription>
+                  用于拉取模型、连接测试和实际模型调用。支持 http / https / socks5 和账号密码认证。
+                  留空时直连；配置的代理失败时不回退直连。保存后对后续连接生效。
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="flex flex-col gap-2">
+                <Label htmlFor="llm-proxy" className="text-sm font-normal text-muted-foreground">
+                  代理地址
+                </Label>
+                <div className="flex items-center gap-2">
+                  <Input
+                    id="llm-proxy"
+                    autoComplete="off"
+                    placeholder="http://host.docker.internal:端口 或 socks5://host:端口（留空=直连）"
+                    value={llmProxyInput}
+                    disabled={!loaded || savingLLMProxy}
+                    onChange={(e) => setLLMProxyInput(e.target.value)}
+                  />
+                  <Button type="button" onClick={saveLLMProxy} disabled={!loaded || savingLLMProxy}>
+                    保存
+                  </Button>
+                </div>
+                <p className="text-muted-foreground text-xs">可在 LLM 配置中使用“拉取模型”和“连接测试”验证此出口。</p>
+              </CardContent>
+            </Card>
+
+            <Card
               className={`${isSettingVisible("network", "网络搜索 Brave Tavily DuckDuckGo DeepSeek web_search") ? "" : "hidden"} mb-4 break-inside-avoid md:mb-6`}
             >
               <CardHeader>
@@ -1119,7 +1180,7 @@ export default function SystemSettingsPage() {
                     </p>
                     <p className="text-muted-foreground text-xs leading-relaxed">
                       与其它来源不同，搜索由 <b>DeepSeek 服务端执行</b>：每次搜索会额外消耗一次模型调用（产生 Token
-                      费用），搜索请求<b>不经过上面的出口代理</b>，也<b>不计入流量留痕</b>；返回结果
+                      费用），搜索请求使用<b>搜索代理</b>，也<b>不计入流量留痕</b>；返回结果
                       <b>只有标题和链接</b>
                       （无摘要），需要正文时由 WebFetch 抓取。
                     </p>
@@ -1200,7 +1261,7 @@ export default function SystemSettingsPage() {
                 {webSearch && (
                   <div className="flex flex-col gap-2">
                     <Label htmlFor="ws-proxy" className="text-sm font-normal text-muted-foreground">
-                      出口代理（可选）
+                      搜索代理（可选）
                     </Label>
                     <div className="flex items-center gap-2">
                       <Input
@@ -1216,8 +1277,7 @@ export default function SystemSettingsPage() {
                       </Button>
                     </div>
                     <p className="text-muted-foreground text-xs">
-                      独立出口代理，仅用于访问搜索端点（VPN/SOCKS 等）。与记录流量的 MITM
-                      代理无关；网络不通时经此代理访问。
+                      联网搜索的独立出口，包含 DeepSeek 联网搜索请求。留空时直连；配置的代理失败时不回退直连。
                     </p>
                   </div>
                 )}

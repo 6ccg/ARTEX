@@ -8,6 +8,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/Autumn-27/artex/egress"
 )
 
 func TestUpdateSettingsHTTPPersistence(t *testing.T) {
@@ -97,5 +99,27 @@ func TestUpdateSettingsHTTPPersistence(t *testing.T) {
 		if m.GlobalProxy() != originalGlobal {
 			t.Fatal("update setting changed global proxy")
 		}
+	}
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/independent" || r.Header.Get("X-Artex-LLM-Upstream") != "https://api.github.com/test" {
+			t.Errorf("update bypassed independent gateway: %s", r.URL)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer gateway.Close()
+	t.Setenv("ARTEX_EGRESS_URL", gateway.URL)
+	m.network = egress.FromEnvironment()
+	client, _, err := s.updateClient()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.CloseIdleConnections()
+	resp, err := client.Get("https://api.github.com/test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("gateway status=%d", resp.StatusCode)
 	}
 }

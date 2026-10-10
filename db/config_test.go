@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"strings"
 	"testing"
 )
 
@@ -181,6 +183,47 @@ func TestConfigStores(t *testing.T) {
 		t.Fatalf("skill visibility should be cleared on delete: %+v", names2)
 	}
 	d.DeleteMCP(mid)
+}
+
+func TestActiveProfileProxyMigratesToSystemSetting(t *testing.T) {
+	if !strings.Contains(os.Getenv("ARTEX_PG_DSN"), "/artex_proxy_test") {
+		t.Skip("requires an isolated artex_proxy_test database")
+	}
+	d, err := Open(testDSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	tx, err := d.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback()
+	for _, query := range []string{
+		`ALTER TABLE llm_profiles ADD COLUMN proxy TEXT`,
+		`UPDATE llm_profiles SET is_default=false`,
+		`DELETE FROM settings WHERE key='llm_proxy'`,
+		`INSERT INTO llm_profiles(name,format,model,is_default,proxy) VALUES ('proxy-migration-test','openai','m',true,'http://proxy.example:8080')`,
+		schemaSQL,
+	} {
+		if _, err := tx.Exec(query); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var value string
+	if err := tx.QueryRow(`SELECT value FROM settings WHERE key='llm_proxy'`).Scan(&value); err != nil {
+		t.Fatal(err)
+	}
+	if value != "http://proxy.example:8080" {
+		t.Fatalf("migrated proxy=%q", value)
+	}
+	var count int
+	if err := tx.QueryRow(`SELECT count(*) FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='llm_profiles' AND column_name='proxy'`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatal("obsolete profile proxy column remains")
+	}
 }
 
 func contains(s, sub string) bool {

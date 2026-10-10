@@ -364,7 +364,6 @@ CREATE TABLE IF NOT EXISTS llm_profiles (
     name             TEXT NOT NULL UNIQUE,
     format           TEXT NOT NULL CHECK (format IN ('openai','anthropic','openai-responses')),
     base_url         TEXT,
-    proxy            TEXT,
     model            TEXT NOT NULL,
     api_key          TEXT,
     api_key_hint     TEXT,
@@ -407,6 +406,15 @@ CREATE TABLE IF NOT EXISTS llm_profiles (
     updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE UNIQUE INDEX IF NOT EXISTS uq_llm_one_default ON llm_profiles(is_default) WHERE is_default;
+-- Move the active profile's proxy to the centralized AI-request setting once.
+DO $$ BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'llm_profiles' AND column_name = 'proxy') THEN
+        INSERT INTO settings(key,value)
+            SELECT 'llm_proxy', COALESCE(proxy,'') FROM llm_profiles WHERE is_default LIMIT 1
+            ON CONFLICT(key) DO NOTHING;
+    END IF;
+END $$;
+ALTER TABLE llm_profiles DROP COLUMN IF EXISTS proxy;
 DROP TRIGGER IF EXISTS trg_llm_upd ON llm_profiles;
 CREATE TRIGGER trg_llm_upd BEFORE UPDATE ON llm_profiles
     FOR EACH ROW EXECUTE FUNCTION set_updated_at();

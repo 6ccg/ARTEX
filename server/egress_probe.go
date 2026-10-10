@@ -23,6 +23,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/Autumn-27/artex/egress"
 	"github.com/Autumn-27/artex/traffic"
 )
 
@@ -183,13 +184,24 @@ func probeEgress(ctx context.Context, proxyRaw, caPEMPath string, probes []strin
 	}
 
 	tr, caErr := buildProbeTransport(proxyURL, caPEMPath)
+	var transport http.RoundTripper = tr
+	// Requests through the local MITM already use the execution route. Direct
+	// and unsaved-proxy probes need a separate exit from the transparent gateway.
+	if os.Getenv("ARTEX_EGRESS_URL") != "" && caPEMPath == "" {
+		independent, err := egress.NewProbeTransport(proxyRaw)
+		if err != nil {
+			return egressProbeResult{Error: maskSecrets(err.Error()), Probes: []egressAttempt{}}
+		}
+		transport = independent
+	}
 
 	client := &http.Client{
-		Transport: tr,
+		Transport: transport,
 		// 比 ctx 宽 2 秒，让 ctx 先到期，错误里才是 "context deadline exceeded"。
 		Timeout:       timeout + 2*time.Second,
 		CheckRedirect: probeCheckRedirect,
 	}
+	defer client.CloseIdleConnections()
 
 	attempts := make([]egressAttempt, 0, len(probes))
 	for _, target := range probes {

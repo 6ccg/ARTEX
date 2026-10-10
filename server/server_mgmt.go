@@ -10,7 +10,6 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"net/url"
 	"os"
 	"path"
 	"path/filepath"
@@ -25,6 +24,7 @@ import (
 
 	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/db"
+	"github.com/Autumn-27/artex/egress"
 	"github.com/Autumn-27/norma/llm"
 	"github.com/Autumn-27/norma/skill"
 )
@@ -1986,7 +1986,6 @@ func (s *Server) pgListModels(w http.ResponseWriter, r *http.Request) {
 		Provider  string `json:"provider"` // "openai" | "anthropic"
 		BaseURL   string `json:"base_url"`
 		APIKey    string `json:"api_key"`
-		Proxy     string `json:"proxy"`
 		ProfileID *int64 `json:"profile_id"` // fallback: use stored key from this profile
 	}
 	if err := decode(r, &req); err != nil {
@@ -2054,12 +2053,10 @@ func (s *Server) pgListModels(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Build HTTP client with optional proxy.
-	transport := &http.Transport{}
-	if p := strings.TrimSpace(req.Proxy); p != "" {
-		if pu, err := url.Parse(p); err == nil {
-			transport.Proxy = http.ProxyURL(pu)
-		}
+	transport, err := egress.NewLLMTransport()
+	if err != nil {
+		writeJSON(w, 200, map[string]any{"ok": false, "error": err.Error()})
+		return
 	}
 	client := &http.Client{Transport: transport, Timeout: 30 * time.Second}
 

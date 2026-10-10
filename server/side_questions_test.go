@@ -29,6 +29,20 @@ type sideHTTPProvider struct {
 
 func (p *sideHTTPProvider) Stream(ctx context.Context, req llm.CompletionRequest) iter.Seq2[llm.StreamEvent, error] {
 	return func(y func(llm.StreamEvent, error) bool) {
+		if len(req.Messages) == 1 && strings.HasPrefix(req.Messages[0].Text(), "[此前摘要]\n") && p.summary != nil {
+			msg, usage, err := p.summary(ctx, req)
+			if !y(llm.StreamEvent{Type: llm.SEMessageStart, Usage: usage}, nil) {
+				return
+			}
+			if err != nil {
+				y(llm.StreamEvent{}, err)
+				return
+			}
+			if y(llm.StreamEvent{Type: llm.SETextDelta, Text: msg.Text()}, nil) {
+				y(llm.StreamEvent{Type: llm.SEMessageStop}, nil)
+			}
+			return
+		}
 		p.started <- req
 		if !y(llm.StreamEvent{Type: llm.SEMessageStart, Usage: llm.Usage{InputTokens: 19}}, nil) {
 			return
@@ -45,7 +59,7 @@ func (p *sideHTTPProvider) Stream(ctx context.Context, req llm.CompletionRequest
 	}
 }
 func (p *sideHTTPProvider) Complete(ctx context.Context, req llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {
-	if req.Thinking == "disabled" && p.summary != nil {
+	if len(req.Messages) == 1 && strings.HasPrefix(req.Messages[0].Text(), "[此前摘要]\n") && p.summary != nil {
 		msg, usage, err := p.summary(ctx, req)
 		return msg, "end_turn", usage, err
 	}

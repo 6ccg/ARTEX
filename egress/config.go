@@ -78,13 +78,8 @@ func Config(raw string, localNetworks []string) ([]byte, error) {
 		dns := config["dns"].(map[string]any)
 		dns["servers"] = []any{map[string]any{"type": "udp", "tag": "docker", "server": "127.0.0.11", "bind_interface": "lo"}}
 		dns["final"] = "docker"
-		dns["rules"] = append(dns["rules"].([]any), map[string]any{"action": "reject"})
-		inbound := config["inbounds"].([]any)[0].(map[string]any)
-		inbound["dns_mode"] = "disabled"
-		delete(inbound, "dns_address")
-		route := config["route"].(map[string]any)
-		delete(route, "default_domain_resolver")
-		route["rules"] = []any{map[string]any{"port": 53, "action": "hijack-dns"}, map[string]any{"action": "reject"}}
+		delete(dns, "rules")
+		delete(config["route"].(map[string]any), "default_domain_resolver")
 	}
 	return json.MarshalIndent(config, "", "  ")
 }

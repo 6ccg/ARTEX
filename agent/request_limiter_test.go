@@ -192,7 +192,8 @@ func TestProviderRateLimitCountsHTTPRetries(t *testing.T) {
 						return &http.Response{StatusCode: 500, Header: make(http.Header),
 							Body: io.NopCloser(strings.NewReader(`{"error":{"message":"temporary error"}}`))}, nil
 					})}
-					cfg := ConfigFrom(format, "test-model", "http://example.invalid", "test-key", "")
+					cfg := ConfigFrom(format, "test-model", "http://example.invalid", "test-key")
+					cfg.Stream = streaming
 					cfg.RatePerSecond, cfg.RatePerMinute = 1, 2
 					cfg.Retry.ConnectInterval = time.Millisecond
 					prov, err := cfg.newProvider(client, &RequestLimiter{})
@@ -229,7 +230,7 @@ func TestProviderRebuildPreservesRateLimit(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		l := &RequestLimiter{}
 		var sent []time.Time
-		cfg := ConfigFrom("openai", "test-model", "http://example.invalid", "test-key", "")
+		cfg := ConfigFrom("openai", "test-model", "http://example.invalid", "test-key")
 		cfg.RatePerMinute = 1
 		cfg.Retry.ConnectAttempts = -1
 		for i := 0; i < 2; i++ {
@@ -268,7 +269,8 @@ func TestProviderRateLimitSuccessfulRequests(t *testing.T) {
 					return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(
 						`{"choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`))}, nil
 				})}
-				cfg := ConfigFrom("openai", "test-model", "http://example.invalid", "test-key", "")
+				cfg := ConfigFrom("openai", "test-model", "http://example.invalid", "test-key")
+				cfg.Stream = false
 				cfg.RatePerSecond, cfg.RatePerMinute = tc.rps, tc.rpm
 				prov, err := cfg.newProvider(client, &RequestLimiter{})
 				if err != nil {
@@ -307,7 +309,8 @@ func TestProviderRateLimitCountsEmptyResponseRetries(t *testing.T) {
 					}
 					return &http.Response{StatusCode: 200, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
 				})}
-				cfg := ConfigFrom("openai", "test-model", "http://example.invalid", "test-key", "")
+				cfg := ConfigFrom("openai", "test-model", "http://example.invalid", "test-key")
+				cfg.Stream = streaming
 				cfg.RatePerMinute = 1
 				cfg.Retry.EmptyInterval = time.Millisecond
 				prov, err := cfg.newProvider(client, &RequestLimiter{})
@@ -406,7 +409,7 @@ func TestProviderRateLimitPublicFactory(t *testing.T) {
 					io.WriteString(w, `{"error":{"message":"temporary error"}}`)
 				}))
 				defer upstream.Close()
-				cfg := ConfigFrom(format, "test-model", upstream.URL, "test-key", "")
+				cfg := ConfigFrom(format, "test-model", upstream.URL, "test-key")
 				cfg.RatePerSecond, cfg.RatePerMinute = 1, 1
 				cfg.Retry.ConnectAttempts = -1
 				limiter := &RequestLimiter{}

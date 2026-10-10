@@ -14,12 +14,12 @@ import (
 	"io"
 	"log"
 	"net/http"
-	"net/url"
 	"os"
 	"regexp"
 	"strings"
 	"time"
 
+	"github.com/Autumn-27/artex/egress"
 	"github.com/Autumn-27/artex/llmrec"
 	"github.com/Autumn-27/norma/agentcore"
 	"github.com/Autumn-27/norma/compaction"
@@ -34,10 +34,6 @@ type Config struct {
 	BaseURL string
 	APIKey  string
 	Model   string
-	// Proxy routes all LLM requests through the given proxy URL (http/https/socks5,
-	// optionally with user:pass@ credentials). Empty means direct — it does NOT
-	// fall back to the standard *_PROXY environment variables.
-	Proxy string
 	// RatePerSecond / RatePerMinute cap the shared request rate across ALL agents
 	// using the provider (0 = that window unlimited).
 	RatePerSecond float64
@@ -140,7 +136,6 @@ func compactionConfig(windowTokens int) *compaction.Config {
 //	ARTEX_LLM_PROVIDER = anthropic|openai (default: inferred from keys)
 //	ARTEX_LLM_MODEL    = model id        (default: per provider)
 //	ARTEX_LLM_BASE_URL = endpoint        (optional)
-//	ARTEX_LLM_PROXY    = proxy URL        (optional; http/https/socks5)
 //	ANTHROPIC_API_KEY / OPENAI_API_KEY         = credentials
 func FromEnv() (Config, bool) {
 	prov := os.Getenv("ARTEX_LLM_PROVIDER")
@@ -161,7 +156,6 @@ func FromEnv() (Config, bool) {
 	c := Config{
 		BaseURL: os.Getenv("ARTEX_LLM_BASE_URL"),
 		Model:   os.Getenv("ARTEX_LLM_MODEL"),
-		Proxy:   strings.TrimSpace(os.Getenv("ARTEX_LLM_PROXY")),
 		// 默认流式;ARTEX_LLM_STREAM=false/0/off 显式关闭走非流式。
 		Stream: !isFalsy(os.Getenv("ARTEX_LLM_STREAM")),
 	}
@@ -195,12 +189,11 @@ func FromEnv() (Config, bool) {
 // anthropic; model defaults per provider). Inputs are trimmed and the base URL
 // is normalized to the API base the provider expects (the provider appends the
 // endpoint path itself), so a full endpoint URL is tolerated.
-func ConfigFrom(provider, model, baseURL, apiKey, proxy string) Config {
+func ConfigFrom(provider, model, baseURL, apiKey string) Config {
 	c := Config{
 		Model:   strings.TrimSpace(model),
 		BaseURL: strings.TrimRight(strings.TrimSpace(baseURL), "/"),
 		APIKey:  strings.TrimSpace(apiKey),
-		Proxy:   strings.TrimSpace(proxy),
 		Stream:  true, // 默认流式;调用方按 profile 覆盖
 	}
 	switch strings.TrimSpace(provider) {
@@ -259,7 +252,7 @@ func (c Config) NewProvider() (llm.Provider, error) {
 // NewProviderWithLimiter reuses quota history across provider rebuilds. Callers
 // sharing a profile must retain the same limiter outside their provider cache.
 func (c Config) NewProviderWithLimiter(limiter *RequestLimiter) (llm.Provider, error) {
-	client, err := quotaAwareHTTPClient(c.Proxy, c.SessionHeaderKey)
+	client, err := quotaAwareHTTPClient(c.SessionHeaderKey)
 	if err != nil {
 		return nil, err
 	}
@@ -415,24 +408,10 @@ func requestBodySnapshot(req *http.Request) string {
 	return string(b)
 }
 
-func quotaAwareHTTPClient(proxy, sessionHeaderKey string) (*http.Client, error) {
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	proxy = strings.TrimSpace(proxy)
-	if proxy == "" {
-		transport.Proxy = nil // 留空=直连,不回退 HTTP_PROXY/HTTPS_PROXY 环境变量
-	} else {
-		proxyURL, err := url.Parse(proxy)
-		if err != nil {
-			return nil, fmt.Errorf("llm: invalid proxy %q: %w", proxy, err)
-		}
-		switch proxyURL.Scheme {
-		case "http", "https", "socks5":
-		case "":
-			return nil, fmt.Errorf("llm: proxy %q missing scheme (use http://, https:// or socks5://)", proxy)
-		default:
-			return nil, fmt.Errorf("llm: unsupported proxy scheme %q (use http, https or socks5)", proxyURL.Scheme)
-		}
-		transport.Proxy = http.ProxyURL(proxyURL)
+func quotaAwareHTTPClient(sessionHeaderKey string) (*http.Client, error) {
+	transport, err := egress.NewLLMTransport()
+	if err != nil {
+		return nil, err
 	}
 	return &http.Client{Transport: quotaAwareTransport{base: transport, sessionHeaderKey: strings.TrimSpace(sessionHeaderKey)}}, nil
 }

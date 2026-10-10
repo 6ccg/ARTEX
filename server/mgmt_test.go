@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"strings"
 	"testing"
 )
 
@@ -98,6 +100,59 @@ func TestMgmtAPI(t *testing.T) {
 	do("DELETE", "/api/mcp/"+itoaTest(mid), nil)
 	m.pg.Exec(`DELETE FROM agent_prompts WHERE agent_id=$1`, ag.ID)
 	m.pg.Exec(`UPDATE agents SET current_prompt_id=NULL WHERE id=$1`, ag.ID)
+}
+
+func TestProxySettingsPartialUpdate(t *testing.T) {
+	if !strings.Contains(os.Getenv("ARTEX_PG_DSN"), "/artex_proxy_test") {
+		t.Skip("requires an isolated artex_proxy_test database")
+	}
+	t.Setenv("ARTEX_EGRESS_URL", "")
+	m, err := NewManager(t.TempDir(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer m.Close()
+	for _, key := range []string{settingGlobalProxy, settingLLMProxy, settingWebSearchProxy, settingWebSearchOn, settingWebSearchBackend} {
+		value, exists, err := m.pg.GetSetting(key)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer func() {
+			if exists {
+				_ = m.pg.SetSetting(key, value)
+			} else {
+				_, _ = m.pg.Exec(`DELETE FROM settings WHERE key=$1`, key)
+			}
+		}()
+	}
+	s := &Server{m: m}
+	expected := map[string]string{
+		settingGlobalProxy:    "http://127.0.0.1:18081",
+		settingLLMProxy:       "https://127.0.0.1:18083",
+		settingWebSearchProxy: "socks5://127.0.0.1:18082",
+	}
+	put := func(body []byte, status int) {
+		t.Helper()
+		rec := httptest.NewRecorder()
+		s.putSettings(rec, httptest.NewRequest(http.MethodPut, "/api/settings", bytes.NewReader(body)))
+		if rec.Code != status {
+			t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+		}
+		for key, want := range expected {
+			value, exists, err := m.pg.GetSetting(key)
+			if err != nil || !exists || value != want {
+				t.Fatalf("%s=%q exists=%v err=%v, want %q", key, value, exists, err, want)
+			}
+		}
+	}
+	body, err := json.Marshal(expected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	put(body, http.StatusOK)
+	expected[settingLLMProxy] = ""
+	put([]byte(`{"llm_proxy":""}`), http.StatusOK)
+	put([]byte(`{"llm_proxy":"invalid://host","web_search_proxy":""}`), http.StatusBadRequest)
 }
 
 func itoaTest(n int64) string {
