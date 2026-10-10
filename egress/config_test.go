@@ -5,7 +5,7 @@ import (
 	"testing"
 )
 
-func TestUnconfiguredGatewayRejectsExternalTraffic(t *testing.T) {
+func TestUnconfiguredGatewayUsesDirectTrafficAndDockerDNS(t *testing.T) {
 	data, err := Config("", []string{"172.30.254.0/24"})
 	if err != nil {
 		t.Fatal(err)
@@ -15,12 +15,16 @@ func TestUnconfiguredGatewayRejectsExternalTraffic(t *testing.T) {
 		t.Fatal(err)
 	}
 	dns := config["dns"].(map[string]any)
-	if len(dns["servers"].([]any)) != 1 || dns["servers"].([]any)[0].(map[string]any)["server"] != "127.0.0.11" {
-		t.Fatal("unconfigured gateway has external DNS")
+	if dns["final"] != "docker" || len(dns["servers"].([]any)) != 1 || dns["servers"].([]any)[0].(map[string]any)["server"] != "127.0.0.11" {
+		t.Fatal("unconfigured gateway must resolve domains through Docker DNS")
 	}
-	rules := config["route"].(map[string]any)["rules"].([]any)
-	if len(rules) != 2 || rules[1].(map[string]any)["action"] != "reject" {
-		t.Fatal("unconfigured gateway allows routing")
+	if _, exists := dns["rules"]; exists {
+		t.Fatal("unconfigured gateway must not reject external DNS")
+	}
+	route := config["route"].(map[string]any)
+	rules := route["rules"].([]any)
+	if route["final"] != "direct" || len(rules) != 1 || rules[0].(map[string]any)["action"] != "hijack-dns" {
+		t.Fatal("unconfigured gateway must allow direct traffic and handle DNS")
 	}
 }
 

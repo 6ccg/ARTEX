@@ -244,6 +244,7 @@ type Manager struct {
 	// Docker sends all application traffic through the mandatory gateway.
 	// Local runs use the same URL through the tool proxy and MITM upstream.
 	globalProxy string
+	llmProxy    string
 	network     *egress.Client
 }
 
@@ -256,9 +257,10 @@ const (
 	settingBraveKey            = "brave_search_api_key"
 	settingTavilyKey           = "tavily_search_api_key"
 	settingWebSearchProxy      = "web_search_proxy"
+	settingLLMProxy            = "llm_proxy"
 	// settingGlobalProxy is the global egress proxy for all target traffic
 	// (http/https/socks5). Empty = direct. Distinct from web_search_proxy (which
-	// only routes the search backend) and the per-profile LLM proxy.
+	// only routes the search backend) and llm_proxy (model requests).
 	settingGlobalProxy = "global_proxy"
 	settingWorkers     = "workers"
 	settingLLMRecord   = "llm_record"
@@ -375,11 +377,27 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 	}
 	m := &Manager{dir: dir, pg: pg, assets: pg.Assets(), tasks: map[string]*Task{}, interceptor: intercept.New(pg)}
 	m.network = egress.FromEnvironment()
-	if v, ok, _ := pg.GetSetting(settingGlobalProxy); ok {
-		m.globalProxy = strings.TrimSpace(v)
+	for _, field := range []struct {
+		key   string
+		value *string
+	}{{settingGlobalProxy, &m.globalProxy}, {settingLLMProxy, &m.llmProxy}, {settingWebSearchProxy, &m.webSearchProxy}} {
+		v, _, err := pg.GetSetting(field.key)
+		if err != nil {
+			pg.Close()
+			return nil, err
+		}
+		*field.value = strings.TrimSpace(v)
+	}
+	if err := egress.SetLLMProxy(m.llmProxy); err != nil {
+		pg.Close()
+		return nil, err
+	}
+	if err := egress.SetSearchProxy(m.webSearchProxy); err != nil {
+		pg.Close()
+		return nil, err
 	}
 	if m.network != nil {
-		if err := m.network.Apply(m.globalProxy); err != nil {
+		if err := m.network.ApplyAll(egress.ProxySettings{Execution: m.globalProxy, LLM: m.llmProxy, Search: m.webSearchProxy}); err != nil {
 			pg.Close()
 			return nil, err
 		}
@@ -435,9 +453,6 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 	}
 	if v, ok, _ := pg.GetSetting(settingTavilyKey); ok {
 		m.tavilyKey = v
-	}
-	if v, ok, _ := pg.GetSetting(settingWebSearchProxy); ok {
-		m.webSearchProxy = v
 	}
 	if m.traffic != nil {
 		if err := m.traffic.SetUpstreamProxy(m.ApplicationProxy()); err != nil {
@@ -568,6 +583,7 @@ func (m *Manager) WebSearchOpts() agent.WebSearchOpts {
 	if backend == deepSeekWebSearchBackend {
 		o.DeepSeekBaseURL, o.DeepSeekAPIKey, o.DeepSeekModel = m.deepSeekSearchCreds()
 	}
+	o.Proxy = egress.SearchProxyURL(o.Proxy)
 	return o
 }
 
@@ -623,9 +639,22 @@ func (m *Manager) SetWebSearch(on bool, backend string, braveKey, tavilyKey, pro
 	}
 	if proxy != nil {
 		p := strings.TrimSpace(*proxy)
-		if err := m.pg.SetSetting(settingWebSearchProxy, p); err != nil {
+		if _, err := egress.ParseProxy(p); err != nil {
 			return err
 		}
+		if m.network != nil {
+			if err := m.network.ApplySearch(p); err != nil {
+				return err
+			}
+		}
+		if err := m.pg.SetSetting(settingWebSearchProxy, p); err != nil {
+			if m.network != nil {
+				_, _, _, _, old := m.WebSearch()
+				_ = m.network.ApplySearch(old)
+			}
+			return err
+		}
+		_ = egress.SetSearchProxy(p)
 		m.mu.Lock()
 		m.webSearchProxy = p
 		m.mu.Unlock()
@@ -785,8 +814,37 @@ func (m *Manager) GlobalProxy() string {
 	return m.globalProxy
 }
 
+func (m *Manager) LLMProxy() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.llmProxy
+}
+
+func (m *Manager) SetLLMProxy(raw string) error {
+	raw = strings.TrimSpace(raw)
+	if _, err := egress.ParseProxy(raw); err != nil {
+		return err
+	}
+	if m.network != nil {
+		if err := m.network.ApplyLLM(raw); err != nil {
+			return err
+		}
+	}
+	if err := m.pg.SetSetting(settingLLMProxy, raw); err != nil {
+		if m.network != nil {
+			_ = m.network.ApplyLLM(m.LLMProxy())
+		}
+		return err
+	}
+	_ = egress.SetLLMProxy(raw)
+	m.mu.Lock()
+	m.llmProxy = raw
+	m.mu.Unlock()
+	return nil
+}
+
 // SetGlobalProxy applies the URL to the gateway before saving it. An empty URL
-// blocks external Docker traffic; local runs use direct connections instead.
+// restores direct connections; a configured proxy has no direct fallback.
 func (m *Manager) SetGlobalProxy(raw string) error {
 	raw = strings.TrimSpace(raw)
 	if raw != "" {

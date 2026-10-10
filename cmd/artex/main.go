@@ -52,6 +52,10 @@ func main() {
 }
 
 func run() int {
+	// Proxy behavior is controlled by system settings, never implicit HTTP_* env.
+	direct := http.DefaultTransport.(*http.Transport).Clone()
+	direct.Proxy = nil
+	http.DefaultTransport = direct
 	var (
 		addr          = flag.String("addr", ":8787", "HTTP listen address")
 		dataDir       = flag.String("data", filepath.Join(config.BaseDir(), "data"), "data directory for SQLite stores (default: data/ next to the executable)")

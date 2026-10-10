@@ -21,11 +21,17 @@ git fetch upstream
 
 上游目前是最终版本的源码备份，继承的 Docker 镜像地址不代表本分支构建；本分支可按下方本地构建方式使用。
 
-### Docker 强制全局代理
+### 三条独立代理链路
 
-Docker 部署使用应用容器和独立的 `egress` 网关。全局代理仍在后台“系统设置”填写；Agent 无需代理参数，清空环境变量或使用 `--noproxy` 也不能直连。代理为空或不可用时阻断外网。内部数据库与管理访问保留。
+“系统设置”统一管理三条独立出口，均支持 HTTP、HTTPS、SOCKS5 及账号密码认证；每条留空时各自直连，不继承其他代理，已配置代理失败时不回退直连。
 
-MITM 流量捕获保持独立开关，继续负责 HTTPS 解密、记录与流量查询；它的出网也经过网关。SOCKS5 出口的 UDP 能力取决于服务器，HTTP/HTTPS 出口只支持 TCP；DNS 通过代理内的 HTTPS 转发。SOCKS/HTTP 不能承载原始 SYN 扫描或 ICMP。
+- **AI 请求代理**：拉取模型、连接测试及实际模型调用。
+- **搜索代理**：联网搜索工具，包含 DeepSeek 联网搜索；测试使用当前表单值，不修改已保存配置。
+- **AI 执行环境代理**：原“全局代理”，用于命令、脚本、浏览器及 WebFetch 等目标流量。
+
+Docker 部署使用应用容器和独立的 `egress` 网关，需要 Docker Compose 2.33.1 或更新版本。AI 请求和搜索有独立出口，不会被执行环境代理接管。数据库与管理端连接保留。非 Docker 部署的执行环境代理依赖各工具对代理参数和环境变量的支持。
+
+MITM 流量捕获保持独立开关，继续负责 HTTPS 解密、记录与流量查询；它的出网也经过网关。SOCKS5 出口的 UDP 能力取决于服务器，HTTP/HTTPS 出口只支持 TCP；配置代理时 DNS 通过代理内的 HTTPS 转发，未配置时使用 Docker DNS。SOCKS/HTTP 不能承载原始 SYN 扫描或 ICMP。
 
 源码构建（准备好 Go 与 Node）：
 
@@ -186,7 +192,7 @@ ARTEX_TARGETS=linux/amd64,windows/amd64 ./build.sh --release
 - **更新会中断正在运行的任务**——更新即重启，请在空闲时进行。
 - **开发构建不给更新**：版本号是 `dev` 或 `git describe` 带后缀时禁用，避免正式版覆盖掉本地调试的二进制。
 - **Docker 下只换程序、不换镜像**：镜像里的 playwright / nmap 等工具链不会跟着升级，且 `docker compose up -d` 重建容器后会退回镜像自带的版本。要连镜像一起升级仍请用 `docker compose pull artex && docker compose up -d artex`。
-- 访问 GitHub 需要代理时，在同一页面配置**全局代理**即可，更新链路会走它。更新只从 GitHub 域名下载并强制 HTTPS。
+- 访问 GitHub 需要代理时，在同一页面配置**AI 执行环境代理**即可，更新链路会走它。更新只从 GitHub 域名下载并强制 HTTPS。
 
 ### 方式二：一键更新脚本
 
@@ -247,7 +253,7 @@ CGO_ENABLED=0 go build -tags embedui -o artex ./cmd/artex
 ```
 
 **LLM**：`export ANTHROPIC_API_KEY=sk-...`（或 `OPENAI_API_KEY`），也可在 UI 的「LLM 配置」页填写。
-可选：`ARTEX_LLM_PROVIDER` / `ARTEX_LLM_MODEL` / `ARTEX_LLM_BASE_URL` / `ARTEX_LLM_PROXY`。
+可选：`ARTEX_LLM_PROVIDER` / `ARTEX_LLM_MODEL` / `ARTEX_LLM_BASE_URL`。代理统一在后台“系统设置”管理。
 
 **并发**：每个任务的 work agent 数在「系统设置」里配置（默认 3）。
 

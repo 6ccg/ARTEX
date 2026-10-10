@@ -923,7 +923,9 @@ export interface Settings {
   tavily_search_api_key?: string;
   // 独立出口代理(http/https/socks5)，用于访问搜索端点；与记录流量的 MITM 代理无关。空=直连。
   web_search_proxy?: string;
-  // Docker 使用强制透明网关；未配置代理时阻断外网。本地运行仍使用工具代理。
+  // 模型列表、连接测试及实际模型调用的独立代理；留空直连。
+  llm_proxy?: string;
+  // AI 执行环境代理（原全局代理）；Docker 使用透明网关，留空直连。
   global_proxy?: string;
   global_proxy_transparent?: boolean;
   python_interpreter?: string; // 自定义脚本工具的 python 解释器路径(空=运行时检测)
@@ -1028,7 +1030,6 @@ export interface LLMProfile {
   name: string;
   format: "openai" | "anthropic" | "openai-responses";
   base_url?: string;
-  proxy?: string;
   model: string;
   api_key_hint?: string;
   rate_per_second: number;

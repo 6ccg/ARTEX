@@ -590,7 +590,6 @@ type LLMProfileDTO struct {
 	Name            string  `json:"name"`
 	Format          string  `json:"format"`
 	BaseURL         string  `json:"base_url,omitempty"`
-	Proxy           string  `json:"proxy,omitempty"`
 	Model           string  `json:"model"`
 	APIKeyHint      string  `json:"api_key_hint,omitempty"`
 	RatePerSecond   float64 `json:"rate_per_second"`
@@ -625,7 +624,6 @@ func llmProfileDTO(p *db.LLMProfile) LLMProfileDTO {
 		Name:             p.Name,
 		Format:           p.Format,
 		BaseURL:          p.BaseURL,
-		Proxy:            p.Proxy,
 		Model:            p.Model,
 		APIKeyHint:       p.APIKeyHint,
 		RatePerSecond:    p.RatePerSecond,

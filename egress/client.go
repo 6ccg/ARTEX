@@ -25,7 +25,23 @@ func FromEnvironment() *Client {
 }
 
 func (c *Client) Apply(raw string) error {
-	body, _ := json.Marshal(map[string]string{"url": raw})
+	return c.apply(proxyPatch{Execution: &raw})
+}
+
+func (c *Client) ApplyLLM(raw string) error {
+	return c.apply(proxyPatch{LLM: &raw})
+}
+
+func (c *Client) ApplySearch(raw string) error {
+	return c.apply(proxyPatch{Search: &raw})
+}
+
+func (c *Client) ApplyAll(settings ProxySettings) error {
+	return c.apply(proxyPatch{Execution: &settings.Execution, LLM: &settings.LLM, Search: &settings.Search})
+}
+
+func (c *Client) apply(patch proxyPatch) error {
+	body, _ := json.Marshal(patch)
 	req, err := http.NewRequest(http.MethodPut, c.base+"/proxy", bytes.NewReader(body))
 	if err != nil {
 		return err

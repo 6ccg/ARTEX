@@ -532,7 +532,7 @@ func TestRerunAdmissionFailureRestoresIntentState(t *testing.T) {
 	}
 }
 
-func TestTaskLLMResolutionRejectsInvalidExplicitProfile(t *testing.T) {
+func TestTaskLLMResolutionRejectsInvalidGatewayConfiguration(t *testing.T) {
 	m, err := NewManager(t.TempDir(), "")
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) - skipping", err)
@@ -544,7 +544,6 @@ func TestTaskLLMResolutionRejectsInvalidExplicitProfile(t *testing.T) {
 		Format: "openai",
 		Model:  "invalid-model",
 		APIKey: "test-key",
-		Proxy:  "invalid-proxy-without-scheme",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -561,6 +560,7 @@ func TestTaskLLMResolutionRejectsInvalidExplicitProfile(t *testing.T) {
 		_ = m.pg.DeleteProfile(profileID)
 	}()
 
+	t.Setenv("ARTEX_EGRESS_URL", "://invalid")
 	s := &Server{m: m, provByProfile: map[int64]*provEntry{}}
 	got, err := s.resolveTaskRoleLLM(task, "worker")
 	if err != nil {
