@@ -53,6 +53,33 @@ func TestGlobalProxyPreservesAuthenticationAndRoutesDNS(t *testing.T) {
 	}
 }
 
+func TestProxyHostnameResolver(t *testing.T) {
+	for _, test := range []struct {
+		host     string
+		resolver string
+	}{
+		{"host.docker.internal", "docker"},
+		{"gateway.docker.internal", "docker"},
+		{"HOST.DOCKER.INTERNAL.", "docker"},
+		{"proxy.example", "bootstrap"},
+	} {
+		t.Run(test.host, func(t *testing.T) {
+			data, err := Config("socks5://"+test.host+":1080", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var config map[string]any
+			if err := json.Unmarshal(data, &config); err != nil {
+				t.Fatal(err)
+			}
+			out := config["outbounds"].([]any)[1].(map[string]any)
+			if out["domain_resolver"] != test.resolver {
+				t.Fatalf("proxy resolver = %v, want %s", out["domain_resolver"], test.resolver)
+			}
+		})
+	}
+}
+
 func TestProxyURLValidation(t *testing.T) {
 	for _, raw := range []string{"http://proxy.example", "https://user:pass@proxy.example", "socks5://[::1]:1080"} {
 		if _, err := Config(raw, nil); err != nil {

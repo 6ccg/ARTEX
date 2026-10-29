@@ -8,6 +8,7 @@ import (
 	"net/netip"
 	"net/url"
 	"strconv"
+	"strings"
 )
 
 const (
@@ -16,6 +17,7 @@ const (
 )
 
 func Config(raw string, localNetworks []string) ([]byte, error) {
+	dockerDomains := []string{"postgres", "egress", "host.docker.internal", "gateway.docker.internal"}
 	final := "direct"
 	outbounds := []map[string]any{{"type": "direct", "tag": "direct"}}
 	excluded := append([]string{"127.0.0.0/8", "::1/128"}, localNetworks...)
@@ -26,6 +28,14 @@ func Config(raw string, localNetworks []string) ([]byte, error) {
 		}
 		port := 1080
 		out := map[string]any{"tag": "global", "server": u.Hostname(), "domain_resolver": "bootstrap"}
+		// An explicit outbound resolver bypasses DNS rules, so Docker-only
+		// proxy names must use Docker DNS instead of public bootstrap DNS.
+		for _, domain := range dockerDomains {
+			if strings.EqualFold(strings.TrimSuffix(u.Hostname(), "."), domain) {
+				out["domain_resolver"] = "docker"
+				break
+			}
+		}
 		switch u.Scheme {
 		case "socks5":
 			out["type"], out["version"] = "socks", "5"
@@ -63,7 +73,7 @@ func Config(raw string, localNetworks []string) ([]byte, error) {
 	config := map[string]any{
 		"log": map[string]any{"level": "info", "disabled": false},
 		"dns": map[string]any{"servers": []any{doh("remote", final), doh("bootstrap", "direct"), map[string]any{"type": "udp", "tag": "docker", "server": "127.0.0.11", "bind_interface": "lo"}}, "final": "remote", "strategy": "prefer_ipv4",
-			"rules": []any{map[string]any{"domain": []string{"postgres", "egress", "host.docker.internal", "gateway.docker.internal"}, "action": "route", "server": "docker"}}},
+			"rules": []any{map[string]any{"domain": dockerDomains, "action": "route", "server": "docker"}}},
 		"inbounds": []any{map[string]any{
 			"type": "tun", "tag": "container", "interface_name": InterfaceName,
 			"address":    []string{"172.30.255.1/30", "fdfe:dcba:9876::1/126"},
