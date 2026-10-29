@@ -9,6 +9,8 @@
 #   cp -r web/out server/webui/dist
 #   CGO_ENABLED=0 GOARCH=amd64 go build -tags embedui -o dist/amd64/artex ./cmd/artex
 #   docker build -t artex:local .
+FROM node:22-bookworm-slim AS node-runtime
+
 FROM ghcr.io/sagernet/sing-box:v1.14.3 AS egress
 ARG TARGETARCH
 RUN apk add --no-cache iproute2
@@ -18,14 +20,14 @@ ENTRYPOINT ["/usr/local/bin/artex", "-egress-service"]
 FROM python:3.12-slim-bookworm AS artex
 ARG TARGETARCH
 # 常用工具：ripgrep / curl / vim，加一批 recon 常备件（按需增删）。
-# Node 从 NodeSource 装 22.x，与前端构建使用的主版本一致。
+# 从官方镜像复制 Node 22，避免 NodeSource 安装失败后回退到 Debian 的旧版本。
+COPY --from=node-runtime /usr/local/ /usr/local/
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates ripgrep curl wget vim git jq unzip \
       tzdata \
       dnsutils iputils-ping netcat-openbsd inetutils-telnet whois nmap \
-    && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
-    && apt-get install -y --no-install-recommends nodejs \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && node --version && npm --version
 # 预装 Playwright MCP 与 CLI（全局），运行时不再 npx 联网下载。
 # @playwright/mcp：browser MCP 直接 `npx @playwright/mcp`（已全局装好，无需 -y/@latest）。
 # @playwright/cli：提供 playwright-cli，装完顺带 --help 验证可执行。
