@@ -129,6 +129,10 @@ docker compose up -d          # 拉取 ruoji6/artex 镜像 + postgres
 # → http://localhost:8787
 ```
 
+Docker 部署需在「系统设置 → AI 执行环境代理」配置出口代理；Docker Desktop 上的宿主机 FlClash 可填 `socks5://host.docker.internal:37890`（按实际端口调整）。命令、浏览器、模型和搜索请求均经过 egress 的该代理；未配置或连接失败时阻断出网，不回退直连。AI 请求代理和搜索代理是此出口之后的额外代理。后台保留直连 IP 对照检测，其控制接口不向 Agent 开放。
+
+「允许 IPv6 出网」默认关闭，关闭时拦截 IPv6 目标连接和 AAAA 解析；开启后仍经全局代理出网。顶栏和代理测试分别显示 IPv4、IPv6 出口；IPv6 探测使用仅支持 IPv6 的回显服务，失败不会回退成 IPv4 结果。
+
 镜像已含常用工具（ripgrep/curl/vim/npm/nmap…）；`./skills` 与 `./data` 以绑定挂载持久化。
 
 `.env` 中默认 `ARTEX_IMAGE=ruoji6/artex`，`ARTEX_TAG=latest` 使用最新镜像，也可固定为 `v0.3.17`（完整镜像地址 `ruoji6/artex:v0.3.17`）。镜像支持 `linux/amd64` 和 `linux/arm64`，Docker 会自动选择与宿主机匹配的架构，ARM64 Kali 无需自行编译。初次部署请修改 `POSTGRES_PASSWORD`；运行服务无需配置 Docker Hub 发布 Token。

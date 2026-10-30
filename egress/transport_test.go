@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -48,7 +49,7 @@ func TestLLMGatewayPreservesRequestAndStreamsResponse(t *testing.T) {
 	}))
 	t.Cleanup(upstream.Close)
 	var store proxyStore
-	transport := channelTransport(&store)
+	transport := testChannelTransport(&store)
 	t.Cleanup(transport.CloseIdleConnections)
 	gateway := httptest.NewServer(llmHandler(transport))
 	t.Cleanup(gateway.Close)
@@ -58,6 +59,7 @@ func TestLLMGatewayPreservesRequestAndStreamsResponse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	unmarkTestCarrier(modelTransport)
 	client := http.Client{Transport: modelTransport, Timeout: 3 * time.Second}
 	req, err := http.NewRequest(http.MethodPost, upstream.URL+"/v1/messages?stream=1", strings.NewReader(`{}`))
 	if err != nil {
@@ -99,6 +101,7 @@ func TestIndependentGatewayUsesRequestedProxy(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		unmarkTestCarrier(transport)
 		client := &http.Client{Transport: transport}
 		resp, err := client.Get(upstream.URL + "/ip")
 		if err != nil {
@@ -116,6 +119,7 @@ func TestIndependentGatewayUsesRequestedProxy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	unmarkTestCarrier(transport)
 	client := &http.Client{Transport: transport}
 	defer client.CloseIdleConnections()
 	resp, err := client.Get(upstream.URL)
@@ -140,6 +144,7 @@ func TestDirectGatewayProbeBlocksLoopback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	unmarkTestCarrier(transport)
 	client := &http.Client{Transport: transport}
 	defer client.CloseIdleConnections()
 	resp, err := client.Get(upstream.URL)
@@ -168,7 +173,7 @@ func TestSearchHTTPSProxyChain(t *testing.T) {
 	}
 	gateway := newSearchTestGateway(t, &configured)
 	t.Setenv("ARTEX_EGRESS_URL", gateway.URL)
-	u, err := url.Parse(SearchProxyURL(""))
+	u, err := url.Parse(gateway.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,12 +183,19 @@ func TestSearchHTTPSProxyChain(t *testing.T) {
 	assertResponse(t, &http.Client{Transport: transport, Timeout: 3 * time.Second}, upstream.URL+"/search", http.StatusOK, "ok")
 }
 
+func TestSearchUsesDataListener(t *testing.T) {
+	t.Setenv("ARTEX_EGRESS_URL", "http://172.30.254.2:8790")
+	if got := SearchProxyURL(""); got != "http://172.30.254.2:8791" {
+		t.Fatalf("search must not expose the backend control listener: %s", got)
+	}
+}
+
 func TestProxyChannelsAreIndependentAndFailWithoutFallback(t *testing.T) {
 	var directCalls atomic.Int32
 	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { directCalls.Add(1); io.WriteString(w, "direct") }))
 	t.Cleanup(origin.Close)
 	var ai, search proxyStore
-	aiTransport := channelTransport(&ai)
+	aiTransport := testChannelTransport(&ai)
 	t.Cleanup(aiTransport.CloseIdleConnections)
 	gateway := httptest.NewServer(llmHandler(aiTransport))
 	t.Cleanup(gateway.Close)
@@ -192,6 +204,7 @@ func TestProxyChannelsAreIndependentAndFailWithoutFallback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	unmarkTestCarrier(modelTransport)
 	model := &http.Client{Transport: modelTransport, Timeout: 3 * time.Second}
 	searchGateway := newSearchTestGateway(t, &search)
 	searchURL, err := url.Parse(searchGateway.URL)
@@ -250,12 +263,24 @@ func TestProxyChannelsAreIndependentAndFailWithoutFallback(t *testing.T) {
 	}
 }
 
+// HTTP forwarding tests run without Linux privileges. The socket mark and
+// capability boundary have a separate real-Linux subprocess test.
+func unmarkTestCarrier(transport http.RoundTripper) {
+	transport.(*llmTransport).base.(*http.Transport).DialContext = (&net.Dialer{}).DialContext
+}
+
+func testChannelTransport(store *proxyStore) *http.Transport {
+	transport := channelTransport(store)
+	transport.DialContext = (&net.Dialer{}).DialContext
+	return transport
+}
+
 func newSearchTestGateway(t *testing.T, store *proxyStore) *httptest.Server {
 	t.Helper()
-	transport := channelTransport(store)
+	transport := testChannelTransport(store)
 	t.Cleanup(transport.CloseIdleConnections)
 	ctx, cancel := context.WithCancel(context.Background())
-	server := httptest.NewServer(searchProxyHandler(transport, store, ctx))
+	server := httptest.NewServer(searchProxyHandler(transport, store, ctx, &net.Dialer{}))
 	t.Cleanup(server.Close)
 	t.Cleanup(cancel)
 	return server

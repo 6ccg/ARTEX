@@ -31,7 +31,10 @@ import (
 var defaultEgressProbes = []string{
 	"https://api.ipify.org?format=json", // 返回 {"ip":"1.2.3.4"}
 	"https://ifconfig.me/ip",            // 返回纯文本 1.2.3.4
+	"https://ipv4.icanhazip.com",        // IPv4-only fallback
 }
+
+var ipv6EgressProbes = []string{"https://api6.ipify.org?format=json"}
 
 // validateProbeURL 只放行指向"非本机、非链路本地"的绝对 http(s) 地址。
 //
@@ -165,6 +168,10 @@ type egressReport struct {
 
 // probeEgress 不碰数据库、不碰 Server，所以测试里可以直接调、完全离线。
 func probeEgress(ctx context.Context, proxyRaw, caPEMPath string, probes []string, timeout time.Duration) egressProbeResult {
+	return probeEgressFamily(ctx, proxyRaw, caPEMPath, probes, timeout, 0)
+}
+
+func probeEgressFamily(ctx context.Context, proxyRaw, caPEMPath string, probes []string, timeout time.Duration, family int) egressProbeResult {
 	start := time.Now()
 
 	// 复用 traffic 包的校验，保证"什么算合法代理"全项目只有一处定义。
@@ -209,6 +216,12 @@ func probeEgress(ctx context.Context, proxyRaw, caPEMPath string, probes []strin
 		t0 := time.Now()
 		ip, err := probeOne(reqCtx, client, target)
 		cancel()
+		if err == nil && family != 0 {
+			parsed := net.ParseIP(ip)
+			if parsed == nil || (family == 4) != (parsed.To4() != nil) {
+				err = fmt.Errorf("探测服务未返回 IPv%d 地址", family)
+			}
+		}
 
 		a := egressAttempt{URL: maskSecrets(target), LatencyMS: time.Since(t0).Milliseconds()}
 		if err != nil {
@@ -387,6 +400,13 @@ func (s *Server) testEgressProxy(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 
 	configuredProxy := strings.TrimSpace(req.GlobalProxy)
+	allowIPv6 := s.m.EgressAllowIPv6()
+	// Start IPv6 independently so failed IPv4 probes cannot consume its deadline.
+	var v6Result chan egressProbeResult
+	if s.m.TransparentProxy() && allowIPv6 && configuredProxy != "" {
+		v6Result = make(chan egressProbeResult, 1)
+		go func() { v6Result <- probeEgressIPv6(ctx, configuredProxy, ipv6EgressProbes) }()
+	}
 	rep := egressReport{
 		Capture:    capture,
 		Configured: maskSecrets(configuredProxy),
@@ -396,7 +416,7 @@ func (s *Server) testEgressProxy(w http.ResponseWriter, r *http.Request) {
 	rep.Checks = append(rep.Checks, egressCheck{
 		Key:    "direct",
 		Label:  "① 直连 IP（不经过代理）",
-		Result: probeEgress(ctx, "", "", probes, 10*time.Second),
+		Result: probeEgressFamily(ctx, "", "", probes, 10*time.Second, 4),
 	})
 
 	if configuredProxy != "" {
@@ -410,7 +430,7 @@ func (s *Server) testEgressProxy(w http.ResponseWriter, r *http.Request) {
 			Label: "② 经全局代理的出口 IP",
 			// Path 是实际探测地址（经 MITM 时是 8788），排查时看这个。
 			Path:   maskSecrets(probeAddr),
-			Result: probeEgress(ctx, probeAddr, probeCA, probes, timeout),
+			Result: probeEgressFamily(ctx, probeAddr, probeCA, probes, timeout, 4),
 		})
 	} else {
 		skipReason := "输入框为空，未配置代理"
@@ -427,9 +447,25 @@ func (s *Server) testEgressProxy(w http.ResponseWriter, r *http.Request) {
 		})
 	}
 
+	if s.m.TransparentProxy() {
+		v6 := egressCheck{Key: "global_ipv6", Label: "③ 全局代理 IPv6 出口 IP", Path: maskSecrets(configuredProxy)}
+		switch {
+		case !allowIPv6:
+			v6.Skipped, v6.SkipReason = true, "IPv6 出网已关闭"
+		case configuredProxy == "":
+			v6.Skipped, v6.SkipReason = true, "未配置全局代理"
+		default:
+			v6.Result = <-v6Result
+		}
+		rep.Checks = append(rep.Checks, v6)
+	}
 	rep.OK = judgeEgress(rep)
 	rep.Warnings = egressWarnings(rep, pending, savedProxy)
 	writeJSON(w, 200, rep)
+}
+
+func probeEgressIPv6(ctx context.Context, proxy string, probes []string) egressProbeResult {
+	return probeEgressFamily(ctx, proxy, "", probes, 10*time.Second, 6)
 }
 
 // normalizeProxy 只归一写法，不做校验；空串和解析失败原样返回。
@@ -439,10 +475,17 @@ func normalizeProxy(raw string) string {
 
 // judgeEgress 以 ② 为准；② 被跳过才看 ①。不能"任一行成功就算成功"。
 func judgeEgress(rep egressReport) bool {
+	hasProxy := false
 	for _, c := range rep.Checks {
-		if c.Key == "global" && !c.Skipped {
-			return c.Result.OK
+		if (c.Key == "global" || c.Key == "global_ipv6") && !c.Skipped {
+			hasProxy = true
+			if c.Result.OK {
+				return true
+			}
 		}
+	}
+	if hasProxy {
+		return false
 	}
 	for _, c := range rep.Checks {
 		if c.Key == "direct" {
@@ -461,10 +504,17 @@ func egressWarnings(rep egressReport, pending bool, savedProxy string) []string 
 	if pending {
 		switch {
 		case rep.Configured == "":
-			out = append(out, "此地址尚未保存，Agent 当前仍使用 "+safeSavedProxy+"。保存后即改为直连。")
+			if os.Getenv("ARTEX_EGRESS_URL") != "" {
+				out = append(out, "此地址尚未保存，Agent 当前仍使用 "+safeSavedProxy+"。保存空地址后将阻断出网。")
+			} else {
+				out = append(out, "此地址尚未保存，Agent 当前仍使用 "+safeSavedProxy+"。保存后即改为直连。")
+			}
 		case savedProxy == "":
-			out = append(out, "此地址尚未保存，Agent 当前仍为直连。"+
-				"上方结果对应输入框中的值，保存后生效。")
+			if os.Getenv("ARTEX_EGRESS_URL") != "" {
+				out = append(out, "此地址尚未保存，Agent 当前出网已阻断。上方结果对应输入框中的值，保存后生效。")
+			} else {
+				out = append(out, "此地址尚未保存，Agent 当前仍为直连。上方结果对应输入框中的值，保存后生效。")
+			}
 		default:
 			out = append(out, "此地址尚未保存，Agent 当前仍使用 "+safeSavedProxy+
 				"。上方结果对应输入框中的值，保存后生效。")
@@ -486,7 +536,7 @@ func egressWarnings(rep egressReport, pending bool, savedProxy string) []string 
 	}
 
 	// W2 看已保存值；只在 ② 通过时提示——没通的话"这里通不代表"本身就不成立。
-	if !rep.Capture && proxyOK && strings.HasPrefix(strings.ToLower(savedProxy), "socks5") {
+	if os.Getenv("ARTEX_EGRESS_URL") == "" && !rep.Capture && proxyOK && strings.HasPrefix(strings.ToLower(savedProxy), "socks5") {
 		out = append(out, "当前是「关闭捕获 + socks5」：本测试用的是 Go 客户端（一定遵守代理），"+
 			"但 agent 的工具不一定——curl 能走，python urllib 会直接报错。"+
 			"所以这里通不代表工具都能走；要稳定生效请开启流量捕获（由 MITM 亲自拨号）。")
@@ -500,7 +550,7 @@ func egressWarnings(rep egressReport, pending bool, savedProxy string) []string 
 	}
 
 	// W4 同样看已保存值，否则会和 W1 自相矛盾。
-	if rep.Capture && savedProxy == "" {
+	if os.Getenv("ARTEX_EGRESS_URL") == "" && rep.Capture && savedProxy == "" {
 		out = append(out, "已开启流量捕获，但全局代理为空：捕获只负责记录，出口仍是直连。")
 	}
 

@@ -16,7 +16,7 @@ const (
 	DNSAddress    = "172.30.255.2"
 )
 
-func Config(raw string, localNetworks []string) ([]byte, error) {
+func Config(raw string, localNetworks []string, allowIPv6 bool) ([]byte, error) {
 	dockerDomains := []string{"postgres", "egress", "host.docker.internal", "gateway.docker.internal"}
 	final := "direct"
 	outbounds := []map[string]any{{"type": "direct", "tag": "direct"}}
@@ -27,7 +27,7 @@ func Config(raw string, localNetworks []string) ([]byte, error) {
 			return nil, fmt.Errorf("invalid global proxy URL")
 		}
 		port := 1080
-		out := map[string]any{"tag": "global", "server": u.Hostname(), "domain_resolver": "bootstrap"}
+		out := map[string]any{"tag": "global", "server": u.Hostname(), "domain_resolver": "bootstrap", "routing_mark": llmDirectMark}
 		// An explicit outbound resolver bypasses DNS rules, so Docker-only
 		// proxy names must use Docker DNS instead of public bootstrap DNS.
 		for _, domain := range dockerDomains {
@@ -84,11 +84,19 @@ func Config(raw string, localNetworks []string) ([]byte, error) {
 		"route": map[string]any{"auto_detect_interface": true, "default_domain_resolver": "remote", "final": final,
 			"rules": []any{map[string]any{"port": 53, "action": "hijack-dns"}}},
 	}
+	if !allowIPv6 {
+		dns := config["dns"].(map[string]any)
+		dns["strategy"] = "ipv4_only"
+		dns["rules"] = append(dns["rules"].([]any), map[string]any{"query_type": "AAAA", "action": "reject"})
+		route := config["route"].(map[string]any)
+		route["rules"] = append(route["rules"].([]any), map[string]any{"ip_version": 6, "action": "reject"})
+	}
 	if raw == "" {
 		dns := config["dns"].(map[string]any)
 		dns["servers"] = []any{map[string]any{"type": "udp", "tag": "docker", "server": "127.0.0.11", "bind_interface": "lo"}}
 		dns["final"] = "docker"
-		delete(dns, "rules")
+		dns["rules"] = []any{map[string]any{"domain": dockerDomains, "action": "route", "server": "docker"}, map[string]any{"action": "reject"}}
+		config["route"].(map[string]any)["rules"] = []any{map[string]any{"port": 53, "action": "hijack-dns"}, map[string]any{"action": "reject"}}
 		delete(config["route"].(map[string]any), "default_domain_resolver")
 	}
 	return json.MarshalIndent(config, "", "  ")

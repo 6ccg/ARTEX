@@ -1003,6 +1003,7 @@ export interface Settings {
   // AI 执行环境代理；Docker 使用透明网关，留空直连。
   global_proxy?: string;
   global_proxy_transparent?: boolean;
+  egress_allow_ipv6?: boolean;
   show_egress_ip?: boolean; // 在顶栏显示直连 / 全局代理出口 IP；默认关闭
   python_interpreter?: string; // 自定义脚本工具的 python 解释器路径(空=运行时检测)
   workers?: number; // 并发工作 agent 数(默认3)；对之后启动的任务生效
@@ -1916,7 +1917,7 @@ export interface EgressProbeResult {
 
 // 报告里的一行：① 直连 / ② 经全局代理。
 export interface EgressCheck {
-  key: "direct" | "global";
+  key: "direct" | "global" | "global_ipv6";
   label: string;
   path?: string;
   skipped?: boolean;

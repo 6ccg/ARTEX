@@ -26,21 +26,25 @@ export function EgressIpProvider({ children }: { children: React.ReactNode }) {
   const [report, setReport] = React.useState<EgressReport | null>(null);
   const [error, setError] = React.useState<string | null>(null);
   const [isLoading, setIsLoading] = React.useState(false);
+  const probeSequence = React.useRef(0);
 
   const probeForProxy = React.useCallback(async (globalProxy: string) => {
+    const sequence = ++probeSequence.current;
     setError(null);
     setIsLoading(true);
     try {
       const nextReport = await api.testEgressProxy({ global_proxy: globalProxy });
-      setReport(nextReport);
+      if (sequence === probeSequence.current) setReport(nextReport);
       return nextReport;
     } catch (cause) {
-      setReport(null);
       const message = cause instanceof Error ? cause.message : "未知错误";
-      setError(message);
+      if (sequence === probeSequence.current) {
+        setReport(null);
+        setError(message);
+      }
       throw cause;
     } finally {
-      setIsLoading(false);
+      if (sequence === probeSequence.current) setIsLoading(false);
     }
   }, []);
 
@@ -69,6 +73,8 @@ export function EgressIpProvider({ children }: { children: React.ReactNode }) {
       if (nextEnabled) {
         await probeForProxy(nextProxy);
       } else {
+        probeSequence.current += 1;
+        setIsLoading(false);
         setReport(null);
         setError(null);
       }
@@ -102,7 +108,7 @@ export function useEgressIp() {
 
 function checkMessage(check: EgressCheck | undefined) {
   if (!check) return "未返回结果";
-  if (check.skipped) return "未配置";
+  if (check.skipped) return check.skip_reason ?? "未配置";
   if (check.result.ok) return check.result.exit_ip || "已连通";
   return "探测失败";
 }
@@ -123,6 +129,7 @@ export function EgressIpNavbar() {
 
   const direct = report?.checks.find((check) => check.key === "direct");
   const global = report?.checks.find((check) => check.key === "global");
+  const ipv6 = report?.checks.find((check) => check.key === "global_ipv6");
   return (
     <div className="flex min-w-0 items-center justify-center gap-2 text-xs" role="status" aria-live="polite">
       <Globe2Icon className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
@@ -136,8 +143,9 @@ export function EgressIpNavbar() {
         </span>
       ) : report ? (
         <div className="flex min-w-0 items-center gap-3">
-          <IpValue label="直连 IP" check={direct} />
-          <IpValue label="全局代理 IP" check={global} />
+          <IpValue label="直连对照 IP" check={direct} />
+          <IpValue label="代理 IPv4" check={global} />
+          {ipv6 && <IpValue label="代理 IPv6" check={ipv6} />}
         </div>
       ) : (
         <span className="text-muted-foreground">出口 IP 暂无结果</span>

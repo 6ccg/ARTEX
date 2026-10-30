@@ -21,15 +21,20 @@ import (
 	netproxy "golang.org/x/net/proxy"
 )
 
-// SearchProxyURL keeps SDK search traffic out of the execution environment's TUN.
+// SearchProxyURL gives SDK search a data-only listener. Its upstream sockets
+// follow the execution TUN; backend-only control routes are on another port.
 func SearchProxyURL(raw string) string {
 	if gateway := strings.TrimRight(os.Getenv("ARTEX_EGRESS_URL"), "/"); gateway != "" {
-		return gateway
+		u, err := url.Parse(gateway)
+		if err == nil {
+			u.Host = net.JoinHostPort(u.Hostname(), "8791")
+			return u.String()
+		}
 	}
 	return raw
 }
 
-func searchProxyHandler(transport http.RoundTripper, store *proxyStore, lifecycle context.Context) http.Handler {
+func searchProxyHandler(transport http.RoundTripper, store *proxyStore, lifecycle context.Context, dialer *net.Dialer) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodConnect {
 			if !r.URL.IsAbs() || (r.URL.Scheme != "http" && r.URL.Scheme != "https") {
@@ -42,7 +47,7 @@ func searchProxyHandler(transport http.RoundTripper, store *proxyStore, lifecycl
 			forward.ServeHTTP(w, r)
 			return
 		}
-		remote, err := dialSearchTarget(r.Context(), r.Host, store.value.Load())
+		remote, err := dialSearchTarget(r.Context(), r.Host, store.value.Load(), dialer)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadGateway)
 			return
@@ -73,11 +78,10 @@ func searchProxyHandler(transport http.RoundTripper, store *proxyStore, lifecycl
 	})
 }
 
-func dialSearchTarget(ctx context.Context, target string, proxyURL *url.URL) (net.Conn, error) {
+func dialSearchTarget(ctx context.Context, target string, proxyURL *url.URL, dialer *net.Dialer) (net.Conn, error) {
 	if _, _, err := net.SplitHostPort(target); err != nil {
 		return nil, fmt.Errorf("invalid search CONNECT target")
 	}
-	dialer := channelDialer()
 	if proxyURL == nil {
 		return dialer.DialContext(ctx, "tcp", target)
 	}
@@ -164,7 +168,7 @@ func searchProbeHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	transport := channelTransport(&store)
+	transport := independentTransport(&store)
 	defer transport.CloseIdleConnections()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -173,7 +177,7 @@ func searchProbeHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	probeCtx, cancel := context.WithCancel(r.Context())
 	defer cancel()
-	server := &http.Server{Handler: searchProxyHandler(transport, &store, probeCtx), ReadHeaderTimeout: 5 * time.Second}
+	server := &http.Server{Handler: searchProxyHandler(transport, &store, probeCtx, channelDialer()), ReadHeaderTimeout: 5 * time.Second}
 	go server.Serve(listener)
 	defer server.Close()
 	req.Config.Proxy = "http://" + listener.Addr().String()

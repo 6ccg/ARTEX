@@ -58,6 +58,8 @@ export default function SystemSettingsPage() {
   const [transparentProxy, setTransparentProxy] = React.useState(false);
   const [globalProxyInput, setGlobalProxyInput] = React.useState("");
   const [savingGlobalProxy, setSavingGlobalProxy] = React.useState(false);
+  const [allowIPv6, setAllowIPv6] = React.useState(false);
+  const [savingIPv6, setSavingIPv6] = React.useState(false);
   const [savingEgressVisibility, setSavingEgressVisibility] = React.useState(false);
   // 出口探测：测一次真实请求，拿到"直连 / 经全局代理"两条出口 IP。
   const [egressTesting, setEgressTesting] = React.useState(false);
@@ -114,6 +116,7 @@ export default function SystemSettingsPage() {
     setProxyInput(s.web_search_proxy ?? "");
     setLLMProxyInput(s.llm_proxy ?? "");
     setTransparentProxy(!!s.global_proxy_transparent);
+    setAllowIPv6(!!s.egress_allow_ipv6);
     const savedProxy = s.global_proxy ?? "";
     setGlobalProxyInput(savedProxy);
     setPyInterp(s.python_interpreter ?? "");
@@ -439,10 +442,25 @@ export default function SystemSettingsPage() {
         // 保存后链路变了，旧结果（尤其"尚未保存"）立刻失效。
         clearEgressReport();
         if (showEgressIp) void probeEgress().catch(() => undefined);
-        toast.success(globalProxyInput.trim() ? "已保存执行环境代理" : "已清除执行环境代理（改为直连）");
+        toast.success(globalProxyInput.trim() ? "已保存执行环境代理" : transparentProxy ? "已清除执行环境代理（阻断出网）" : "已清除执行环境代理（改为直连）");
       })
       .catch((e) => toast.error("保存失败：" + (e as Error).message))
       .finally(() => setSavingGlobalProxy(false));
+  };
+
+  const toggleIPv6 = async (allowed: boolean) => {
+	setSavingIPv6(true);
+	try {
+	  const settings = await api.setSettings({ egress_allow_ipv6: allowed });
+	  setAllowIPv6(!!settings.egress_allow_ipv6);
+	  clearEgressReport();
+	  if (showEgressIp) void probeEgress().catch(() => undefined);
+	  toast.success(allowed ? "已允许 IPv6 通过全局代理出网" : "已关闭 IPv6 出网");
+	} catch (error) {
+	  toast.error("保存失败：" + (error as Error).message);
+	} finally {
+	  setSavingIPv6(false);
+	}
   };
 
   // 测表单里当前的值，不要求先保存；后端返回直连 / 经代理两条。
@@ -462,7 +480,7 @@ export default function SystemSettingsPage() {
         if (rep.ok) {
           // 先取 ②：直连那行永远成功，先命中它会把直连 IP 当成出口报出去。
           const hit =
-            rep.checks.find((c) => c.key === "global" && !c.skipped && c.result.ok) ??
+            rep.checks.find((c) => c.key !== "direct" && !c.skipped && c.result.ok) ??
             rep.checks.find((c) => !c.skipped && c.result.ok);
           toast.success(hit?.result.exit_ip ? `出口 IP ${hit.result.exit_ip}` : "探测通过");
         } else {
@@ -725,7 +743,7 @@ export default function SystemSettingsPage() {
             </Card>
 
             <Card
-              className={`${isSettingVisible("traffic", "AI 执行环境 全局代理 出口 IP socks5 http https") ? "" : "hidden"} mb-4 break-inside-avoid md:mb-6`}
+              className={`${isSettingVisible("traffic", "AI 执行环境 全局代理 出口 IP IPv4 IPv6 出网 socks5 http https") ? "" : "hidden"} mb-4 break-inside-avoid md:mb-6`}
             >
               <CardHeader>
                 <CardTitle className="flex items-center gap-2 text-base">
@@ -735,8 +753,8 @@ export default function SystemSettingsPage() {
                 <CardDescription>
                   {transparentProxy ? (
                     <>
-                      命令、脚本、浏览器和 WebFetch 的目标流量由透明网关统一出网，AI 请求和联网搜索使用各自的代理设置。
-                      支持 http / https / socks5 和账号密码认证。留空时直连；配置的代理失败时不回退直连。
+                      命令、脚本、浏览器、WebFetch、AI 请求和联网搜索均通过此代理出网。
+                      支持 http / https / socks5 和账号密码认证。留空时阻断出网；代理失败时报错，不回退直连。
                       开启流量捕获时，MITM 仍负责 HTTPS 解密和记录。
                     </>
                   ) : (
@@ -764,7 +782,7 @@ export default function SystemSettingsPage() {
                     id="global-proxy"
                     className="min-w-0 flex-1"
                     autoComplete="off"
-                    placeholder="socks5://user:pass@host:1080 或 http://host:port（留空=直连）"
+                    placeholder={`socks5://host.docker.internal:37890 或 http://host:port（留空=${transparentProxy ? "阻断出网" : "直连"}）`}
                     value={globalProxyInput}
                     disabled={!loaded || savingGlobalProxy}
                     onChange={(e) => {
@@ -782,7 +800,7 @@ export default function SystemSettingsPage() {
                   </Button>
                 </div>
                 <p className="text-muted-foreground text-xs">
-                  {globalProxyInput.trim() ? "已配置 · 所有目标流量经此代理出网" : "未配置 · 目标流量直连出网"}
+                  {globalProxyInput.trim() ? "已配置 · 所有目标流量经此代理出网" : transparentProxy ? "未配置 · Agent 出网已阻断" : "未配置 · 目标流量直连出网"}
                 </p>
                 <div className="flex items-center justify-between gap-4 rounded-md border px-3 py-2">
                   <div className="min-w-0">
@@ -800,11 +818,23 @@ export default function SystemSettingsPage() {
                     onCheckedChange={(checked) => void toggleEgressVisibility(checked)}
                   />
                 </div>
+                {transparentProxy && (
+                  <div className="flex items-center justify-between gap-4 rounded-md border px-3 py-2">
+                    <div className="min-w-0">
+                      <Label htmlFor="egress-allow-ipv6" className="text-sm font-normal">允许 IPv6 出网</Label>
+                      <p className="text-muted-foreground text-xs">
+                        默认关闭：阻断 IPv6 目标连接，仅解析 IPv4。开启后 IPv6 仍必须经过全局代理，代理需支持 IPv6。
+                      </p>
+                    </div>
+                    <Switch id="egress-allow-ipv6" checked={allowIPv6} disabled={!loaded || savingIPv6} onCheckedChange={(allowed) => void toggleIPv6(allowed)} />
+                  </div>
+                )}
                 {/* 紧贴结果区：用户看两行时正好需要它。细节放文档。 */}
                 <p className="text-muted-foreground text-xs leading-relaxed">
                   点<b>测试</b>会访问 IP 回显服务（默认 <code>api.ipify.org</code>，失败自动换 <code>ifconfig.me</code>
                   ），它返回"这个请求从哪个 IP 来"。 ① 是不走代理时的 IP，② 是经全局代理出网时的
                   IP。改完不用先保存，直接测。
+                  {transparentProxy && "直连检测仅供后台对照，Agent 无法使用该通道。"}
                 </p>
                 {/* 内网里公网回显不可达，两行都会失败——不是代理坏了。 */}
                 <details className="text-xs">
@@ -1088,7 +1118,8 @@ export default function SystemSettingsPage() {
                 </CardTitle>
                 <CardDescription>
                   用于拉取模型、连接测试和实际模型调用。支持 http / https / socks5 和账号密码认证。
-                  留空时直连；配置的代理失败时不回退直连。保存后对后续连接生效。
+                  {transparentProxy ? "留空时仅经过全局代理；填写后在全局代理之后再连接此代理。" : "留空时直连。"}
+                  配置的代理失败时不回退直连。保存后对后续连接生效。
                 </CardDescription>
               </CardHeader>
               <CardContent className="flex flex-col gap-2">
@@ -1099,7 +1130,7 @@ export default function SystemSettingsPage() {
                   <Input
                     id="llm-proxy"
                     autoComplete="off"
-                    placeholder="http://host.docker.internal:端口 或 socks5://host:端口（留空=直连）"
+                    placeholder={`http://host:端口 或 socks5://host:端口（留空=${transparentProxy ? "使用全局代理" : "直连"}）`}
                     value={llmProxyInput}
                     disabled={!loaded || savingLLMProxy}
                     onChange={(e) => setLLMProxyInput(e.target.value)}
@@ -1277,7 +1308,9 @@ export default function SystemSettingsPage() {
                       </Button>
                     </div>
                     <p className="text-muted-foreground text-xs">
-                      联网搜索的独立出口，包含 DeepSeek 联网搜索请求。留空时直连；配置的代理失败时不回退直连。
+                      包含 DeepSeek 联网搜索请求。
+                      {transparentProxy ? "留空时仅经过全局代理；填写后在全局代理之后再连接此代理。" : "留空时直连。"}
+                      配置的代理失败时不回退直连。
                     </p>
                   </div>
                 )}

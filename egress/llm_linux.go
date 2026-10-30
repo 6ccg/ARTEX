@@ -9,8 +9,6 @@ import (
 	"time"
 )
 
-const llmDirectMark = 0x8791
-
 func channelDialer() *net.Dialer {
 	control := func(_, address string, raw syscall.RawConn) error {
 		host, _, _ := net.SplitHostPort(address)
@@ -29,6 +27,16 @@ func channelDialer() *net.Dialer {
 	dnsDialer := &net.Dialer{Timeout: 5 * time.Second, Control: control}
 	dialer.Resolver = &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
 		return dnsDialer.DialContext(ctx, network, address)
+	}}
+	return dialer
+}
+
+func executionDialer() *net.Dialer {
+	control := func(_, _ string, raw syscall.RawConn) error { return setSocketMark(raw, executionMark) }
+	dialer := &net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second, Control: control}
+	dnsDialer := &net.Dialer{Timeout: 5 * time.Second, Control: control}
+	dialer.Resolver = &net.Resolver{PreferGo: true, Dial: func(ctx context.Context, network, _ string) (net.Conn, error) {
+		return dnsDialer.DialContext(ctx, network, net.JoinHostPort(DNSAddress, "53"))
 	}}
 	return dialer
 }

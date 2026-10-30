@@ -31,7 +31,18 @@ table inet artex_app {
     type route hook output priority -150;
     tcp sport 8787 ct state established meta mark set 0x8790
   }
+  chain backend_only {
+    type filter hook output priority 0;
+    meta mark 0x8792 accept
+    ip daddr 172.30.254.2 tcp dport 8790 reject with tcp reset
+    ip6 daddr fd30:254::2 tcp dport 8790 reject with tcp reset
+    ip daddr { 127.0.0.0/8, 172.30.254.4 } tcp dport 8787 reject with tcp reset
+    ip6 daddr { ::1, fd30:254::4 } tcp dport 8787 reject with tcp reset
+    ip daddr 172.30.254.3 tcp dport 5432 reject with tcp reset
+    ip6 daddr fd30:254::3 tcp dport 5432 reject with tcp reset
+  }
 }
 EOF
 printf 'nameserver 172.30.255.2\noptions timeout:2 attempts:2\n' > /etc/resolv.conf
-exec setpriv --no-new-privs --bounding-set=-all --inh-caps=-all --ambient-caps=-all /app/start.sh "$@"
+# The Go backend drops these from every child's capability sets at startup.
+exec setpriv --no-new-privs --bounding-set=-all,+net_raw,+setpcap --inh-caps=-all,+net_raw,+setpcap --ambient-caps=-all,+net_raw,+setpcap /app/start.sh "$@"

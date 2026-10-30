@@ -80,6 +80,10 @@ func run() int {
 		}
 		return 0
 	}
+	if err := egress.LockdownBackend(); err != nil {
+		log.Print(err)
+		return 1
+	}
 
 	// hand the build version to the server package so GET /api/health can report it
 	// to the frontend top bar.

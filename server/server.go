@@ -3530,6 +3530,7 @@ func (s *Server) settingsPayload() map[string]any {
 		"llm_proxy":                            s.m.LLMProxy(),    // AI 请求独立出口，空=直连
 		"global_proxy":                         s.m.GlobalProxy(), // 全局出口代理(http/https/socks5)，所有目标流量走它，空=直连
 		"global_proxy_transparent":             s.m.TransparentProxy(),
+		"egress_allow_ipv6":                    s.m.EgressAllowIPv6(),
 		"show_egress_ip":                       s.m.pg.GetBool(settingShowEgressIP, false),
 		"python_interpreter":                   strings.TrimSpace(pyStored), // 用户/自动设的值(空=用运行时检测)
 		"workers":                              s.m.Workers(),               // 并发工作 agent 数(默认3)；对之后启动的任务生效
@@ -3612,8 +3613,9 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		TavilyKey        *string       `json:"tavily_search_api_key"`
 		WebSearchProxy   *string       `json:"web_search_proxy"` // 独立出口代理(http/https/socks5)；null=不改，""=清空
 		LLMProxy         *string       `json:"llm_proxy"`
-		GlobalProxy      *string       `json:"global_proxy"`       // 全局出口代理(http/https/socks5)；null=不改，""=清空(直连)
-		ShowEgressIP     *bool         `json:"show_egress_ip"`     // 在顶栏显示直连/全局代理出口 IP；默认关
+		GlobalProxy      *string       `json:"global_proxy"`   // 全局出口代理(http/https/socks5)；null=不改，""=清空(直连)
+		ShowEgressIP     *bool         `json:"show_egress_ip"` // 在顶栏显示直连/全局代理出口 IP；默认关
+		EgressAllowIPv6  *bool         `json:"egress_allow_ipv6"`
 		PythonInterp     *string       `json:"python_interpreter"` // 自定义脚本工具的 python 解释器路径
 		Workers          *int          `json:"workers"`            // 并发工作 agent 数(>0)；对之后启动的任务生效
 		WorkerPools      *[]WorkerPool `json:"worker_pools"`
@@ -3851,6 +3853,12 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 	if req.ShowEgressIP != nil {
 		if err := s.m.pg.SetBool(settingShowEgressIP, *req.ShowEgressIP); err != nil {
 			writeErr(w, 500, err.Error())
+			return
+		}
+	}
+	if req.EgressAllowIPv6 != nil {
+		if err := s.m.SetEgressAllowIPv6(*req.EgressAllowIPv6); err != nil {
+			writeErr(w, 400, err.Error())
 			return
 		}
 	}

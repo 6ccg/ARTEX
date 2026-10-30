@@ -87,6 +87,8 @@ services:
     cap_add:
       - NET_ADMIN
       - SETPCAP
+      # Backend control sockets only; removed from all Agent subprocesses.
+      - NET_RAW
     sysctls:
       net.ipv4.conf.all.route_localnet: "1"
     dns:

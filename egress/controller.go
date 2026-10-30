@@ -14,18 +14,19 @@ import (
 )
 
 type Controller struct {
-	mu     sync.Mutex
-	binary string
-	dir    string
-	cmd    *exec.Cmd
-	ready  chan struct{}
-	done   chan error
-	closed bool
-	raw    string
+	mu        sync.Mutex
+	binary    string
+	dir       string
+	cmd       *exec.Cmd
+	ready     chan struct{}
+	done      chan error
+	closed    bool
+	raw       string
+	allowIPv6 bool
 }
 
 // Open starts the core inside the dedicated gateway container.
-func Open(raw string) (*Controller, error) {
+func Open(raw string, allowIPv6 bool) (*Controller, error) {
 	binary, err := exec.LookPath("sing-box")
 	if err != nil {
 		return nil, err
@@ -44,27 +45,27 @@ func Open(raw string) (*Controller, error) {
 		return nil, err
 	}
 	c := &Controller{binary: binary, dir: dir, ready: make(chan struct{}, 1), done: make(chan error, 1)}
-	if err := c.Apply(raw); err != nil {
+	if err := c.Apply(raw, allowIPv6); err != nil {
 		c.Close()
 		return nil, err
 	}
 	return c, nil
 }
 
-func (c *Controller) Apply(raw string) error {
+func (c *Controller) Apply(raw string, allowIPv6 bool) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.closed {
 		return fmt.Errorf("transparent proxy has stopped")
 	}
-	if c.cmd != nil && c.raw == raw {
+	if c.cmd != nil && c.raw == raw && c.allowIPv6 == allowIPv6 {
 		return nil
 	}
 	networks, err := localNetworks()
 	if err != nil {
 		return err
 	}
-	config, err := Config(raw, networks)
+	config, err := Config(raw, networks, allowIPv6)
 	if err != nil {
 		return err
 	}
@@ -132,6 +133,7 @@ func (c *Controller) Apply(raw string) error {
 			return err
 		}
 		c.raw = raw
+		c.allowIPv6 = allowIPv6
 		return nil
 	case err := <-c.done:
 		return fmt.Errorf("transparent proxy failed to start: %v", err)

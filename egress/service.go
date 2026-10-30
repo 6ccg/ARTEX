@@ -60,6 +60,13 @@ func installForwardGuard() error {
     iifname "artex-tun" accept
     oifname "artex-tun" accept
   }
+  chain control_guard {
+    type filter hook output priority 0;
+    meta mark 0x8791 accept
+    # Runtime data channels may never use a connected-network/loopback shortcut.
+    meta mark 0x8793 oifname != "artex-tun" reject
+    oifname != "artex-tun" tcp dport { 8790, 8787, 5432 } reject with tcp reset
+  }
 }
 `
 	cmd := exec.Command("nft", "-f", "-")
@@ -88,7 +95,7 @@ func Serve(ctx context.Context) error {
 	if err := SetSearchProxy(settings.Search); err != nil {
 		return err
 	}
-	core, err := Open(settings.Execution)
+	core, err := Open(settings.Execution, settings.AllowIPv6)
 	if err != nil {
 		return err
 	}
@@ -128,7 +135,10 @@ func Serve(ctx context.Context) error {
 				}
 			}
 		}
-		if err := core.Apply(next.Execution); err != nil {
+		if req.AllowIPv6 != nil {
+			next.AllowIPv6 = *req.AllowIPv6
+		}
+		if err := core.Apply(next.Execution, next.AllowIPv6); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -144,17 +154,17 @@ func Serve(ctx context.Context) error {
 		}
 		w.WriteHeader(http.StatusNoContent)
 	})
-	searchHandler := searchProxyHandler(searchTransport, &searchProxy, ctx)
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodConnect || r.URL.IsAbs() {
-			searchHandler.ServeHTTP(w, r)
-			return
-		}
-		mux.ServeHTTP(w, r)
-	})
-	server := &http.Server{Addr: ":8790", Handler: handler, ReadHeaderTimeout: 5 * time.Second}
-	done := make(chan error, 1)
+	// The public data listener exposes no control routes. Its execution sockets
+	// may only leave through the TUN, including when search uses no proxy.
+	// Bind control only to the isolated interface, never the default-network,
+	// TUN, loopback or IPv6 aliases that Agent traffic could otherwise target.
+	server := &http.Server{Addr: "172.30.254.2:8790", Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	data := &http.Server{Addr: ":8791", Handler: searchProxyHandler(searchTransport, &searchProxy, ctx, executionDialer()), ReadHeaderTimeout: 5 * time.Second}
+	done := make(chan error, 2)
 	go func() { done <- server.ListenAndServe() }()
+	go func() { done <- data.ListenAndServe() }()
+	defer server.Close()
+	defer data.Close()
 	select {
 	case err := <-done:
 		return err

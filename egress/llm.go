@@ -25,8 +25,7 @@ func NewIndependentTransport(raw string) (http.RoundTripper, error) {
 	if err != nil {
 		return nil, err
 	}
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	transport.Proxy = nil
+	transport := backendTransport()
 	base := strings.TrimRight(os.Getenv("ARTEX_EGRESS_URL"), "/")
 	if base == "" {
 		if proxy != nil {
@@ -56,7 +55,7 @@ func independentHandler(probe bool) http.Handler {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
-		transport := channelTransport(&store)
+		transport := independentTransport(&store)
 		if probe && store.value.Load() == nil {
 			dialer := channelDialer()
 			control := dialer.Control
@@ -81,8 +80,8 @@ func independentHandler(probe bool) http.Handler {
 	})
 }
 
-// NewLLMTransport uses only the AI-request proxy, independently of task traffic.
-// Docker model calls use the gateway's marked sockets to bypass the execution TUN.
+// NewLLMTransport uses the AI-request proxy as an additional hop in Docker.
+// Docker model calls use the protected backend carrier, then follow the TUN.
 func NewLLMTransport() (http.RoundTripper, error) {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = llmProxy.proxy
@@ -90,7 +89,7 @@ func NewLLMTransport() (http.RoundTripper, error) {
 	if base == "" {
 		return transport, nil
 	}
-	transport.Proxy = nil // Internal carrier never uses an upstream/environment proxy.
+	transport = backendTransport() // Only the backend may reach the control listener.
 	endpoint, err := url.Parse(base + "/llm")
 	if err != nil || endpoint.Host == "" || (endpoint.Scheme != "http" && endpoint.Scheme != "https") {
 		return nil, fmt.Errorf("invalid AI request gateway URL")
@@ -150,6 +149,13 @@ func llmHandler(transport http.RoundTripper) http.Handler {
 func channelTransport(store *proxyStore) *http.Transport {
 	transport := http.DefaultTransport.(*http.Transport).Clone()
 	transport.Proxy = store.proxy
+	// Runtime AI/search traffic follows the same mandatory TUN as commands.
+	transport.DialContext = executionDialer().DialContext
+	return transport
+}
+
+func independentTransport(store *proxyStore) *http.Transport {
+	transport := channelTransport(store)
 	transport.DialContext = channelDialer().DialContext
 	return transport
 }

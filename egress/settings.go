@@ -10,16 +10,22 @@ import (
 	"sync/atomic"
 )
 
+// Gateway-owned sockets only: administrative probes and the configured uplink.
+const llmDirectMark = 0x8791
+const executionMark = 0x8793
+
 type ProxySettings struct {
 	Execution string `json:"global_proxy"`
 	LLM       string `json:"llm_proxy"`
 	Search    string `json:"web_search_proxy"`
+	AllowIPv6 bool   `json:"egress_allow_ipv6"`
 }
 
 type proxyPatch struct {
 	Execution *string `json:"global_proxy,omitempty"`
 	LLM       *string `json:"llm_proxy,omitempty"`
 	Search    *string `json:"web_search_proxy,omitempty"`
+	AllowIPv6 *bool   `json:"egress_allow_ipv6,omitempty"`
 }
 
 func ParseProxy(raw string) (*url.URL, error) {

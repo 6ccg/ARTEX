@@ -257,9 +257,10 @@ type Manager struct {
 	webSearchProxy   string
 	// Docker sends all application traffic through the mandatory gateway.
 	// Local runs use the same URL through the tool proxy and MITM upstream.
-	globalProxy string
-	llmProxy    string
-	network     *egress.Client
+	globalProxy     string
+	egressAllowIPv6 bool
+	llmProxy        string
+	network         *egress.Client
 }
 
 // Settings keys the UI toggles at runtime.
@@ -276,13 +277,13 @@ const (
 	settingWebSearchProxy      = "web_search_proxy"
 	settingLLMProxy            = "llm_proxy"
 	// settingGlobalProxy is the global egress proxy for all target traffic
-	// (http/https/socks5). Empty = direct. Distinct from web_search_proxy (which
-	// only routes the search backend) and llm_proxy (model requests).
-	settingGlobalProxy  = "global_proxy"
-	settingShowEgressIP = "show_egress_ip"
-	settingWorkers      = "workers"
-	settingWorkerPools  = "worker_pools"
-	settingLLMRecord    = "llm_record"
+	// (http/https/socks5). Empty blocks Docker execution; native mode is direct.
+	settingGlobalProxy     = "global_proxy"
+	settingShowEgressIP    = "show_egress_ip"
+	settingEgressAllowIPv6 = "egress_allow_ipv6"
+	settingWorkers         = "workers"
+	settingWorkerPools     = "worker_pools"
+	settingLLMRecord       = "llm_record"
 	// LLM 轮询(故障转移)。默认关闭——开启后走「全局激活配置」的 agent 在当前配置
 	// 不可用(余额不足/key 失效/限流/服务异常)时自动切到下一个配置。
 	// settingLLMPoolBindFallback 仅在轮询开启时有意义:默认关闭,即 agent/任务显式
@@ -577,7 +578,8 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 		return nil, err
 	}
 	if m.network != nil {
-		if err := m.network.ApplyAll(egress.ProxySettings{Execution: m.globalProxy, LLM: m.llmProxy, Search: m.webSearchProxy}); err != nil {
+		m.egressAllowIPv6 = pg.GetBool(settingEgressAllowIPv6, false)
+		if err := m.network.ApplyAll(egress.ProxySettings{Execution: m.globalProxy, LLM: m.llmProxy, Search: m.webSearchProxy, AllowIPv6: m.egressAllowIPv6}); err != nil {
 			pg.Close()
 			return nil, err
 		}
@@ -1025,6 +1027,29 @@ func (m *Manager) ProxyAddr() string {
 
 func (m *Manager) TransparentProxy() bool { return m.network != nil }
 
+func (m *Manager) EgressAllowIPv6() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.egressAllowIPv6
+}
+
+func (m *Manager) SetEgressAllowIPv6(allowed bool) error {
+	if m.network == nil {
+		return fmt.Errorf("IPv6 出网开关仅适用于 Docker 透明网关")
+	}
+	if err := m.network.ApplyIPv6(allowed); err != nil {
+		return err
+	}
+	if err := m.pg.SetBool(settingEgressAllowIPv6, allowed); err != nil {
+		_ = m.network.ApplyIPv6(m.EgressAllowIPv6())
+		return err
+	}
+	m.mu.Lock()
+	m.egressAllowIPv6 = allowed
+	m.mu.Unlock()
+	return nil
+}
+
 // ApplicationProxy is empty when the gateway already routes every socket.
 func (m *Manager) ApplicationProxy() string {
 	if m.network != nil {
@@ -1081,8 +1106,8 @@ func (m *Manager) SetLLMProxy(raw string) error {
 	return nil
 }
 
-// SetGlobalProxy applies the URL to the gateway before saving it. An empty URL
-// restores direct connections; a configured proxy has no direct fallback.
+// SetGlobalProxy applies the URL before saving it. Docker blocks execution
+// traffic when it is empty; native mode uses direct connections. No fallback.
 func (m *Manager) SetGlobalProxy(raw string) error {
 	raw = strings.TrimSpace(raw)
 	if raw != "" {

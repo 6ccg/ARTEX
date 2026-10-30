@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -21,7 +22,7 @@ func FromEnvironment() *Client {
 	if base == "" {
 		return nil
 	}
-	return &Client{base: base, http: &http.Client{Transport: &http.Transport{Proxy: nil}, Timeout: 15 * time.Second}}
+	return &Client{base: base, http: &http.Client{Transport: backendTransport(), Timeout: 15 * time.Second}}
 }
 
 func (c *Client) Apply(raw string) error {
@@ -36,8 +37,12 @@ func (c *Client) ApplySearch(raw string) error {
 	return c.apply(proxyPatch{Search: &raw})
 }
 
+func (c *Client) ApplyIPv6(allowed bool) error {
+	return c.apply(proxyPatch{AllowIPv6: &allowed})
+}
+
 func (c *Client) ApplyAll(settings ProxySettings) error {
-	return c.apply(proxyPatch{Execution: &settings.Execution, LLM: &settings.LLM, Search: &settings.Search})
+	return c.apply(proxyPatch{Execution: &settings.Execution, LLM: &settings.LLM, Search: &settings.Search, AllowIPv6: &settings.AllowIPv6})
 }
 
 func (c *Client) apply(patch proxyPatch) error {
@@ -60,8 +65,8 @@ func (c *Client) apply(patch proxyPatch) error {
 }
 
 func HealthCheck() error {
-	client := http.Client{Transport: &http.Transport{Proxy: nil}, Timeout: 2 * time.Second}
-	resp, err := client.Get("http://127.0.0.1:8790/health")
+	client := http.Client{Transport: &http.Transport{DialContext: (&net.Dialer{Control: gatewayHealthControl}).DialContext}, Timeout: 2 * time.Second}
+	resp, err := client.Get("http://172.30.254.2:8790/health")
 	if err != nil {
 		return err
 	}
