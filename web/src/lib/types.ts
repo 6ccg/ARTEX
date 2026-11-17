@@ -1382,13 +1382,11 @@ export interface Tool {
   key: string;
   system: boolean;
   description: string;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  schema: Record<string, any>; // full JSON-Schema (object with properties)
+  schema: Record<string, unknown>; // full JSON-Schema (object with properties)
   agents: string[]; // bound agent keys
   enabled: boolean;
   kind?: "builtin" | "shell" | "command" | "script" | "http"; // 自定义工具类型
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  exec?: Record<string, any>; // 自定义工具执行规格(kind!=builtin)
+  exec?: Record<string, unknown>; // 自定义工具执行规格(kind!=builtin)
   deferred?: boolean; // schema 延迟(SearchExtraTools/ExecuteExtraTool)
   calls?: number; // persistent runtime invocation count (older APIs may omit it)
 }
@@ -1484,8 +1482,7 @@ export interface InterceptPending {
   task_id?: string;
   agent_name: string;
   tool_name: string;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  tool_input: Record<string, any>;
+  tool_input: Record<string, unknown>;
   status: "pending" | "allowed" | "denied" | "timeout";
   reason: string; // 规则 message 或模型判定理由(模型判定带 [模型] 前缀)
   decided_at?: string;

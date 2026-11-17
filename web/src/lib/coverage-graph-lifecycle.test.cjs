@@ -6,10 +6,7 @@ const test = require("node:test");
 const vm = require("node:vm");
 const ts = require("typescript");
 
-const source = fs.readFileSync(
-  path.join(__dirname, "../app/(main)/function/tasks/detail/_tabs/coverage-graph-tab.tsx"),
-  "utf8",
-);
+const source = fs.readFileSync(path.join(__dirname, "../app/(main)/function/tasks/detail/_tabs/coverage-graph-tab.tsx"), "utf8");
 const compiled = ts.transpileModule(source, {
   compilerOptions: {
     target: ts.ScriptTarget.ES2022,

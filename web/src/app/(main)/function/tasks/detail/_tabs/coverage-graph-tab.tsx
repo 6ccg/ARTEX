@@ -1,4 +1,5 @@
 "use client";
+import { startPolling } from "@/hooks/use-polling";
 import * as React from "react";
 
 import type { Graph as G6Graph } from "@antv/g6";
@@ -800,11 +801,10 @@ function GraphInner({ taskId, coverageEnabled = true }: { taskId: string; covera
         // Keep the spinner while the conversation endpoint is temporarily unavailable.
       }
     };
-    void poll();
-    const timer = window.setInterval(() => void poll(), 2000);
+    const stopPolling = startPolling(poll, 2000);
     return () => {
       cancelled = true;
-      window.clearInterval(timer);
+      stopPolling();
     };
   }, [mappingConversationId]);
 

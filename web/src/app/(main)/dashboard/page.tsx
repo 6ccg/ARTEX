@@ -1,6 +1,8 @@
 "use client";
 
 import * as React from "react";
+import { usePolling } from "@/hooks/use-polling";
+import { reconcileList, sameSnapshot } from "@/lib/list-snapshot";
 
 import Link from "next/link";
 
@@ -195,131 +197,48 @@ export default function DashboardPage() {
   const [llmProfiles, setLLMProfiles] = React.useState<LLMProfile[]>([]);
   const [systemMetrics, setSystemMetrics] = React.useState<SystemMetrics | null>(null);
 
-  React.useEffect(() => {
-    let alive = true;
-    const load = async () => {
-      try {
-        const next = await api.systemMetrics();
-        if (alive) setSystemMetrics(next);
-      } catch {
-        /* retry on the next interval */
-      }
-    };
-    void load();
-    const timer = setInterval(load, 5000);
-    return () => {
-      alive = false;
-      clearInterval(timer);
-    };
+  const refreshMetrics = React.useCallback(async () => {
+    const next = await api.systemMetrics();
+    setSystemMetrics((current) => sameSnapshot(current, next) ? current : next);
   }, []);
+  usePolling(refreshMetrics, 5000);
 
-  // The task list is the most expensive dashboard source. Poll it independently
-  // so a large history cannot hold back every other dashboard panel.
-  React.useEffect(() => {
-    let alive = true;
-    let loading = false;
-    let signature = "";
-    const load = async () => {
-      if (loading) return;
-      loading = true;
-      try {
-        const tr = await api.tasks();
-        if (!alive) return;
-        const nextSignature = JSON.stringify(tr.tasks);
-        if (nextSignature !== signature) {
-          signature = nextSignature;
-          setTasks(tr.tasks);
-        }
-      } catch {
-        /* transient errors — next poll retries */
-      } finally {
-        loading = false;
-      }
-    };
-    void load();
-    const t = setInterval(load, 5000);
-    return () => {
-      alive = false;
-      clearInterval(t);
-    };
+  const refreshTasks = React.useCallback(async () => {
+    const next = await api.tasks();
+    setTasks((current) => reconcileList(current, next.tasks, (task) => task.id));
   }, []);
+  usePolling(refreshTasks, 5000);
 
-  // The remaining fast sources stay batched so one poll causes a single render.
-  React.useEffect(() => {
-    let alive = true;
-    let loading = false;
-    const load = async () => {
-      if (loading) return;
-      loading = true;
-      try {
-        const [findings, stats, settings, pending, activity, tokens, conversationTokens] = await Promise.all([
-          api.findings(),
-          api.stats(),
-          api.settings(),
-          api.interceptPending(),
-          api.activity(undefined, { limit: 30 }),
-          api.tokenStats(),
-          api.conversationTokens(),
-        ]);
-        if (!alive) return;
-        setFindings(findings);
-        setStats(stats);
-        setSettings(settings);
-        setPending(pending);
-        setActivity(activity.items);
-        setTokens(tokens.total ?? null);
-        setConvTokens(conversationTokens);
-      } catch {
-        // Preserve stale data and retry on the next interval.
-      } finally {
-        loading = false;
-      }
-    };
-    void load();
-    const timer = setInterval(load, 5000);
-    return () => {
-      alive = false;
-      clearInterval(timer);
-    };
+  const refreshPanels = React.useCallback(async () => {
+    const [findings, stats, settings, pending, activity, tokens, conversationTokens] = await Promise.all([
+      api.findings(), api.stats(), api.settings(), api.interceptPending(),
+      api.activity(undefined, { limit: 30 }), api.tokenStats(), api.conversationTokens(),
+    ]);
+    setFindings((current) => sameSnapshot(current, findings) ? current : findings);
+    setStats((current) => sameSnapshot(current, stats) ? current : stats);
+    setSettings((current) => sameSnapshot(current, settings) ? current : settings);
+    setPending((current) => sameSnapshot(current, pending) ? current : pending);
+    setActivity((current) => sameSnapshot(current, activity.items) ? current : activity.items);
+    setTokens((current) => sameSnapshot(current, tokens.total ?? null) ? current : tokens.total ?? null);
+    setConvTokens((current) => sameSnapshot(current, conversationTokens) ? current : conversationTokens);
   }, []);
+  usePolling(refreshPanels, 5000);
 
-  // slow poll: traffic, assets, system-static (every 15s)
-  React.useEffect(() => {
-    let alive = true;
-    const load = async () => {
-      try {
-        const [traf, counts, agentList, mcpList, skillList, toolList, profileList, usage] = await Promise.all([
-          api.traffic(0, 50),
-          api.assetCounts(),
-          api.agents(),
-          api.mcpServers(),
-          api.skills(),
-          api.tools(),
-          api.llmProfiles(),
-          api.usageStats(365),
-        ]);
-        if (!alive) return;
-        setTraffic(traf.exchanges ?? []);
-        setAssetCounts(counts ?? {});
-        setAgents(agentList);
-        setMcpServers(mcpList);
-        setSkills(skillList);
-        setTools(toolList);
-        setLLMProfiles(profileList);
-        setUsageStats(usage);
-      } catch {
-        /* transient errors */
-      }
-    };
-    void load();
-    const t = setInterval(load, 15000);
-    return () => {
-      alive = false;
-      clearInterval(t);
-    };
+  const refreshSlowPanels = React.useCallback(async () => {
+    const [traf, counts, agents, mcp, skills, tools, profiles, usage] = await Promise.all([
+      api.traffic(0, 50), api.assetCounts(), api.agents(), api.mcpServers(), api.skills(),
+      api.tools(), api.llmProfiles(), api.usageStats(365),
+    ]);
+    setTraffic((current) => sameSnapshot(current, traf.exchanges ?? []) ? current : traf.exchanges ?? []);
+    setAssetCounts((current) => sameSnapshot(current, counts ?? {}) ? current : counts ?? {});
+    setAgents((current) => sameSnapshot(current, agents) ? current : agents);
+    setMcpServers((current) => sameSnapshot(current, mcp) ? current : mcp);
+    setSkills((current) => sameSnapshot(current, skills) ? current : skills);
+    setTools((current) => sameSnapshot(current, tools) ? current : tools);
+    setLLMProfiles((current) => sameSnapshot(current, profiles) ? current : profiles);
+    setUsageStats((current) => sameSnapshot(current, usage) ? current : usage);
   }, []);
-
-  // ── derived ───────────────────────────────────────────────────────────────
+  usePolling(refreshSlowPanels, 15000);
 
   const tasksByStatus = React.useMemo(() => {
     const m: Record<string, number> = {};

@@ -1,4 +1,5 @@
 "use client";
+import { startPolling } from "@/hooks/use-polling";
 import * as React from "react";
 
 import Link from "next/link";
@@ -42,7 +43,6 @@ function CaseDetail() {
   // biome-ignore lint/correctness/useExhaustiveDependencies: refresh explicitly reloads group after a detach.
   React.useEffect(() => {
     let active = true;
-    let timer: ReturnType<typeof setTimeout>;
     async function load() {
       try {
         const v = await api.getFindingCase(id, contextTask);
@@ -52,14 +52,12 @@ function CaseDetail() {
         }
       } catch (e) {
         if (active) setError((e as Error).message);
-      } finally {
-        if (active) timer = setTimeout(load, 5000);
       }
     }
-    if (id) void load();
+    const stopPolling = id ? startPolling(load, 5000) : undefined;
     return () => {
       active = false;
-      clearTimeout(timer);
+      stopPolling?.();
     };
   }, [id, contextTask, refresh]);
   const readOnly = !!contextTask && contextTask !== data?.case.task_id;

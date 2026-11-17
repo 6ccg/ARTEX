@@ -1,4 +1,5 @@
 "use client";
+import { startPolling } from "@/hooks/use-polling";
 
 import * as React from "react";
 import Link from "next/link";
@@ -173,9 +174,8 @@ function InterceptPendingBadge() {
         if (live) setCount(list.length);
       } catch { /* ignore */ }
     }
-    poll();
-    const t = setInterval(poll, 5000);
-    return () => { live = false; clearInterval(t); };
+    const stopPolling = startPolling(poll, 5000);
+    return () => { live = false; stopPolling(); };
   }, []);
   if (count === 0) return null;
   return (

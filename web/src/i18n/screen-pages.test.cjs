@@ -47,7 +47,7 @@ function load(inputFile) {
           ? load(base + "/src/" + id.slice(2))
           : id.startsWith(".")
             ? load(path.resolve(path.dirname(file), id))
-            : id === "react" && file.endsWith("/components/intelligence-panel.tsx")
+            : id === "react" && [path.join("components", "intelligence-panel.tsx"), path.join("app", "(main)", "chat", "page.tsx")].some((suffix) => file.endsWith(suffix))
               ? {
                   ...React,
                   useState(initial) {
@@ -121,11 +121,41 @@ test("all task detail tabs render their English fixed UI", async () => {
     ["files", "FilesTab"],
   ]) {
     const Component = load(base + `/src/app/(main)/function/tasks/detail/_tabs/${file}-tab.tsx`)[name];
-    const html = visible(render(Component, { taskId: "1", task: { id: "1", status: "done" }, active: true }));
+    const props = { taskId: "1", task: { id: "1", status: "done" }, active: true };
+    if (name === "SessionsTab") props.pendingIntercepts = [];
+    const html = visible(render(Component, props));
     assert.doesNotMatch(html, /[\p{Script=Han}]/u, `${name}: ${html}`);
   }
   const { IntelligencePanel } = load(base + "/src/components/intelligence-panel.tsx");
   assert.doesNotMatch(visible(render(IntelligencePanel, { scope: "tasks", scopeId: "1" })), /[\p{Script=Han}]/u);
+});
+
+test("automation groups retain quoted titles and full counts beyond the visible rows", async () => {
+  const file = path.join(base, "src/app/(main)/chat/page.tsx");
+  const Page = load(file).default;
+  const conversation = (id, title, source) => ({
+    id, title, source, agent_key: "worker", source_task_id: source === "automation" ? 7 : undefined,
+    created_at: "2026-11-15T12:00:00Z",
+  });
+  const rows = [
+    conversation(1, 'Automation "quoted" title', "automation"),
+    conversation(2, "Another run", "automation"),
+    conversation(3, "Manual conversation", "manual"),
+  ];
+  const output = (scope) => {
+    const filtered = rows.filter((row) => row.source === scope);
+    stateSnapshots.set(file, { next: 0, values: new Map([[2, filtered], [6, true], [7, scope], [15, 1]]) });
+    try { return render(Page); } finally { stateSnapshots.delete(file); }
+  };
+  await i18n.changeLanguage("en");
+  const automation = output("automation");
+  assert.ok(automation.includes('Automation &quot;quoted&quot; title'));
+  assert.match(visible(automation), /1\/2/);
+  assert.ok(automation.includes('/function/tasks/detail?id=7'));
+  assert.doesNotMatch(visible(automation), /Manual conversation/);
+  const manual = visible(output("manual"));
+  assert.match(manual, /Manual conversation/);
+  assert.doesNotMatch(manual, /Another run/);
 });
 
 test("intelligence renders real preview responses, populated records and localized errors", async () => {
@@ -157,7 +187,7 @@ test("intelligence renders real preview responses, populated records and localiz
   };
   const empty = await transport.mockHandle("GET", "/tasks/t-vpn-edge/intelligence");
   const output = (data, error = null) => {
-    stateSnapshots.set(file, {
+    stateSnapshots.set(path.resolve(file), {
       next: 0,
       values: new Map([
         [5, data],
@@ -167,7 +197,7 @@ test("intelligence renders real preview responses, populated records and localiz
     try {
       return visible(render(IntelligencePanel, { scope: "tasks", scopeId: "t-vpn-edge" }));
     } finally {
-      stateSnapshots.delete(file);
+      stateSnapshots.delete(path.resolve(file));
     }
   };
   await i18n.changeLanguage("en");
