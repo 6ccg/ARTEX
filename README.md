@@ -164,7 +164,7 @@ cp config.example.json config.json   # 填好 database 连接
 cd web && npm ci && npm run build:static && cd ..
 # 2) 拷进内嵌目录
 mkdir -p server/webui/dist
-cp -r web/out/. server/webui/dist
+cp -r web/out/. server/webui/dist/
 # 3) 编译（-tags embedui 才内嵌前端）
 CGO_ENABLED=0 go build -tags embedui -o artex ./cmd/artex
 ./start.sh
@@ -192,7 +192,7 @@ bash build.sh --target linux/amd64 --upx
 
 > 升级保留 Postgres 数据卷 `pgdata`、`./data` 和 `./skills`。**数据库迁移无需手动执行**：空库直接建立当前结构，旧库在启动时按结构版本执行一次性转换；转换与版本号在同一事务提交，失败会整体回滚，后续启动跳过已完成的 DDL。
 
-当前结构版本为 **1**，由 `db.Open` 统一初始化，包含 LLM 记录与计量表。首次转换保留有效的任务资产关系、模型链、来源信息和历史设置，删除旧 `assets.task_ids`、`tasks.llm_profile_id` 及重复索引。更新时先停止旧实例，再启动新程序；转换后不能继续运行依赖旧列的版本。后续结构变更需同步更新 `db/schema.sql`，并在 `db/schema.go` 添加下一版本的转换，不要手工修改 `settings` 中的 `database_schema_revision`。
+当前结构版本为 **6**，由 `db.Open` 统一初始化，包含 LLM 记录与计量表。首次转换保留有效的任务资产关系、模型链、来源信息和历史设置，删除旧 `assets.task_ids`、`tasks.llm_profile_id` 及重复索引。更新时先停止旧实例，再启动新程序；转换后不能继续运行依赖旧列的版本。后续结构变更需同步更新 `db/schema.sql`，并在 `db/schema.go` 添加下一版本的转换，不要手工修改 `settings` 中的 `database_schema_revision`。
 
 ### 方式一：页面一键更新（推荐）
 
@@ -299,7 +299,7 @@ cp -r <解压目录>/skills ./ && cp <解压目录>/artex ./
 git pull
 cd web && npm ci && npm run build:static && cd ..
 mkdir -p server/webui/dist
-cp -r web/out/. server/webui/dist
+cp -r web/out/. server/webui/dist/
 CGO_ENABLED=0 go build -tags embedui -o artex ./cmd/artex
 # 重启 ./start.sh
 ```
