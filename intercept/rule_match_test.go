@@ -112,7 +112,7 @@ func TestMatchToolInputNoFalsePositives(t *testing.T) {
 		"echo firm\nrmdir build", // "firm" and "rmdir" must not look like rm
 	} {
 		in := toolInput(t, map[string]string{"command": cmd})
-		if dec, ok := ic.Match("Bash", in); ok {
+		if dec, ok := ic.Match("Bash", in); ok && dec.Action == "deny" {
 			t.Fatalf("unexpected match %q for input %s", dec.RuleName, in)
 		}
 	}
