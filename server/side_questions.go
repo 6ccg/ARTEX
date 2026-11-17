@@ -127,14 +127,24 @@ func (s *Runtime) flushSideSnapshots() {
 }
 
 func (s *Runtime) sideSnapshot(ctx context.Context, p sidequestion.Parent) (*sidequestion.Snapshot, error) {
+	return s.loadSideSnapshot(ctx, p, false)
+}
+func (s *Runtime) loadSideSnapshot(ctx context.Context, p sidequestion.Parent, metadataOnly bool) (*sidequestion.Snapshot, error) {
 	taskMain := p.TaskID > 0 && p.IntentID == 0
 	s.side.mu.Lock()
 	snap, ok := s.side.latest[p.Key()]
 	s.side.mu.Unlock()
 	if ok && snap.RunID > 0 {
+		if metadataOnly {
+			snap.Request = llm.CompletionRequest{}
+		}
 		return &snap, nil
 	}
-	if snap, err := s.m.pg.SideSnapshot(ctx, p.Key()); err != nil || snap != nil {
+	load := s.m.pg.SideSnapshot
+	if metadataOnly {
+		load = s.m.pg.SideSnapshotMeta
+	}
+	if snap, err := load(ctx, p.Key()); err != nil || snap != nil {
 		// A task fallback is deliberately ephemeral from the point of view of
 		// context selection. Older versions persisted it at (0,0), but that row
 		// must not freeze the task material or model identity for later requests.
@@ -544,8 +554,8 @@ func (s *Runtime) buildTaskContextSideSnapshot(ctx context.Context, p sidequesti
 	}, nil
 }
 
-func (s *Runtime) sideSnapshotForAgent(ctx context.Context, p sidequestion.Parent, agentKey string, findingID int64) (*sidequestion.Snapshot, error) {
-	snap, err := s.sideSnapshot(ctx, p)
+func (s *Runtime) sideSnapshotForAgent(ctx context.Context, p sidequestion.Parent, agentKey string, findingID int64, metadataOnly bool) (*sidequestion.Snapshot, error) {
+	snap, err := s.loadSideSnapshot(ctx, p, metadataOnly)
 	if err != nil {
 		return nil, err
 	}
@@ -704,7 +714,7 @@ func (s *Server) handleSideQuestions(w http.ResponseWriter, r *http.Request, p s
 	}
 	agentKey := strings.TrimSpace(r.URL.Query().Get("agent"))
 	findingID, _ := strconv.ParseInt(r.URL.Query().Get("finding_id"), 10, 64)
-	snap, err := s.sideSnapshotForAgent(r.Context(), p, agentKey, findingID)
+	snap, err := s.sideSnapshotForAgent(r.Context(), p, agentKey, findingID, r.Method == http.MethodGet)
 	snapshotReason := ""
 	if err != nil {
 		var modelErr *sideTaskModelError

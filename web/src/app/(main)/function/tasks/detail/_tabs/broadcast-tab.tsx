@@ -1,4 +1,5 @@
 "use client";
+import { startPolling } from "@/hooks/use-polling";
 import * as React from "react";
 
 import {
@@ -552,16 +553,16 @@ export function BroadcastTab({ taskId }: { taskId: string }) {
         .catch(() => {
           // 轮询是尽力而为:保留上一次成功的播报内容,下一轮自动重试。
         });
-    void load();
     if (!live) {
+      void load();
       return () => {
         alive = false;
       };
     }
-    const timer = setInterval(load, POLL_MS);
+    const stopPolling = startPolling(load, POLL_MS);
     return () => {
       alive = false;
-      clearInterval(timer);
+      stopPolling();
     };
   }, [taskId, page, size, kinds, query, order, live, atLive]);
 

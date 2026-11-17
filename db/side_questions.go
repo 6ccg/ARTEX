@@ -79,6 +79,21 @@ func (d *DB) SideSnapshot(ctx context.Context, key string) (*sidequestion.Snapsh
 	return &s, err
 }
 
+// SideSnapshotMeta avoids transferring and decoding the provider request on history polls.
+func (d *DB) SideSnapshotMeta(ctx context.Context, key string) (*sidequestion.Snapshot, error) {
+	var raw []byte
+	err := d.QueryRowContext(ctx, `SELECT jsonb_build_object('parent',snapshot->'parent','run_id',run_id,'version',version,'captured_at',snapshot->'captured_at','model',snapshot->'model') FROM side_question_sessions WHERE session_key=$1`, key).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var snapshot sidequestion.Snapshot
+	err = json.Unmarshal(raw, &snapshot)
+	return &snapshot, err
+}
+
 const sideCols = `id,ordinal,session_key,generation,client_id,question,answer,status,error,model,snapshot_at,created_at,sequence,usage,context_info`
 
 func (d *DB) ExistingSideRequest(ctx context.Context, key, client string) (*sidequestion.Exchange, error) {

@@ -6,10 +6,8 @@ import (
 	"github.com/Autumn-27/artex/db"
 )
 
-// Broadcaster is a per-task in-process pub/sub for live activity events. The
-// engine publishes each appended activity at its single emit point; SSE handlers
-// subscribe per task. Storage (activity table) and the live stream come from the
-// same Publish call, so they never diverge.
+// Broadcaster wakes task subscribers after activities commit. Notifications may
+// coalesce; SSE handlers read the ordered activity rows from the database.
 type Broadcaster struct {
 	mu   sync.Mutex
 	subs map[string]map[chan db.Activity]struct{} // task id -> set of subscriber channels
@@ -22,7 +20,7 @@ func NewBroadcaster() *Broadcaster {
 // Subscribe returns a buffered channel of activities for a task plus an
 // unsubscribe func the caller must invoke (defer) to release it.
 func (b *Broadcaster) Subscribe(task string) (<-chan db.Activity, func()) {
-	ch := make(chan db.Activity, 256)
+	ch := make(chan db.Activity, 1)
 	b.mu.Lock()
 	if b.subs[task] == nil {
 		b.subs[task] = map[chan db.Activity]struct{}{}
@@ -46,10 +44,8 @@ func (b *Broadcaster) Subscribe(task string) (<-chan db.Activity, func()) {
 	}
 }
 
-// Publish fans an activity out to all subscribers of a task. Non-blocking: if a
-// subscriber's buffer is full the event is dropped — the client reconnects with
-// its last seq cursor and catches up the gap from the DB, so liveness never
-// stalls the engine.
+// Publish coalesces notifications: subscribers tail committed rows from the DB.
+// A full channel already contains a wakeup, so coalescing cannot lose activity.
 func (b *Broadcaster) Publish(task string, a db.Activity) {
 	b.mu.Lock()
 	defer b.mu.Unlock()

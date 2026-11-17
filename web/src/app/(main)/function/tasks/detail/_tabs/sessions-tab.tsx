@@ -1,4 +1,5 @@
 "use client";
+import { startPolling } from "@/hooks/use-polling";
 import * as React from "react";
 
 import {
@@ -51,6 +52,7 @@ import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/comp
 import { useSideQuestions } from "@/hooks/use-side-questions";
 import { type UITranslate, useUITranslation } from "@/i18n/use-ui-translation";
 import { api, openSSE } from "@/lib/api";
+import { sameSnapshot } from "@/lib/list-snapshot";
 import { shouldSubmitOnKey, useChatSendMode } from "@/lib/chat-send-mode";
 import { MOCK } from "@/lib/mock/enabled";
 import { isBtwCommand } from "@/lib/side-questions";
@@ -60,6 +62,7 @@ import type {
   ChatAttachment,
   IntentAsset,
   InterceptApprovalRow,
+  InterceptPending,
   Session,
   SessionStatus,
   SessionTokenUsage,
@@ -96,7 +99,6 @@ function fmtBytes(n: number): string {
 //     so refresh / tab-switch / sleep / reconnect never drop the newest records.
 
 const PAGE = 200; // history page size
-const SYSTEM_SCAN_PAGE = 500; // generic activity pages scanned to recover sparse system audit events
 const MAX_KEEP = 4000; // per-session in-memory cap; older pages re-fetched on scroll-up
 const STREAM_WINDOW_MS = 5000; // "live" = activity seen within this window
 const MAX_WORKER_MESSAGE_CHARS = 4000;
@@ -491,7 +493,15 @@ function WorkerAssetBadge({ assets }: { assets: IntentAsset[] }) {
   );
 }
 
-export function SessionsTab({ taskId, requestedSession = "" }: { taskId: string; requestedSession?: string }) {
+export function SessionsTab({
+  taskId,
+  requestedSession = "",
+  pendingIntercepts,
+}: {
+  taskId: string;
+  requestedSession?: string;
+  pendingIntercepts: InterceptPending[];
+}) {
   const { ui, liveUI } = useUITranslation();
 
   const approvalFocus = useApprovalFocus({ taskId });
@@ -677,7 +687,6 @@ export function SessionsTab({ taskId, requestedSession = "" }: { taskId: string;
   const [sessionTokens, setSessionTokens] = React.useState<Record<string, SessionTokenUsage>>({});
   const [llmResolutions, setLLMResolutions] = React.useState<TaskLLMResolutions | null>(null);
   // Pending intercept requests for this task — used to show warning icons on sessions.
-  const [pendingIntercepts, setPendingIntercepts] = React.useState<InterceptApprovalRow[]>([]);
 
   // Refs backing SSE/loading without re-render churn.
   const snapshotRef = React.useRef(0); // task-level snapshot cursor → SSE since=
@@ -711,49 +720,6 @@ export function SessionsTab({ taskId, requestedSession = "" }: { taskId: string;
       const token = (reqTokenRef.current[key] ?? 0) + 1;
       reqTokenRef.current[key] = token;
       patchStore(key, (s) => ({ ...s, loading: true, error: undefined }));
-
-      if (key === "system") {
-        void (async () => {
-          let since = 0;
-          let systemItems: Activity[] = [];
-          for (;;) {
-            const page = await api.activity(taskId, { since, limit: SYSTEM_SCAN_PAGE });
-            if (reqTokenRef.current[key] !== token) return;
-            systemItems = mergeBySeq(
-              systemItems,
-              page.items.filter(
-                (item) => item.worker === "system" || item.kind === "llm_switch" || item.kind === "llm_failover",
-              ),
-            );
-            if (page.items.length < SYSTEM_SCAN_PAGE || page.cursor <= since) break;
-            since = page.cursor;
-          }
-          patchStore(key, (s) => {
-            const items = mergeBySeq(systemItems, s.items);
-            return {
-              ...s,
-              items,
-              loaded: true,
-              loading: false,
-              hasMore: false,
-              earliestSeq: items.length ? items[0].seq : 0,
-              unread: 0,
-              lastTs: items.length ? items[items.length - 1].ts : s.lastTs,
-              error: undefined,
-            };
-          });
-        })()
-          .catch((error) => {
-            if (reqTokenRef.current[key] !== token) return;
-            patchStore(key, (s) => ({
-              ...s,
-              loading: false,
-              error: (error as Error).message || liveUI("screen.d1d044826a45ef"),
-            }));
-          })
-          .finally(() => loadingKeysRef.current.delete(key));
-        return;
-      }
 
       api
         .activityHistory(taskId, key, 0, PAGE)
@@ -829,17 +795,17 @@ export function SessionsTab({ taskId, requestedSession = "" }: { taskId: string;
         .tokenStats(taskId)
         .then((r) => {
           if (!alive) return;
-          setTaskTokens(r.total);
-          setSessionTokens(Object.fromEntries(r.sessions.map((item) => [item.session, item])));
+          setTaskTokens((previous) => (sameSnapshot(previous, r.total) ? previous : r.total));
+          const next = Object.fromEntries(r.sessions.map((item) => [item.session, item]));
+          setSessionTokens((previous) => (sameSnapshot(previous, next) ? previous : next));
         })
         .catch(() => {
           // Polling is best-effort; the next interval retries automatically.
         });
-    void load();
-    const t = setInterval(load, 5000);
+    const stopPolling = startPolling(load, 5000);
     return () => {
       alive = false;
-      clearInterval(t);
+      stopPolling();
     };
   }, [taskId]);
 
@@ -858,11 +824,10 @@ export function SessionsTab({ taskId, requestedSession = "" }: { taskId: string;
           // activity remains a conservative fallback.
         });
     };
-    void load();
-    const timer = setInterval(load, 2000);
+    const stopPolling = startPolling(load, 2000);
     return () => {
       alive = false;
-      clearInterval(timer);
+      stopPolling();
     };
   }, [taskId]);
 
@@ -872,44 +837,34 @@ export function SessionsTab({ taskId, requestedSession = "" }: { taskId: string;
       api
         .taskLLMResolution(taskId)
         .then((value) => {
-          if (alive) setLLMResolutions(value);
+          if (alive) setLLMResolutions((previous) => (sameSnapshot(previous, value) ? previous : value));
         })
         .catch(() => {
           // Polling is best-effort; the next interval retries automatically.
         });
-    void load();
-    const timer = setInterval(load, 10_000);
+    const stopPolling = startPolling(load, 10_000);
     return () => {
       alive = false;
-      clearInterval(timer);
+      stopPolling();
     };
   }, [taskId]);
 
-  React.useEffect(() => {
-    let alive = true;
-    const load = () =>
-      api
-        .interceptTask(taskId)
-        .then((rows) => {
-          if (alive) setPendingIntercepts(rows.filter((r) => r.status === "pending"));
-        })
-        .catch(() => {
-          // Polling is best-effort; the next interval retries automatically.
-        });
-    void load();
-    const t = setInterval(load, 5000);
-    return () => {
-      alive = false;
-      clearInterval(t);
-    };
-  }, [taskId]);
-
-  // Re-render on a timer so "streaming" liveness recomputes as activity goes stale.
+  // Tick only until recent activity expires; an idle transcript needs no timer.
   const [, setTick] = React.useState(0);
+  const needsLivenessTick = Object.values(store).some((session) => {
+    const ts = Date.parse(session.lastTs);
+    return ts > 0 && Date.now() - ts < STREAM_WINDOW_MS;
+  });
   React.useEffect(() => {
-    const id = setInterval(() => setTick((t) => t + 1), 1500);
-    return () => clearInterval(id);
-  }, []);
+    if (!needsLivenessTick) return;
+    return startPolling(
+      () => {
+        setTick((t) => t + 1);
+      },
+      1500,
+      1500,
+    );
+  }, [needsLivenessTick]);
 
   // ── first load + single task SSE ────────────────────────────────────────────────
   // On task open: load Main's latest page, take the task-level snapshot cursor from
@@ -1037,7 +992,7 @@ export function SessionsTab({ taskId, requestedSession = "" }: { taskId: string;
             void api
               .taskLLMResolution(taskId)
               .then((value) => {
-                if (alive) setLLMResolutions(value);
+                if (alive) setLLMResolutions((previous) => (sameSnapshot(previous, value) ? previous : value));
               })
               .catch(() => {
                 // The periodic resolver poll will retry if this event-triggered refresh fails.
@@ -1099,16 +1054,15 @@ export function SessionsTab({ taskId, requestedSession = "" }: { taskId: string;
       api
         .taskIntentAssets(taskId)
         .then((assets) => {
-          if (active) setIntentAssets(assets);
+          if (active) setIntentAssets((previous) => (sameSnapshot(previous, assets) ? previous : assets));
         })
         .catch(() => {
           // The next poll retries; Worker controls and transcripts remain available.
         });
-    void load();
-    const timer = setInterval(load, 5000);
+    const stopPolling = startPolling(load, 5000);
     return () => {
       active = false;
-      clearInterval(timer);
+      stopPolling();
     };
   }, [taskId]);
 
@@ -1138,17 +1092,16 @@ export function SessionsTab({ taskId, requestedSession = "" }: { taskId: string;
             });
           }
           firstIntentsRef.current = r.items;
-          setIntents(r.items);
+          setIntents((previous) => (sameSnapshot(previous, r.items) ? previous : r.items));
           setFirstIntentsHasMore(r.hasMore);
         })
         .catch(() => {
           // Polling is best-effort; the next interval retries automatically.
         });
-    void load();
-    const t = setInterval(load, 5000);
+    const stopPolling = startPolling(load, 5000);
     return () => {
       active = false;
-      clearInterval(t);
+      stopPolling();
     };
   }, [taskId]);
 

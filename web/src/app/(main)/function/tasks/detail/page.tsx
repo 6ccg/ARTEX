@@ -39,17 +39,19 @@ import { Spinner } from "@/components/ui/spinner";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { type UITranslate, useUITranslation } from "@/i18n/use-ui-translation";
+import { startPolling } from "@/hooks/use-polling";
+import { sameSnapshot } from "@/lib/list-snapshot";
 import { api } from "@/lib/api";
-import type { LLMProfile, Task } from "@/lib/types";
+import type { InterceptPending, LLMProfile, Task } from "@/lib/types";
 
 import { AssetsTab } from "./_tabs/assets-tab";
 import { BroadcastTab } from "./_tabs/broadcast-tab";
-import { CoverageGraphTab } from "./_tabs/coverage-graph-tab";
+const CoverageGraphTab = React.lazy(() => import("./_tabs/coverage-graph-tab").then((module) => ({ default: module.CoverageGraphTab })));
 import { FilesTab } from "./_tabs/files-tab";
 import { FindingsTab } from "./_tabs/findings-tab";
-import { GraphTab } from "./_tabs/graph-tab";
+const GraphTab = React.lazy(() => import("./_tabs/graph-tab").then((module) => ({ default: module.GraphTab })));
 import { InterceptTab } from "./_tabs/intercept-tab";
-import { OverviewTab } from "./_tabs/overview-tab";
+const OverviewTab = React.lazy(() => import("./_tabs/overview-tab").then((module) => ({ default: module.OverviewTab })));
 import { ReportTab } from "./_tabs/report-tab";
 import { RetestsTab } from "./_tabs/retests-tab";
 import { SessionsTab } from "./_tabs/sessions-tab";
@@ -230,7 +232,8 @@ function TaskDetailInner() {
   React.useEffect(() => {
     if (TABS(liveUI).some((item) => item.value === normalizedRequestedTab)) setTab(normalizedRequestedTab);
   }, [normalizedRequestedTab, liveUI]);
-  const [interceptPendingCount, setInterceptPendingCount] = React.useState(0);
+  const [pendingIntercepts, setPendingIntercepts] = React.useState<InterceptPending[]>([]);
+  const interceptPendingCount = pendingIntercepts.length;
   const [profiles, setProfiles] = React.useState<LLMProfile[]>([]);
   const [archiving, setArchiving] = React.useState(false);
 
@@ -243,20 +246,23 @@ function TaskDetailInner() {
 
   React.useEffect(() => {
     let alive = true;
+    setPendingIntercepts([]);
     const load = () =>
       api
-        .interceptTask(id)
+        .interceptPending()
         .then((rows) => {
-          if (alive) setInterceptPendingCount(rows.filter((r) => r.status === "pending").length);
+          if (alive) {
+            const next = rows.filter((r) => r.task_id === id);
+            setPendingIntercepts((previous) => sameSnapshot(previous, next) ? previous : next);
+          }
         })
         .catch(() => {
           // Polling is best-effort; the next interval retries automatically.
         });
-    void load();
-    const t = setInterval(load, 5000);
+    const stopPolling = startPolling(load, 5000);
     return () => {
       alive = false;
-      clearInterval(t);
+      stopPolling();
     };
   }, [id]);
 
@@ -264,7 +270,7 @@ function TaskDetailInner() {
   const load = React.useCallback(() => {
     if (taskLoadInFlight.current === id) return;
     taskLoadInFlight.current = id;
-    Promise.all([api.task(id), api.stats(id).catch(() => null)])
+    return Promise.all([api.task(id), api.stats(id).catch(() => null)])
       .then(([task, s]) => {
         if (taskLoadInFlight.current !== id) return;
         const base = { ...task };
@@ -276,7 +282,7 @@ function TaskDetailInner() {
           base.engine_mode = s?.engine_mode ?? at.engine_mode;
           base.paused = at.paused;
         }
-        setTask(base);
+        setTask((previous) => sameSnapshot(previous, base) ? previous : base);
         setPaused(at?.paused ?? base.paused ?? false);
       })
       .catch(() => {
@@ -290,9 +296,8 @@ function TaskDetailInner() {
       });
   }, [id]);
   React.useEffect(() => {
-    load();
-    const timer = setInterval(load, 5000);
-    return () => clearInterval(timer);
+    const stopPolling = startPolling(load, 5000);
+    return () => stopPolling();
   }, [load]);
 
   async function togglePause() {
@@ -472,11 +477,12 @@ function TaskDetailInner() {
                 onClick={() =>
                   api
                     .testTaskProxy(task.id)
-                    .then((r) =>
-                      r.ok
-                        ? (toast.success(ui("screen.1eb30f37b2b98e")), load())
-                        : toast.error(r.error || ui("screen.d930b3659bf944")),
-                    )
+                    .then(async (r) => {
+                      if (r.ok) {
+                        toast.success(ui("screen.1eb30f37b2b98e"));
+                        await load();
+                      } else toast.error(r.error || ui("screen.d930b3659bf944"));
+                    })
                     .catch((e) => toast.error((e as Error).message))
                 }
               >
@@ -511,16 +517,20 @@ function TaskDetailInner() {
       {/* Tab content */}
       <div className="flex-1 p-4 lg:p-6">
         <TabsContent value="sessions" className="mt-0">
-          <SessionsTab key={id} taskId={id} requestedSession={searchParams.get("session") ?? ""} />
+          <SessionsTab key={id} taskId={id} pendingIntercepts={pendingIntercepts} requestedSession={searchParams.get("session") ?? ""} />
         </TabsContent>
         <TabsContent value="traffic" className="mt-0">
           <TrafficHistory taskId={id} />
         </TabsContent>
         <TabsContent value="overview" className="mt-0">
-          <OverviewTab taskId={id} />
+          <React.Suspense fallback={<Spinner />}>
+            <OverviewTab taskId={id} />
+          </React.Suspense>
         </TabsContent>
         <TabsContent value="graph" className="mt-0">
-          <GraphTab taskId={id} />
+          <React.Suspense fallback={<Spinner />}>
+            <GraphTab taskId={id} />
+          </React.Suspense>
         </TabsContent>
         <TabsContent value="broadcast" className="mt-0">
           <BroadcastTab taskId={id} />
@@ -541,7 +551,9 @@ function TaskDetailInner() {
           <AssetsTab taskId={id} />
         </TabsContent>
         <TabsContent value="coverage" className="mt-0">
-          <CoverageGraphTab taskId={id} coverageEnabled={task?.coverage_enabled !== false} />
+          <React.Suspense fallback={<Spinner />}>
+            <CoverageGraphTab taskId={id} coverageEnabled={task?.coverage_enabled !== false} />
+          </React.Suspense>
         </TabsContent>
         <TabsContent value="intercept" className="mt-0">
           <InterceptTab taskId={id} />

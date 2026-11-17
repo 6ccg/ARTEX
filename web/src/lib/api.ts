@@ -1002,7 +1002,24 @@ export const api = {
     get<ConvTokenSummary[]>("/tokens/conversations")
       .then(arr)
       .catch(() => [] as ConvTokenSummary[]),
-  explorationGraph: (task?: string) => get<{ nodes: TaskNode[]; edges: Edge[] }>(`/exploration/graph${tq(task)}`),
+  explorationGraph: async (task?: string) => {
+    const nodes: TaskNode[] = [];
+    const edges = new Map<string, Edge>();
+    let cursor = 0;
+    for (;;) {
+      const query = new URLSearchParams({ after: String(cursor), limit: "500" });
+      if (task) query.set("task", task);
+      const page = await get<{ nodes: TaskNode[]; edges: Edge[]; next_cursor: number; has_more: boolean }>(
+        `/exploration/graph?${query}`,
+      );
+      nodes.push(...(page.nodes ?? []));
+      for (const edge of page.edges ?? []) edges.set(`${edge.src}:${edge.rel}:${edge.dst}`, edge);
+      if (!page.has_more) break;
+      if (page.next_cursor <= cursor) throw new Error("Graph cursor did not advance");
+      cursor = page.next_cursor;
+    }
+    return { nodes, edges: [...edges.values()] };
+  },
   // 播报板:服务端按创建顺序分页的探索节点(默认最新在前)。
   explorationNodes: (task: string, query: ExplorationNodeQuery = {}) => {
     const q = new URLSearchParams();
