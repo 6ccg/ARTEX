@@ -57,24 +57,31 @@ func (d *DB) ToolStats(expID *int64, q string) ([]ToolStat, error) {
 	if expID != nil {
 		resultScope = " AND r.exploration_id=$1"
 	}
-	// Pair results in bulk: each result belongs to its latest preceding call in
-	// the same session, and only that call's earliest result supplies its status.
+	// Inspect only tool IDs that have a failed result. Within each session's
+	// call/result sequence, a result counts only if it immediately follows a call.
 	rows, err := d.Query(`
-WITH result_calls AS (
- SELECT DISTINCT ON(r.id) r.id AS result_id,u.id AS call_id,r.is_error
- FROM activity r JOIN activity u ON u.kind='tool_use'
- AND r.exploration_id=u.exploration_id AND r.tool_use_id=u.tool_use_id AND r.id>u.id
- AND r.worker IS NOT DISTINCT FROM u.worker AND r.node_id IS NOT DISTINCT FROM u.node_id
- AND COALESCE(r.main_seg,0)=COALESCE(u.main_seg,0)
- WHERE r.kind='tool_result'`+resultScope+`
- ORDER BY r.id,u.id DESC
+WITH totals AS MATERIALIZED (
+ SELECT COALESCE(NULLIF(u.tool,''),'-') AS tool,COUNT(*) AS total
+ FROM activity u `+where+` GROUP BY 1
+), failed_scope AS (
+ SELECT DISTINCT r.exploration_id,r.tool_use_id FROM activity r
+ WHERE r.kind='tool_result' AND r.is_error AND r.tool_use_id IS NOT NULL`+resultScope+`
+ AND EXISTS (SELECT 1 FROM totals)
 ), pairs AS (
- SELECT DISTINCT ON(call_id) call_id,is_error FROM result_calls ORDER BY call_id,result_id
+ SELECT a.kind,a.is_error,LAG(CASE WHEN a.kind='tool_use' THEN a.id END) OVER (
+  PARTITION BY a.exploration_id,a.tool_use_id,a.worker,a.node_id,COALESCE(a.main_seg,0)
+  ORDER BY a.id
+ ) AS call_id
+ FROM activity a JOIN failed_scope f USING(exploration_id,tool_use_id)
+ WHERE a.kind IN ('tool_use','tool_result')
+), failed_calls AS MATERIALIZED (
+ SELECT call_id AS id FROM pairs WHERE kind='tool_result' AND is_error AND call_id IS NOT NULL
+), failures AS (
+ SELECT COALESCE(NULLIF(u.tool,''),'-') AS tool,COUNT(*) AS errors
+ FROM failed_calls JOIN activity u ON u.id=failed_calls.id `+where+` GROUP BY 1
 )
-SELECT COALESCE(NULLIF(u.tool,''),'-') AS tool,COUNT(*) AS total,
- COUNT(*) FILTER(WHERE pairs.is_error) AS errors
-FROM activity u LEFT JOIN pairs ON pairs.call_id=u.id
-`+where+` GROUP BY 1 ORDER BY total DESC,tool ASC`, args...)
+SELECT totals.tool,totals.total,COALESCE(failures.errors,0) AS errors
+FROM totals LEFT JOIN failures USING(tool) ORDER BY totals.total DESC,totals.tool ASC`, args...)
 	if err != nil {
 		return nil, err
 	}

@@ -14,7 +14,7 @@ import (
 //go:embed upgrade_legacy.sql
 var legacySchemaSQL string
 
-const schemaRevision = 6
+const schemaRevision = 7
 const schemaRevisionKey = "database_schema_revision"
 
 // The caller holds schemaMigrationLockKey on conn. Each upgrade and its version
@@ -110,6 +110,12 @@ CREATE INDEX IF NOT EXISTS idx_conv_result ON conversation_activities(conversati
 	}
 	if version < 6 {
 		if _, err := tx.ExecContext(ctx, mcpServerSchema); err != nil {
+			return err
+		}
+	}
+	if version < 7 {
+		if _, err := tx.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_act_failed_result ON activity(exploration_id,id)
+WHERE kind='tool_result' AND is_error`); err != nil {
 			return err
 		}
 	}
