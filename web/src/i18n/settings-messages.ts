@@ -12,14 +12,18 @@ export const settingsMessages = {
   "settings.workerLimit": ["Worker 总数不能超过 50", "The total number of Workers cannot exceed 50"],
   "settings.duplicatePoolProfile": ["不能重复选择同一个 LLM 配置", "Each LLM profile can only be selected once"],
   "settings.workerPoolsSaved": [
-    "已保存多模型 Worker 池（对之后启动的任务生效）",
-    "Model pools saved; applies to tasks started afterward",
+    "已保存多模型 Worker 池；跟随全局并发的运行中任务将同步调整（在途工作在原模型完成后切换）",
+    "Model pools saved; running tasks following global concurrency update while active work finishes on its current model",
+  ],
+  "settings.workerPoolsCleared": [
+    "已清空多模型 Worker 池，恢复使用系统设置中的全局默认 Worker 并发数",
+    "Model pools cleared; plain global Worker concurrency from System settings is restored",
   ],
   "settings.saveFailed": ["保存失败：{{message}}", "Could not save: {{message}}"],
   "settings.positiveConcurrency": ["并发数必须是大于 0 的整数", "Concurrency must be a positive whole number"],
   "settings.workersSaved": [
-    "已保存并发工作 agent 数（对之后启动的任务生效）",
-    "Worker count saved; applies to tasks started afterward",
+    "已保存全局默认 Worker 并发数（跟随全局的运行中任务同步生效，单任务指定值不受影响）",
+    "Global Worker count saved; applies to new and running tasks following global concurrency (explicit task overrides are unchanged)",
   ],
   "settings.saveFailedPrefix": ["保存失败：", "Could not save: "],
   "settings.pythonSaved": ["已保存 Python 解释器配置", "Python interpreter settings saved"],
@@ -481,12 +485,35 @@ export const settingsMessages = {
   "settings.detectAgain": ["重新检测", "Detect again"],
   "settings.workers": ["工作并发 · Work Agent 数", "Concurrency · Worker count"],
   "settings.workersHelpStart": [
-    "每个任务并发运行的工作 agent 数量（默认 3）。数值越大并发探测越多、消耗也越高。修改后",
-    "The number of Workers running concurrently per task (default: 3). More Workers mean more parallel probes and higher usage. Changes ",
+    "未单独指定并发数的任务默认并行运行的 Worker 数量（默认 3）。数值越大并发探测越多、消耗也越高。修改后",
+    "Default concurrent Workers per task when no task override is set (default: 3). More Workers mean more parallel probes and higher usage. Changes ",
   ],
-  "settings.futureTasksOnly": ["对之后启动的任务生效", "apply to tasks started afterward"],
-  "settings.runningTasksUnchanged": ["，正在运行的任务不受影响。", "; running tasks are unaffected."],
+  "settings.futureTasksOnly": [
+    "对新任务及跟随全局的运行中任务立即生效",
+    "apply immediately to new tasks and running tasks following global",
+  ],
+  "settings.runningTasksUnchanged": [
+    "（调大立即补充 Worker，调小等待在途工作自然结束，无需重启；单任务已指定并发的不受影响）。同时运行任务总数上限请在任务列表「并发设置」中配置。",
+    " (increasing adds Workers immediately, decreasing lets active work finish without restarting; explicit per-task overrides are unaffected). Configure the simultaneous running task limit separately in Task list → Concurrency.",
+  ],
   "settings.workerPools": ["多模型 Worker 池", "Model pools"],
+  "settings.workerPoolsSubtitle": [
+    "按 LLM 配置分配跟随全局并发任务的并行 Worker 数",
+    "Allocate concurrent Workers across LLM profiles for tasks following global concurrency",
+  ],
+  "settings.workerPoolsHelp": [
+    "非空时由各模型池 Worker 数之和决定跟随全局并发的任务并发度；修改对运行中继承全局的任务即时生效，在途工作在原模型自然完成后切换。已单独指定 Worker 数的任务使用其自身 LLM 配置链，不走全局模型池。清空模型池并保存即可恢复系统设置中的全局默认并发数。",
+    "When non-empty, pool Worker counts determine total concurrency for tasks following global settings. Changes apply to running inheriting tasks while active work finishes on its original model. Tasks with an explicit Worker count use their own LLM chain instead of these pools. Clear all pools and save to restore the plain global Worker count.",
+  ],
+  "settings.workerPoolsEmptyHint": [
+    "当前未配置多模型池，任务默认使用「系统设置 → 工作并发」中的全局数量（当前 {{workers}}）。",
+    "No model pools configured. Tasks following global concurrency use the plain Worker count from System settings (currently {{workers}}).",
+  ],
+  "settings.workerPoolsUnsavedClearHint": [
+    "已移除全部模型池条目，点击「保存」即可清空服务器模型池并恢复全局默认并发数。",
+    "All pool rows removed. Click Save to clear server model pools and restore the plain global Worker count.",
+  ],
+  "settings.clearPools": ["清空模型池", "Clear pools"],
   "settings.addPool": ["添加模型池", "Add model pool"],
   "settings.unavailableProfile": ["配置 #{{id}} 已删除/不可用", "Profile #{{id}} deleted or unavailable"],
   "settings.chooseProfile": ["选择 LLM 配置", "Select LLM profile"],
@@ -496,6 +523,11 @@ export const settingsMessages = {
     "已配置模型池时由各池数量决定并发。",
     "When model pools are configured, their Worker counts determine concurrency.",
   ],
+  "settings.poolManagedInLLM": [
+    "当前已启用多模型 Worker 池，总并发由模型池决定（只读）。前往 LLM 配置页修改各池分配，或清空模型池以恢复此处默认数量。",
+    "Multi-model Worker pools are active and determine total concurrency (read-only). Manage or clear pools on the LLM page to restore the plain default count here.",
+  ],
+  "settings.openLLMWorkerPools": ["前往 LLM 配置管理模型池", "Manage model pools in LLM"],
   "settings.workerConfigLockedHelp": [
     "设置加载失败，Worker 配置已锁定；刷新成功后才能编辑或保存。",
     "Settings could not be loaded. Worker configuration is locked until a successful refresh.",

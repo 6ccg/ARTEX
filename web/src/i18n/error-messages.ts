@@ -1,4 +1,5 @@
 export const errorMessages = {
+  "error.tool_schema_object_required": ["参数 Schema 必须是 JSON 对象", "The parameter schema must be a JSON object"],
   "error.intelligence_response_invalid": [
     "情报数据响应不完整，请刷新后重试",
     "The intelligence response is incomplete. Refresh to try again.",

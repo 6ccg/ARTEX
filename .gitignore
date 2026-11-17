@@ -20,6 +20,7 @@ web/public/demo-version.json
 
 # development tools
 /.artifacts/
+/output/
 .playwright-mcp/
 .playwright-cli/
 .idea/

@@ -1,4 +1,8 @@
 export const taskMessages = {
+  "taskUI.filterSearchLimit": [
+    "最多显示 {{count}} 个匹配项，请输入名称或 ID 搜索",
+    "Showing up to {{count}} matches. Search by name or ID.",
+  ],
   "taskFiles.tab": ["文件", "Files"],
   "taskFiles.tree": ["目录树", "Directory tree"],
   "taskFiles.recent": ["最近文件", "Recent files"],
@@ -437,8 +441,50 @@ export const taskMessages = {
   "taskUI.workerCount": ["Worker 运行数量（可选）", "Worker count (optional)"],
   "taskUI.globalDefault": ["留空 = 全局默认", "Leave empty for global default"],
   "taskUI.workerCountHelp": [
-    "单独设置本任务并发运行的工作 Agent 数量；留空或 0 = 用全局默认（系统设置里的工作并发，默认 3）。上限 50。",
-    "Set concurrent Workers for this task. Leave empty or enter 0 to use the global Worker concurrency setting (default: 3). Maximum: 50.",
+    "单独设置本任务并发运行的工作 Agent 数量；留空或 0 = 跟随全局工作并发与多模型 Worker 池；1–50 = 使用本任务模型链独立控制并发（替代全局模型池）。上限 50，运行中可随时调整。",
+    "Set concurrent Workers for this task. Leave empty or enter 0 to follow global Worker concurrency and model pools; enter 1–50 to use this task’s model chain instead of global pools. Maximum: 50; adjustable while running.",
+  ],
+  "taskUI.workerConcurrency": ["单任务 Worker 并发", "Task Worker concurrency"],
+  "taskUI.workerTriggerGlobal": ["Worker · 全局", "Workers · Global"],
+  "taskUI.workerTriggerOverride": ["Worker · {{workers}}", "Workers · {{workers}}"],
+  "taskUI.workerTooltipGlobal": [
+    "单任务 Worker 并发：跟随全局默认与多模型 Worker 池",
+    "Task Worker concurrency: following global default and model pools",
+  ],
+  "taskUI.workerTooltipOverride": [
+    "单任务 Worker 并发：固定 {{workers}}（使用本任务模型链）",
+    "Task Worker concurrency: override {{workers}} (using task model chain)",
+  ],
+  "taskUI.workerModeGlobal": [
+    "当前模式：跟随全局工作并发与多模型 Worker 池",
+    "Current: following global Worker concurrency and model pools",
+  ],
+  "taskUI.workerModeOverride": [
+    "当前模式：单任务覆盖 {{workers}}（使用本任务模型链，替代全局模型池）",
+    "Current: task override {{workers}} (uses task model chain, replacing global pools)",
+  ],
+  "taskUI.workerCountInputLabel": ["本任务 Worker 并发数（0–50）", "Workers for this task (0–50)"],
+  "taskUI.workerCountInputPlaceholder": ["0 或留空 = 跟随全局", "0 or blank = follow global"],
+  "taskUI.workerLiveHelp": [
+    "0 或留空跟随全局工作并发与多模型池；1–50 使用本任务的 LLM 配置链并替代全局模型池。调大立即补充 Worker，调小等待在途工作自然结束，无需重启任务；运行中、暂停和排队状态均可修改。",
+    "0 or blank follows global concurrency and model pools; 1–50 uses this task’s LLM chain and replaces global pools. Increasing adds Workers immediately; decreasing lets active work finish without restarting. Editable while running, paused or queued.",
+  ],
+  "taskUI.workerScopeDistinction": [
+    "仅控制本任务内部的并行 Worker 数；同时运行任务上限请在任务列表「并发设置」中配置。",
+    "Controls parallel Workers inside this task only. The simultaneous running task limit is configured separately in Task list → Concurrency.",
+  ],
+  "taskUI.workerTerminalReadonly": [
+    "任务已结束，单任务 Worker 并发仅供查看。",
+    "This task has finished; Worker concurrency is read-only.",
+  ],
+  "taskUI.workerFollowGlobalAction": ["恢复跟随全局", "Follow global"],
+  "taskUI.workerOverrideSaved": [
+    "已更新本任务 Worker 并发为 {{workers}}（立即生效，在途工作平滑过渡）",
+    "Task Worker concurrency set to {{workers}}; takes effect without restarting",
+  ],
+  "taskUI.workerResetGlobalSaved": [
+    "已恢复跟随全局工作并发与多模型 Worker 池",
+    "Task now follows global Worker concurrency and model pools",
   ],
   "taskUI.seedIntent": ["直接下发首个意图（描述+目标）", "Send the first intent directly (description + goal)"],
   "taskUI.seedIntentHelp": [

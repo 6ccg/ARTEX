@@ -5,6 +5,21 @@ export function cn(...inputs: ClassValue[]) {
   return twMerge(clsx(inputs));
 }
 
+export function countTextMatches(value: string, query: string): number {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return 0;
+  const haystack = value.toLowerCase();
+  let count = 0;
+  let cursor = 0;
+  while (cursor <= haystack.length - needle.length) {
+    const index = haystack.indexOf(needle, cursor);
+    if (index < 0) break;
+    count += 1;
+    cursor = index + needle.length;
+  }
+  return count;
+}
+
 // 抽屉/对话框(Sheet/Dialog)的 onInteractOutside 关闭判定辅助。
 //
 // 背景:抽屉内的 Radix 弹层(Select 下拉、DropdownMenu、Popover 等)会 portal 到抽屉
