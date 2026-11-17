@@ -54,7 +54,8 @@ CREATE TABLE IF NOT EXISTS exchanges (
 );
 CREATE INDEX IF NOT EXISTS idx_ex_host ON exchanges(host);
 CREATE INDEX IF NOT EXISTS idx_ex_tmpl ON exchanges(host, url_template);
-CREATE INDEX IF NOT EXISTS idx_ex_ts   ON exchanges(ts);
+CREATE INDEX IF NOT EXISTS idx_ex_ts_id ON exchanges(ts DESC,id DESC);
+DROP INDEX IF EXISTS idx_ex_ts;
 CREATE INDEX IF NOT EXISTS idx_ex_status ON exchanges(status);
 CREATE INDEX IF NOT EXISTS idx_ex_resp   ON exchanges(resp_len);
 
@@ -286,6 +287,9 @@ func (t *Traffic) initIndex() error {
 		log.Printf("[traffic] 索引库未启用增量回收（auto_vacuum=%d）：删除流量不会缩小 index.sqlite，需要执行一次存储压缩来转换", mode)
 	}
 	if _, err := conn.ExecContext(ctx, indexSchema); err != nil {
+		return err
+	}
+	if err := ensureRouteIndex(ctx, conn); err != nil {
 		return err
 	}
 	if _, err := conn.ExecContext(ctx, ftsSchema); err != nil {
@@ -1028,7 +1032,7 @@ func (t *Traffic) pageFilter(f PageQuery) (string, []any) {
 		}
 	}
 	if f.RouteURL != "" {
-		add(routeURLSQL+"=?", f.RouteURL)
+		add("route_url=?", f.RouteURL)
 	}
 	return where, args
 }

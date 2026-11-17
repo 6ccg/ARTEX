@@ -15,6 +15,10 @@ func TestRouteGroupsAndExactDrilldown(t *testing.T) {
 	if err != nil || total != 3 || matched != 4 || len(groups) != 1 {
 		t.Fatalf("page groups=%+v total=%d matched=%d err=%v", groups, total, matched, err)
 	}
+	groups, total, matched, err = tr.GroupPage(f, 3, 1)
+	if err != nil || total != 3 || matched != 4 || len(groups) != 0 {
+		t.Fatalf("past last page groups=%+v total=%d matched=%d err=%v", groups, total, matched, err)
+	}
 	groups, total, matched, err = tr.GroupPage(PageQuery{Hosts: []string{"group.example"}, RespMin: -1, RespMax: -1}, 0, 10)
 	if err != nil || total != 2 || matched != 3 {
 		t.Fatalf("scope %d %d %v", total, matched, err)
