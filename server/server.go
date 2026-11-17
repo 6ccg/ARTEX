@@ -1,12 +1,14 @@
 package server
 
 import (
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"mime"
 	"net"
 	"net/http"
 	"net/url"
@@ -22,9 +24,9 @@ import (
 	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/egress"
-	"github.com/Autumn-27/artex/internal/httpidentity"
 	"github.com/Autumn-27/artex/intercept"
 	"github.com/Autumn-27/artex/intercept/jev"
+	"github.com/Autumn-27/artex/internal/httpidentity"
 	"github.com/Autumn-27/artex/report"
 	"github.com/Autumn-27/artex/traffic"
 	actool "github.com/Autumn-27/norma/tool"
@@ -1917,32 +1919,53 @@ func taskIntentHistoryPage(store *db.ExplorationStore, before int64, limit int, 
 	}
 }
 
+const graphRangeSize = 2000
+
 // explorationGraph pages the exploration chain, including historical sources.
 func (s *Server) explorationGraph(w http.ResponseWriter, r *http.Request) {
-	t := s.m.ResolveTask(r.URL.Query().Get("task"))
+	query := r.URL.Query()
+	index := query.Get("view") == "index"
+	t := s.m.ResolveTask(query.Get("task"))
 	if t == nil {
+		if index {
+			writeJSON(w, 200, map[string]any{"ranges": []db.GraphRange{}})
+			return
+		}
 		writeJSON(w, 200, map[string]any{"nodes": []any{}, "edges": []any{}})
 		return
 	}
-	after := int64(atoiDefault(r.URL.Query().Get("after"), 0))
-	size := min(500, max(1, atoiDefault(r.URL.Query().Get("limit"), 500)))
-	type graphSource struct {
-		store  *db.ExplorationStore
-		taskID int64
-	}
-	stores := []graphSource{{store: t.Store}}
 	sources, err := t.Store.DirectSourceStores()
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
 	}
+	if index {
+		ranges, err := t.Store.GraphIndex(r.Context(), sources, graphRangeSize)
+		if err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		writeJSON(w, 200, map[string]any{"ranges": ranges})
+		return
+	}
+	after, _ := strconv.ParseInt(query.Get("after"), 10, 64)
+	through, _ := strconv.ParseInt(query.Get("through"), 10, 64)
+	size := min(500, max(1, atoiDefault(query.Get("limit"), 500)))
+	if through > after {
+		size = graphRangeSize
+	}
+	type graphSource struct {
+		store  *db.ExplorationStore
+		taskID int64
+	}
+	stores := []graphSource{{store: t.Store}}
 	for _, source := range sources {
 		stores = append(stores, graphSource{source.Store, source.Task.TaskID})
 	}
 	nodes := []*db.Node{}
 	more := false
 	for _, source := range stores {
-		page, next, err := source.store.GraphNodePage(after, size, source.taskID > 0)
+		page, next, err := source.store.GraphNodeRange(r.Context(), after, through, size, source.taskID > 0)
 		if err != nil {
 			writeErr(w, 500, err.Error())
 			return
@@ -1980,7 +2003,35 @@ func (s *Server) explorationGraph(w http.ResponseWriter, r *http.Request) {
 	if len(nodes) > 0 {
 		cursor = nodes[len(nodes)-1].ID
 	}
-	writeJSON(w, 200, map[string]any{"nodes": taskNodeDTOs(nodes), "edges": edgeDTOs(edges), "next_cursor": cursor, "has_more": more})
+	page := map[string]any{"nodes": taskNodeDTOs(nodes), "edges": edgeDTOs(edges), "next_cursor": cursor, "has_more": more}
+	if through > after {
+		writeGraphRange(w, r, page)
+		return
+	}
+	writeJSON(w, 200, page)
+}
+
+func writeGraphRange(w http.ResponseWriter, r *http.Request, page map[string]any) {
+	w.Header().Add("Vary", "Accept-Encoding")
+	for _, value := range strings.Split(r.Header.Get("Accept-Encoding"), ",") {
+		coding, params, err := mime.ParseMediaType(value)
+		if err != nil || coding != "gzip" {
+			continue
+		}
+		if q, ok := params["q"]; ok {
+			weight, err := strconv.ParseFloat(q, 64)
+			if err != nil || weight <= 0 {
+				break
+			}
+		}
+		z, _ := gzip.NewWriterLevel(w, gzip.BestSpeed)
+		w.Header().Set("Content-Encoding", "gzip")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(z).Encode(page)
+		_ = z.Close()
+		return
+	}
+	writeJSON(w, http.StatusOK, page)
 }
 
 // explorationNodes serves the 播报板: this task's own exploration nodes as a
