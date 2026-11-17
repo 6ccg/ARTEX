@@ -65,8 +65,8 @@ func TestAbortDeletePreservesExistingPause(t *testing.T) {
 }
 
 func TestBeginTaskDeleteSerializesWithLifecycleLock(t *testing.T) {
-	s := &Server{engine: NewEngine(nil)}
-	s.concMu.Lock()
+	s := &Server{Runtime: &Runtime{m: &Manager{}, engine: NewEngine(nil)}}
+	s.m.taskControlMu.Lock()
 	done := make(chan bool, 1)
 	go func() { done <- s.beginTaskDelete("42") }()
 
@@ -78,7 +78,7 @@ func TestBeginTaskDeleteSerializesWithLifecycleLock(t *testing.T) {
 	if s.engine.IsDeleting("42") {
 		t.Fatal("delete barrier was installed before concMu was released")
 	}
-	s.concMu.Unlock()
+	s.m.taskControlMu.Unlock()
 	select {
 	case ok := <-done:
 		if !ok {
@@ -92,7 +92,7 @@ func TestBeginTaskDeleteSerializesWithLifecycleLock(t *testing.T) {
 
 func TestDeletingRunningTaskKeepsConcurrencySlotUntilCommit(t *testing.T) {
 	task := &Task{ID: "42", Status: "running"}
-	s := &Server{engine: NewEngine(nil)}
+	s := &Server{Runtime: &Runtime{m: &Manager{}, engine: NewEngine(nil)}}
 	if !s.engine.BeginDelete(task.ID) {
 		t.Fatal("install delete barrier")
 	}
@@ -105,9 +105,9 @@ func TestDeletingRunningTaskKeepsConcurrencySlotUntilCommit(t *testing.T) {
 func TestTaskLifecycleRechecksDeleteBarrierAfterConcLock(t *testing.T) {
 	task := &Task{ID: "42", notify: make(chan struct{}, 1)}
 	m := &Manager{tasks: map[string]*Task{task.ID: task}}
-	s := &Server{m: m, engine: NewEngine(m)}
+	s := &Server{Runtime: &Runtime{m: m, engine: NewEngine(m)}}
 
-	s.concMu.Lock()
+	s.m.taskControlMu.Lock()
 	started := make(chan struct{})
 	pauseDone := make(chan error, 1)
 	go func() {
@@ -119,13 +119,13 @@ func TestTaskLifecycleRechecksDeleteBarrierAfterConcLock(t *testing.T) {
 	if !s.engine.BeginDelete(task.ID) {
 		t.Fatal("install delete barrier")
 	}
-	s.concMu.Unlock()
+	s.m.taskControlMu.Unlock()
 	if err := <-pauseDone; err == nil || !strings.Contains(err.Error(), "正在删除") {
 		t.Fatalf("pause passed a delete barrier installed while waiting for concMu: %v", err)
 	}
 	s.engine.AbortDelete(task.ID, false)
 
-	s.concMu.Lock()
+	s.m.taskControlMu.Lock()
 	started = make(chan struct{})
 	admitDone := make(chan error, 1)
 	go func() {
@@ -137,7 +137,7 @@ func TestTaskLifecycleRechecksDeleteBarrierAfterConcLock(t *testing.T) {
 	if !s.engine.BeginDelete(task.ID) {
 		t.Fatal("install second delete barrier")
 	}
-	s.concMu.Unlock()
+	s.m.taskControlMu.Unlock()
 	if err := <-admitDone; err == nil || !strings.Contains(err.Error(), "being deleted") {
 		t.Fatalf("admission passed a delete barrier installed while waiting for concMu: %v", err)
 	}
@@ -149,13 +149,13 @@ func TestAbortTaskDeleteUsesPersistedPauseAndQueueState(t *testing.T) {
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) - skipping", err)
 	}
-	defer m.Close()
+	t.Cleanup(func() { _ = m.Close() })
 	task, err := m.CreateTask("delete abort state", "restore persisted barrier", nil, 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _, _ = m.DeleteTask(task.ID, DeleteTaskOptions{}) }()
-	s := &Server{m: m, engine: NewEngine(m)}
+	s := &Server{Runtime: &Runtime{m: m, engine: NewEngine(m)}}
 
 	// An engine-only pause is not authoritative. The committed task is running,
 	// so aborting deletion must clear this stale in-memory barrier.
@@ -187,11 +187,11 @@ func TestStopTaskCancelsRuntimeAndClearsLifecycleState(t *testing.T) {
 	const taskID = "42"
 	e.deleteMu.RLock()
 	rt := e.registerTaskRoutines(context.Background(), taskID, 1)
-	e.started.Store(taskID, true)
-	e.lastAct.Store(taskID, int64(1))
-	e.paused.Store(taskID, true)
-	e.plannerRound.Store(taskID, 3)
-	e.coordStarted.Store(taskID, true)
+	e.taskRun(taskID).started.Store(true)
+	e.taskRun(taskID).lastAct.Store(int64(1))
+	e.taskRun(taskID).paused.Store(true)
+	e.taskRun(taskID).plannerRound.Store(3)
+	e.taskRun(taskID).coordinator.Store(new(int))
 	e.deleteMu.RUnlock()
 
 	done := make(chan struct{})
@@ -210,13 +210,10 @@ func TestStopTaskCancelsRuntimeAndClearsLifecycleState(t *testing.T) {
 		t.Fatalf("task lifecycle maps were not cleared: started=%v paused=%v deleting=%v",
 			e.Started(taskID), e.IsPaused(taskID), e.IsDeleting(taskID))
 	}
-	if _, ok := e.lastAct.Load(taskID); ok {
+	if e.LastActivity(taskID) != 0 {
 		t.Fatal("last activity state was retained")
 	}
-	if _, ok := e.plannerRound.Load(taskID); ok {
-		t.Fatal("planner round state was retained")
-	}
-	if _, ok := e.coordStarted.Load(taskID); ok {
+	if run := e.lookupTaskRun(taskID); run != nil && run.coordinator.Load() != nil {
 		t.Fatal("deadline coordinator state was retained")
 	}
 	e.runtimeMu.Lock()
@@ -243,11 +240,7 @@ func TestCanonicalTaskID(t *testing.T) {
 func TestCancelChatThenWaitTaskQuiescent(t *testing.T) {
 	e := NewEngine(nil)
 	chatCtx, chatCancel := context.WithCancelCause(context.Background())
-	s := &Server{
-		engine:     e,
-		chatBusy:   map[string]bool{"7": true},
-		chatCancel: map[string]context.CancelCauseFunc{"7": chatCancel},
-	}
+	s := &Server{Runtime: &Runtime{engine: e, chatBusy: map[string]bool{"7": true}, chatCancel: map[string]context.CancelCauseFunc{"7": chatCancel}}}
 	if !e.beginTaskOperation("7") {
 		t.Fatal("task operation should be admitted")
 	}
@@ -288,11 +281,7 @@ func TestCancelChatThenWaitTaskQuiescent(t *testing.T) {
 }
 
 func TestWaitTaskQuiescentHonorsContext(t *testing.T) {
-	s := &Server{
-		engine:     NewEngine(nil),
-		chatBusy:   map[string]bool{"9": true},
-		chatCancel: map[string]context.CancelCauseFunc{},
-	}
+	s := &Server{Runtime: &Runtime{engine: NewEngine(nil), chatBusy: map[string]bool{"9": true}, chatCancel: map[string]context.CancelCauseFunc{}}}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
 	if err := s.waitTaskQuiescent(ctx, "9"); !errors.Is(err, context.DeadlineExceeded) {
@@ -302,11 +291,7 @@ func TestWaitTaskQuiescentHonorsContext(t *testing.T) {
 
 func TestTaskChatStatusUsesAuthoritativeBusyState(t *testing.T) {
 	m := &Manager{tasks: map[string]*Task{"7": {ID: "7"}}}
-	s := &Server{
-		m:          m,
-		chatBusy:   map[string]bool{"7": true},
-		chatCancel: map[string]context.CancelCauseFunc{},
-	}
+	s := &Server{Runtime: &Runtime{m: m, chatBusy: map[string]bool{"7": true}, chatCancel: map[string]context.CancelCauseFunc{}}}
 	req := httptest.NewRequest(http.MethodGet, "/api/tasks/7/chat/status", nil)
 	req.SetPathValue("id", "7")
 	rec := httptest.NewRecorder()
@@ -329,7 +314,7 @@ func TestTaskChatStatusUsesAuthoritativeBusyState(t *testing.T) {
 func TestTaskChatUploadRejectsDeleteBarrierBeforeCreatingDirectory(t *testing.T) {
 	dataDir := t.TempDir()
 	m := &Manager{dir: dataDir, tasks: map[string]*Task{"7": {ID: "7"}}}
-	s := &Server{m: m, engine: NewEngine(m)}
+	s := &Server{Runtime: &Runtime{m: m, engine: NewEngine(m)}}
 	if !s.engine.BeginDelete("7") {
 		t.Fatal("delete barrier should be installed")
 	}

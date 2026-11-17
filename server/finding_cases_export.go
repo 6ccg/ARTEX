@@ -14,7 +14,7 @@ type findingCaseExportPlan struct {
 }
 
 // Expand selection to complete cases before the evidence store freezes snapshots.
-func (s *Server) prepareFindingCaseExport(fs []*db.DBFinding) ([]*db.DBFinding, *findingCaseExportPlan, error) {
+func (s *Runtime) prepareFindingCaseExport(fs []*db.DBFinding) ([]*db.DBFinding, *findingCaseExportPlan, error) {
 	plan := &findingCaseExportPlan{cases: map[int64]*db.FindingCase{}, membership: map[int64]int64{}, selected: map[int64]bool{}}
 	expanded := append([]*db.DBFinding{}, fs...)
 	seen := map[int64]bool{}
@@ -58,7 +58,7 @@ func (s *Server) prepareFindingCaseExport(fs []*db.DBFinding) ([]*db.DBFinding, 
 
 // Composites are built AFTER staging real records, so their traffic attachments
 // remain private frozen export copies, not aliases to live or deleted evidence.
-func (s *Server) consolidateFindingCaseExport(fs []*db.DBFinding, plan *findingCaseExportPlan, includeOriginals bool) ([]*db.DBFinding, error) {
+func (s *Runtime) consolidateFindingCaseExport(fs []*db.DBFinding, plan *findingCaseExportPlan, includeOriginals bool) ([]*db.DBFinding, error) {
 	out := []*db.DBFinding{}
 	emitted := map[int64]bool{}
 	for _, f := range fs {

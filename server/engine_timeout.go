@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log"
 	"strconv"
-	"sync/atomic"
 	"time"
 
 	"github.com/Autumn-27/artex/agent"
@@ -26,40 +25,38 @@ const (
 // ---------- settling 状态 ----------
 
 func (e *Engine) isSettling(taskID string) bool {
-	v, _ := e.settling.Load(taskID)
-	b, _ := v.(bool)
-	return b
+	run := e.lookupTaskRun(taskID)
+	return run != nil && run.settling.Load()
 }
 
-// markSettling flips settling on; returns true only for the first caller.
 func (e *Engine) markSettling(taskID string) bool {
-	_, loaded := e.settling.LoadOrStore(taskID, true)
-	return !loaded
+	return e.taskRun(taskID).settling.CompareAndSwap(false, true)
 }
 
-// ---------- 在跑计数(worker.Execute + planner.Plan),用于 drain ----------
-
-func (e *Engine) inflightCounter(taskID string) *int64 {
-	v, _ := e.inflight.LoadOrStore(taskID, new(int64))
-	return v.(*int64)
-}
-
-// beginTaskOperation atomically registers a task-owned operation unless deletion
-// has already installed its barrier. The delete handler can therefore wait for
-// inflight==0 without a check-then-start race recreating files after cleanup.
+// Registration and deletion share the Engine admission gate. The per-task
+// wait group covers both loops and operations, so shutdown never polls counters.
 func (e *Engine) beginTaskOperation(taskID string) bool {
 	e.deleteMu.RLock()
 	defer e.deleteMu.RUnlock()
-	if e.IsDeleting(taskID) {
+	if e.closing.Load() || e.IsDeleting(taskID) {
 		return false
 	}
-	atomic.AddInt64(e.inflightCounter(taskID), 1)
+	run := e.taskRun(taskID)
+	run.wg.Add(1)
+	run.inflight.Add(1)
 	return true
 }
-
-func (e *Engine) decInflight(taskID string) { atomic.AddInt64(e.inflightCounter(taskID), -1) }
+func (e *Engine) decInflight(taskID string) {
+	if run := e.lookupTaskRun(taskID); run != nil {
+		run.inflight.Add(-1)
+		run.wg.Done()
+	}
+}
 func (e *Engine) inflightCount(taskID string) int64 {
-	return atomic.LoadInt64(e.inflightCounter(taskID))
+	if run := e.lookupTaskRun(taskID); run != nil {
+		return run.inflight.Load()
+	}
+	return 0
 }
 
 // ---------- deadline ----------
@@ -68,12 +65,13 @@ func (e *Engine) inflightCount(taskID string) int64 {
 // map (stamped this session); falls back to the DB-loaded value (restart), seeding
 // the map. 0 = no timeout / not yet stamped.
 func (e *Engine) taskDeadline(t *Task) int64 {
-	if v, ok := e.deadline.Load(t.ID); ok {
-		return v.(int64)
+	run := e.taskRun(t.ID)
+	if deadline := run.deadline.Load(); deadline > 0 {
+		return deadline
 	}
 	deadlineAt := t.lifecycleSnapshot().DeadlineAt
 	if deadlineAt > 0 {
-		e.deadline.Store(t.ID, deadlineAt)
+		run.deadline.Store(deadlineAt)
 		return deadlineAt
 	}
 	return 0
@@ -85,10 +83,11 @@ func (e *Engine) taskDeadline(t *Task) int64 {
 // stamps a fresh full budget. coordStarted is reset because the coordinator that
 // produced the timeout has already completed (or is in its final return path).
 func (e *Engine) resetTimeoutRevival(taskID string) {
-	e.settling.Delete(taskID)
-	e.deadline.Delete(taskID)
-	e.stamped.Delete(taskID)
-	e.coordStarted.Delete(taskID)
+	run := e.taskRun(taskID)
+	run.settling.Store(false)
+	run.deadline.Store(0)
+	run.stamped.Store(false)
+	run.coordinator.Store(nil)
 }
 
 // stampFirstRun records first_run_at + deadline_at on the FIRST real run (LLM ready)
@@ -97,17 +96,18 @@ func (e *Engine) stampFirstRun(t *Task) {
 	if t.TimeoutSeconds <= 0 {
 		return
 	}
-	if _, loaded := e.stamped.LoadOrStore(t.ID, true); loaded {
+	run := e.taskRun(t.ID)
+	if !run.stamped.CompareAndSwap(false, true) {
 		return
 	}
 	dl, err := e.m.StampTaskFirstRun(t.ID)
 	if err != nil {
 		log.Printf("[deadline] task %s 盖章 first_run 失败: %v", t.ID, err)
-		e.stamped.Delete(t.ID) // 允许下次重试
+		run.stamped.Store(false) // 允许下次重试
 		return
 	}
 	if dl > 0 {
-		e.deadline.Store(t.ID, dl)
+		run.deadline.Store(dl)
 		log.Printf("[deadline] task %s 首次运行,截止于 %s", t.ID, time.Unix(dl, 0).Format("2006-01-02 15:04:05"))
 	}
 }
@@ -138,12 +138,13 @@ func (e *Engine) startDeadlineCoordinator(ctx context.Context, t *Task) {
 		return
 	}
 	e.deleteMu.RLock()
-	if e.IsDeleting(t.ID) {
+	if e.closing.Load() || e.IsDeleting(t.ID) {
 		e.deleteMu.RUnlock()
 		return
 	}
 	token := new(int)
-	if _, loaded := e.coordStarted.LoadOrStore(t.ID, token); loaded {
+	run := e.taskRun(t.ID)
+	if !run.coordinator.CompareAndSwap(nil, token) {
 		e.deleteMu.RUnlock()
 		return
 	}
@@ -153,7 +154,7 @@ func (e *Engine) startDeadlineCoordinator(ctx context.Context, t *Task) {
 		defer func() {
 			// A terminal task may be revived while this routine is returning. Only
 			// remove our own marker, then ensure that revival has a coordinator.
-			if e.coordStarted.CompareAndDelete(t.ID, token) && loopCtx.Err() == nil && !e.isSettling(t.ID) && !isTerminalStatus(e.m.TaskStatus(t.ID)) {
+			if run.coordinator.CompareAndSwap(token, nil) && loopCtx.Err() == nil && !e.isSettling(t.ID) && !isTerminalStatus(e.m.TaskStatus(t.ID)) {
 				e.startDeadlineCoordinator(ctx, t)
 			}
 		}()

@@ -18,13 +18,13 @@ func TestAuthStatusFailsClosedWhenDataSourceUnavailable(t *testing.T) {
 	if err != nil {
 		t.Skipf("postgres unavailable (%v)", err)
 	}
-	defer m.Close()
+	t.Cleanup(func() { _ = m.Close() })
 	// 关掉池子，让后续 GetSetting 返回 error 而不是 sql.ErrNoRows。
 	if err := m.pg.Close(); err != nil {
 		t.Fatal(err)
 	}
 
-	s := &Server{m: m}
+	s := &Server{Runtime: &Runtime{m: m}}
 	w := httptest.NewRecorder()
 	s.authStatus(w, httptest.NewRequest("GET", "/api/auth/status", nil))
 
@@ -44,12 +44,12 @@ func TestAuthInitFailsClosedWhenDataSourceUnavailable(t *testing.T) {
 	if err != nil {
 		t.Skipf("postgres unavailable (%v)", err)
 	}
-	defer m.Close()
+	t.Cleanup(func() { _ = m.Close() })
 	if err := m.pg.Close(); err != nil {
 		t.Fatal(err)
 	}
 
-	s := &Server{m: m}
+	s := &Server{Runtime: &Runtime{m: m}}
 	w := httptest.NewRecorder()
 	body := strings.NewReader(`{"password":"correct horse battery"}`)
 	s.authInit(w, httptest.NewRequest("POST", "/api/auth/init", body))

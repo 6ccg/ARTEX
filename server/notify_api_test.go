@@ -49,11 +49,12 @@ func newNotifyFixture(t *testing.T) *notifyFixture {
 	// （防 SSRF 打到同机服务与云元数据）。测试显式打开这个开关；
 	// 守卫「默认拒绝」的行为由 notify 包的 ssrf_test.go 覆盖。
 	t.Setenv(notify.AllowLocalTargetsEnv, "1")
-	s, _, request := trafficEvidenceServer(t)
+	m := newTestManager(t)
+	s := newIdleAPIServer(t, m)
+	request := authenticatedRequest(t, s)
 	pg := s.m.pg
 
-	// 自建一个 task：共享装置 trafficEvidenceServer 造的 task 拿不到 exploration id，
-	// 而记录漏洞必须提供它。
+	// Each notification fixture owns exactly the task and findings it delivers.
 	task, err := s.m.CreateTask("通知推送测试", "推送行为验证", nil, 0, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -68,18 +69,13 @@ func newNotifyFixture(t *testing.T) *notifyFixture {
 	if err := pg.QueryRow(`SELECT COALESCE(max(id),0) FROM notification_events`).Scan(&mark); err != nil {
 		t.Fatal(err)
 	}
-	// 让装置自成闭环：把建 fixture 之前就存在的事件一次性标记为已分派。
-	//
-	// 为什么必须做：FanOutPendingEvents 是**全局**的，会把库里所有未分派事件
-	// 展开到所有匹配渠道上。而共享装置 trafficEvidenceServer 自己就会记一条漏洞
-	// （正是它返回的那个初始 finding），其它用例也可能有残留。不隔离的话，
-	// 这些杂散事件会被分派到本用例的渠道上，让「应有 N 条投递」这类断言
-	// 时对时错——而且错法取决于用例执行顺序，比直接失败更难查。
+	// Fan-out is global; consume earlier fixtures' events before adding this
+	// fixture's channels so their payloads cannot change the delivery counts.
 	if _, err := pg.Exec(`UPDATE notification_events SET fanned_out = true WHERE id <= $1 AND NOT fanned_out`, mark); err != nil {
 		t.Fatal(err)
 	}
 
-	f := &notifyFixture{s: s, pg: pg, request: request, n: newNotifier(s), taskID: taskID, expID: task.ExpID, cleanupMark: mark}
+	f := &notifyFixture{s: s, pg: pg, request: request, n: newNotifier(s.Runtime), taskID: taskID, expID: task.ExpID, cleanupMark: mark}
 	t.Cleanup(func() {
 		if _, err := pg.Exec(`DELETE FROM notification_events WHERE id > $1`, f.cleanupMark); err != nil {
 			t.Logf("清理通知事件失败: %v", err)

@@ -313,13 +313,13 @@ func (b *whereBuilder) buildLeaf(e Expr) (string, error) {
 		return "(" + strings.Join(parts, " OR ") + ")", nil
 	}
 
-	// task_id: $N = ANY(task_ids)
+	// task_id: EXISTS (SELECT 1 FROM task_asset_links membership WHERE membership.asset_id=assets.id AND membership.task_id=$N)
 	if f == "task_id" {
 		n, err := strconv.ParseInt(e.Value, 10, 64)
 		if err != nil {
 			return "", fmt.Errorf("task_id 需要整数值: %s", e.Value)
 		}
-		return b.next(n) + " = ANY(task_ids)", nil
+		return "EXISTS (SELECT 1 FROM task_asset_links membership WHERE membership.asset_id=assets.id AND membership.task_id=" + b.next(n) + ")", nil
 	}
 
 	// company_id: exact integer
@@ -497,7 +497,7 @@ func (s *AssetStore) CountDSL(dsl, typ string, taskID int64) (int, error) {
 	}
 	if taskID > 0 {
 		args = append(args, taskID)
-		where += fmt.Sprintf(" AND $%d = ANY(task_ids)", len(args))
+		where += fmt.Sprintf(" AND EXISTS (SELECT 1 FROM task_asset_links membership WHERE membership.asset_id=assets.id AND membership.task_id=$%d)", len(args))
 	}
 	var n int
 	err = s.db.QueryRow("SELECT count(*) FROM assets WHERE "+where, args...).Scan(&n)
@@ -530,7 +530,7 @@ func (s *AssetStore) QueryDSL(dsl, typ string, taskID int64, limit, offset int) 
 	}
 	if taskID > 0 {
 		args = append(args, taskID)
-		where += fmt.Sprintf(" AND $%d = ANY(task_ids)", len(args))
+		where += fmt.Sprintf(" AND EXISTS (SELECT 1 FROM task_asset_links membership WHERE membership.asset_id=assets.id AND membership.task_id=$%d)", len(args))
 	}
 	args = append(args, limit, offset)
 	q := assetSelectCols + " WHERE " + where +

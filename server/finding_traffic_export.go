@@ -173,6 +173,7 @@ func prepareFindingExportReport(markdown string, findingID int64, workspaceDir s
 	var out strings.Builder
 	var screenshots []exportedScreenshot
 	seen := map[string]bool{}
+	bySource := map[string]string{}
 	last := 0
 	for _, match := range screenshotMarkdownLink.FindAllStringSubmatchIndex(markdown, -1) {
 		out.WriteString(markdown[last:match[0]])
@@ -183,14 +184,21 @@ func prepareFindingExportReport(markdown string, findingID int64, workspaceDir s
 			last = match[1]
 			continue
 		}
-		archivePath := filepath.ToSlash(fmt.Sprintf("screenshots/%d/%s", findingID, filepath.Base(source)))
-		if !seen[archivePath] {
+		archivePath, known := bySource[source]
+		if !known {
+			base := filepath.Base(source)
+			archivePath = filepath.ToSlash(fmt.Sprintf("screenshots/%d/%s", findingID, base))
+			for n := 2; seen[archivePath]; n++ {
+				ext := filepath.Ext(base)
+				archivePath = filepath.ToSlash(fmt.Sprintf("screenshots/%d/%s-%d%s", findingID, strings.TrimSuffix(base, ext), n, ext))
+			}
 			info, statErr := os.Stat(source)
 			if statErr != nil {
 				return "", nil, statErr
 			}
 			screenshots = append(screenshots, exportedScreenshot{ReportPath: raw, ArchivePath: archivePath, SourcePath: source, CapturedAt: info.ModTime().Format("2006-01-02 15:04:05")})
 			seen[archivePath] = true
+			bySource[source] = archivePath
 		}
 		// Preserve the original alt text and only replace the image URL.
 		out.WriteString(markdown[match[0]:match[4]])

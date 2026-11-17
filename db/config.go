@@ -240,8 +240,7 @@ func (d *DB) deleteProfile(ctx context.Context, id int64) (bool, error) {
 	// order when their chains overlap multiple tasks.
 	lockedTasks, err := lockProfileReferenceRows(ctx, tx, `SELECT t.id
 FROM tasks t
-WHERE t.llm_profile_id=$1
-   OR t.active_llm_profile_id=$1
+WHERE t.active_llm_profile_id=$1
    OR EXISTS (
        SELECT 1 FROM task_llm_profiles x
        WHERE x.task_id=t.id AND x.profile_id=$1
@@ -290,8 +289,7 @@ FOR UPDATE`, id)
 	rows, err := tx.QueryContext(ctx, `SELECT ref_kind, ref_id FROM (
 	SELECT 'task'::text AS ref_kind, t.id AS ref_id
 FROM tasks t
-WHERE t.llm_profile_id=$1
-   OR t.active_llm_profile_id=$1
+WHERE t.active_llm_profile_id=$1
    OR EXISTS (
        SELECT 1 FROM task_llm_profiles x
        WHERE x.task_id=t.id AND x.profile_id=$1
@@ -386,14 +384,14 @@ LIMIT 1`, task.id, task.position).Scan(&next)
 				return false, err
 			}
 			if _, err := tx.ExecContext(ctx, `UPDATE tasks
-SET active_llm_profile_id=NULL, llm_profile_id=NULL, llm_chain_revision=llm_chain_revision+1
+SET active_llm_profile_id=NULL, llm_chain_revision=llm_chain_revision+1
 WHERE id=$1`, task.id); err != nil {
 				return false, err
 			}
 			continue
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE tasks
-SET active_llm_profile_id=$2, llm_profile_id=$2, llm_chain_revision=llm_chain_revision+1
+SET active_llm_profile_id=$2, llm_chain_revision=llm_chain_revision+1
 WHERE id=$1`, task.id, next); err != nil {
 			return false, err
 		}

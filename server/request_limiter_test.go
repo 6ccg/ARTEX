@@ -3,7 +3,7 @@ package server
 import "testing"
 
 func TestProfileRequestLimiterSurvivesCacheInvalidation(t *testing.T) {
-	s := &Server{}
+	s := &Server{Runtime: &Runtime{}}
 	limiter := s.requestLimiterForProfile(1)
 	if limiter == s.requestLimiterForProfile(2) || limiter == s.requestLimiterForProfile(0) {
 		t.Fatal("different profiles must have independent quotas")

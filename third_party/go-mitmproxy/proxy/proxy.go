@@ -4,9 +4,11 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"errors"
 	"net"
 	"net/http"
 	"net/url"
+	"sync"
 
 	"github.com/lqqyt2423/go-mitmproxy/cert"
 	"github.com/lqqyt2423/go-mitmproxy/internal/helper"
@@ -35,6 +37,9 @@ type Proxy struct {
 	shouldIntercept  func(req *http.Request) bool              // req is received by proxy.server
 	upstreamProxy    func(req *http.Request) (*url.URL, error) // req is received by proxy.server, not client request
 	authProxy        func(res http.ResponseWriter, req *http.Request) (bool, error)
+	requestMu        sync.Mutex
+	requests         sync.WaitGroup
+	closing          bool
 }
 
 // proxy.server req context key
@@ -70,19 +75,57 @@ func (proxy *Proxy) AddAddon(addon Addon) {
 
 func (proxy *Proxy) Start() error {
 	go func() {
-		if err := proxy.attacker.start(); err != nil {
+		if err := proxy.attacker.start(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			log.Error(err)
 		}
 	}()
-	return proxy.entry.start()
+	err := proxy.entry.start()
+	if !errors.Is(err, http.ErrServerClosed) {
+		_ = proxy.Close()
+	}
+	return err
 }
 
 func (proxy *Proxy) Close() error {
-	return proxy.entry.close()
+	proxy.stopRequests()
+	err := errors.Join(proxy.entry.close(), proxy.attacker.server.Close(), proxy.attacker.listener.Close())
+	proxy.requests.Wait()
+	proxy.attacker.h2WG.Wait()
+	proxy.attacker.client.CloseIdleConnections()
+	return err
 }
 
 func (proxy *Proxy) Shutdown(ctx context.Context) error {
-	return proxy.entry.shutdown(ctx)
+	proxy.stopRequests()
+	err := errors.Join(proxy.entry.shutdown(ctx), proxy.attacker.server.Shutdown(ctx))
+	done := make(chan struct{})
+	go func() {
+		proxy.requests.Wait()
+		proxy.attacker.h2WG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
+		err = errors.Join(err, ctx.Err())
+	}
+	return errors.Join(err, proxy.Close())
+}
+
+func (proxy *Proxy) stopRequests() {
+	proxy.requestMu.Lock()
+	proxy.closing = true
+	proxy.requestMu.Unlock()
+}
+
+func (proxy *Proxy) beginRequest() bool {
+	proxy.requestMu.Lock()
+	defer proxy.requestMu.Unlock()
+	if proxy.closing {
+		return false
+	}
+	proxy.requests.Add(1)
+	return true
 }
 
 func (proxy *Proxy) GetCertificate() x509.Certificate {

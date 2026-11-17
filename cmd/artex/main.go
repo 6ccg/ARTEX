@@ -124,7 +124,8 @@ func run() int {
 
 	mgr, err := server.NewManager(*dataDir, *proxy)
 	if err != nil {
-		log.Fatalf("open stores: %v", err)
+		log.Printf("open stores: %v", err)
+		return 1
 	}
 	defer mgr.Close()
 
@@ -139,18 +140,32 @@ func run() int {
 		skillDir = abs
 	}
 	log.Printf("[config] skill 目录: %s", skillDir)
-	srv := server.New(ctx, mgr, skillDir, *dataDir, config.BaseDir())
-	defer srv.Close()
+	app, err := server.NewRuntime(ctx, mgr, skillDir, *dataDir)
+	if err != nil {
+		log.Printf("prepare runtime: %v", err)
+		return 1
+	}
+	defer app.Close()
+	srv, err := server.NewHandler(app, config.BaseDir())
+	if err != nil {
+		log.Printf("prepare HTTP handler: %v", err)
+		return 1
+	}
+	if err := app.Start(); err != nil {
+		log.Printf("start runtime: %v", err)
+		return 1
+	}
 	httpSrv := &http.Server{
 		Addr:              *addr,
 		Handler:           srv.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
+	serveErr := make(chan error, 1)
 	go func() {
 		log.Printf("ARTEX %s backend listening on %s (data=%s, workers=%d)", version, *addr, *dataDir, mgr.Workers())
 		if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("serve: %v", err)
+			serveErr <- err
 		}
 	}()
 
@@ -160,6 +175,10 @@ func run() int {
 	code := 0
 	select {
 	case <-ctx.Done():
+	case err := <-serveErr:
+		log.Printf("serve: %v", err)
+		code = 1
+		shutdown(agent.AbortShutdown)
 	case <-server.RestartRequested():
 		code = selfupdate.ExitRestart
 		shutdown(agent.AbortShutdown)

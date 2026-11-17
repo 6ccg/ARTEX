@@ -1,9 +1,48 @@
 package llmpool
 
 import (
+	"context"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/Autumn-27/norma/llm"
 )
+
+func TestCancelledCompletionKeepsFailureState(t *testing.T) {
+	reg := NewRegistry(nil, nil)
+	reg.Trip(1, "transient failure", false)
+	before := reg.Get(1)
+	p := New([]*Member{member(1, "cancelled", 1, &fakeProv{errs: []error{context.Canceled}})}, reg)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, _, _, _ = p.Complete(ctx, llm.CompletionRequest{})
+	if after := reg.Get(1); after != before {
+		t.Fatalf("failure state changed on cancel: before=%+v after=%+v", before, after)
+	}
+}
+
+func TestResetCannotOvertakePendingPersistence(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	var saved atomic.Bool
+	reg := NewRegistry(func(int64, State) { close(entered); <-release; saved.Store(true) }, func(int64) { saved.Store(false) })
+	tripDone, resetDone := make(chan struct{}), make(chan struct{})
+	go func() { reg.Trip(1, "failure", true); close(tripDone) }()
+	<-entered
+	go func() { reg.Reset(1); close(resetDone) }()
+	select {
+	case <-resetDone:
+		close(release)
+		t.Fatal("reset overtook persistence")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(release)
+	<-tripDone
+	<-resetDone
+	if saved.Load() || reg.IsOpen(1) {
+		t.Fatal("old failure survived reset")
+	}
+}
 
 // A configured soft-trip threshold replaces the default: two transient failures
 // are enough, and the fixed cooldown replaces the 1/5/30min ladder.

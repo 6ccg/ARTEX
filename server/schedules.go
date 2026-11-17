@@ -26,7 +26,7 @@ type scheduleRequest struct {
 	TaskIDs          []int64 `json:"task_ids"`
 }
 
-func (s *Server) scheduleInput(req scheduleRequest, existing *db.TaskSchedule) db.TaskScheduleInput {
+func (s *Runtime) scheduleInput(req scheduleRequest, existing *db.TaskSchedule) db.TaskScheduleInput {
 	enabled := true
 	if req.Enabled != nil {
 		enabled = *req.Enabled
@@ -42,7 +42,7 @@ func parseScheduleID(r *http.Request) (int64, error) {
 	return strconv.ParseInt(r.PathValue("id"), 10, 64)
 }
 
-func (s *Server) scheduleDTO(item *db.TaskSchedule) map[string]any {
+func (s *Runtime) scheduleDTO(item *db.TaskSchedule) map[string]any {
 	raw, _ := json.Marshal(item)
 	var dto map[string]any
 	_ = json.Unmarshal(raw, &dto)
@@ -208,15 +208,15 @@ func (s *Server) runScheduleNow(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"ok": true, "started": started, "errors": errors})
 }
 
-func (s *Server) runScheduleTasks(item *db.TaskSchedule) (int, []string) {
+func (s *Runtime) runScheduleTasks(item *db.TaskSchedule) (int, []string) {
 	return s.startScheduleTasks(item, false)
 }
 
-func (s *Server) runScheduleTasksNow(item *db.TaskSchedule) (int, []string) {
+func (s *Runtime) runScheduleTasksNow(item *db.TaskSchedule) (int, []string) {
 	return s.startScheduleTasks(item, true)
 }
 
-func (s *Server) startScheduleTasks(item *db.TaskSchedule, forceManualPause bool) (int, []string) {
+func (s *Runtime) startScheduleTasks(item *db.TaskSchedule, forceManualPause bool) (int, []string) {
 	started := 0
 	errors := []string{}
 	for _, taskID := range item.TaskIDs {

@@ -62,7 +62,7 @@ func TestProxyPoolSwitchUpdatesGateway(t *testing.T) {
 }
 
 func TestDockerEmptyProxyDoesNotResumeTasks(t *testing.T) {
-	m := proxyTestManager(t)
+	m := newTestManager(t)
 	task, err := m.CreateTask("proxy pause", "goal", nil, 0, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -74,7 +74,7 @@ func TestDockerEmptyProxyDoesNotResumeTasks(t *testing.T) {
 	t.Setenv("ARTEX_EGRESS_URL", "http://gateway.invalid:8790")
 	m.network = egress.FromEnvironment()
 	m.globalProxy = ""
-	s := &Server{m: m}
+	s := &Server{Runtime: &Runtime{m: m}}
 	s.proxyReconnectSuccess()
 	if task.lifecycleSnapshot().PauseReason != "paused_by_proxy" {
 		t.Fatal("clearing the Docker proxy resumed a blocked task")

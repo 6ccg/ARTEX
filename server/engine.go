@@ -43,15 +43,6 @@ func dropReason(err error) string {
 	return "write_error"
 }
 
-// bumpDrop increments and returns the running count of dropped (unpersistable)
-// activity records for a task. Concurrent planner + worker emits race here, so the
-// counter is an atomic behind sync.Map. The count in the log shows loss scale at a
-// glance instead of forcing a grep-and-count.
-func (e *Engine) bumpDrop(taskID string) int64 {
-	v, _ := e.dropCnt.LoadOrStore(taskID, new(int64))
-	return atomic.AddInt64(v.(*int64), 1)
-}
-
 // preview collapses newlines and trims s to a short rune-safe snippet for one-line
 // log output (avoids dumping a multi-KB summary/detail into the log).
 func preview(s string, n int) string {
@@ -96,52 +87,17 @@ type Engine struct {
 
 	bc *Broadcaster // live activity pub/sub (SSE)
 
-	started  sync.Map // taskID -> bool, so Run is idempotent per task
-	lastAct  sync.Map // taskID -> int64 unix, last planner/worker activity (heartbeat)
-	llmCalls sync.Map // taskID -> *int64, actual planner/worker/main-agent LLM calls
-	paused   sync.Map // taskID -> bool, user-paused (planner + workers idle but loops alive)
-	deleting sync.Map // taskID -> bool, delete barrier (no new task-owned writes)
-	dropCnt  sync.Map // taskID -> *int64, running count of dropped (unpersistable) activity records
-
-	// deleteMu makes installing the delete barrier atomic with registering a new
-	// task operation. Once BeginDelete returns, every admitted writer is reflected
-	// in inflight and every later writer is rejected.
-	deleteMu sync.RWMutex
-
-	// Every long-lived task goroutine (planner, workers and deadline coordinator)
-	// runs under one task-scoped context. Successful deletion cancels that context,
-	// waits for all goroutines, then releases every task-level Engine reference.
+	// The admission gate excludes new work before waiting for task owners.
+	deleteMu  sync.RWMutex
+	closing   atomic.Bool
 	runtimeMu sync.Mutex
-	runtimes  map[string]*taskRuntime
+	runtimes  map[string]*taskRun
 
-	// per-task execution context: each planner.Plan / worker.Execute runs under it,
-	// so pausing can CANCEL an in-flight run (not just skip the next one). Recreated
-	// on resume since cancelling is one-shot. Every cancellation carries a named
-	// cause so the activity trace can identify the initiating control path.
-	execMu     sync.Mutex
-	execCancel map[string]context.CancelCauseFunc
-	execCtx    map[string]context.Context
-
-	// Per-work control lets the planner kill a worker and lets the UI pause/cancel
-	// one intent without pausing the whole task. The done channel closes only after
-	// runWorkerStep has stopped writing and committed its final state.
-	workMu sync.Mutex
-	work   map[int64]*workExecution
-
-	// steerBox queues planner course-corrections for a running work (keyed by intent
-	// id). The worker's PreToolUse hook drains it before its next tool call and hands
-	// the message to the model (blocking that call) so it re-plans — no kill needed.
+	// Intent IDs provide a direct lookup for user work controls.
+	workMu   sync.Mutex
+	work     map[int64]*workExecution
 	steerMu  sync.Mutex
 	steerBox map[int64][]string
-
-	plannerRound sync.Map // taskID -> int, planner round counter (for UI round separators)
-
-	// 任务级超时(见 docs/任务级超时与收尾设计.md):
-	settling     sync.Map // taskID -> bool, 任务已进入收尾时序(停止派/领新意图)
-	deadline     sync.Map // taskID -> int64 unix, 绝对截止时刻(首次运行时盖章;0/缺省=不限)
-	stamped      sync.Map // taskID -> bool, first_run_at 是否已盖章(本进程内只盖一次)
-	inflight     sync.Map // taskID -> *int64, 在跑的 planner.Plan + worker.Execute 计数(用于 drain)
-	coordStarted sync.Map // taskID -> bool, deadline 协调器是否已启动(Run/reload 去重)
 
 	// resolve returns a task's dedicated planner/worker (wired by the server as the
 	// authoritative task-router). nil,nil means this task is deliberately unavailable
@@ -149,8 +105,6 @@ type Engine struct {
 	resolve              func(t *Task) (*agent.Planner, *agent.Worker)
 	resolveAuthoritative bool
 	workerResolve        func(t *Task, slot WorkerSlot) (*agent.Worker, error)
-	slotState            sync.Map // task/slot -> slotAvailability
-	slotPlans            sync.Map // task -> map[slot name]profile ID; immutable for a run
 	// readiness reports whether a global LLM provider is configured — the signal behind
 	// Ready()/the llm_configured indicator. Wired once at startup; nil → not ready.
 	readiness    func() bool
@@ -164,252 +118,10 @@ type slotAvailability struct {
 	lastEmit  time.Time
 }
 
-type taskRuntime struct {
-	ctx    context.Context
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
-}
-
 type workExecution struct {
 	cancel context.CancelCauseFunc
 	done   chan error
 	action string // user action: pause | cancel
-}
-
-// nextPlannerRound returns the next planner round number for a task (1-based).
-func (e *Engine) nextPlannerRound(taskID string) int {
-	v, _ := e.plannerRound.LoadOrStore(taskID, 0)
-	n := v.(int) + 1
-	e.plannerRound.Store(taskID, n)
-	return n
-}
-
-// Pause stops a task: marks it paused AND cancels any in-flight planner/worker run
-// for it (a long worker.Execute would otherwise keep going until it finishes).
-func (e *Engine) Pause(taskID string, cause error) {
-	e.paused.Store(taskID, true)
-	e.cancelExec(taskID, cause)
-}
-
-// BeginDelete installs an execution barrier before task data/files are removed.
-// The temporary pause is not a user pause. The server serializes this transition
-// with lifecycle admission and tells AbortDelete whether the persisted task is
-// paused/queued if cleanup fails.
-func (e *Engine) BeginDelete(taskID string) bool {
-	e.deleteMu.Lock()
-	if _, loaded := e.deleting.LoadOrStore(taskID, true); loaded {
-		e.deleteMu.Unlock()
-		return false
-	}
-	e.paused.Store(taskID, true)
-	e.deleteMu.Unlock()
-	e.cancelExec(taskID, agent.AbortTaskDeleted)
-	return true
-}
-
-func (e *Engine) AbortDelete(taskID string, keepPaused bool) {
-	e.deleteMu.Lock()
-	if !e.IsDeleting(taskID) {
-		e.deleteMu.Unlock()
-		return
-	}
-	e.deleting.Delete(taskID)
-	if !keepPaused {
-		e.paused.Delete(taskID)
-	}
-	e.deleteMu.Unlock()
-	if !keepPaused && e.m != nil {
-		if t, ok := e.m.Task(taskID); ok {
-			t.Notify()
-		}
-	}
-}
-
-func (e *Engine) IsDeleting(taskID string) bool {
-	_, ok := e.deleting.Load(taskID)
-	return ok
-}
-
-// registerTaskRoutines reserves count goroutines in the task runtime. Callers
-// hold deleteMu for reading so StopTask cannot race WaitGroup.Add with Wait.
-func (e *Engine) registerTaskRoutines(parent context.Context, taskID string, count int) *taskRuntime {
-	e.runtimeMu.Lock()
-	defer e.runtimeMu.Unlock()
-	rt := e.runtimes[taskID]
-	if rt == nil {
-		ctx, cancel := context.WithCancel(parent)
-		rt = &taskRuntime{ctx: ctx, cancel: cancel}
-		e.runtimes[taskID] = rt
-	}
-	rt.wg.Add(count)
-	return rt
-}
-
-func runTaskRoutine(rt *taskRuntime, fn func(context.Context)) {
-	go func() {
-		defer rt.wg.Done()
-		fn(rt.ctx)
-	}()
-}
-
-// StopTask permanently stops every long-lived goroutine and removes all Engine
-// state for a successfully deleted task. The delete barrier remains installed
-// until cleanup finishes, so no new task operation can race the teardown.
-func (e *Engine) StopTask(taskID string) {
-	e.deleteMu.Lock()
-	e.deleting.Store(taskID, true)
-	e.deleteMu.Unlock()
-
-	e.cancelExec(taskID, agent.AbortTaskDeleted)
-	e.runtimeMu.Lock()
-	rt := e.runtimes[taskID]
-	if rt != nil {
-		rt.cancel()
-	}
-	e.runtimeMu.Unlock()
-	if rt != nil {
-		rt.wg.Wait()
-	}
-
-	e.execMu.Lock()
-	if cancel := e.execCancel[taskID]; cancel != nil {
-		cancel(agent.AbortTaskDeleted)
-	}
-	delete(e.execCancel, taskID)
-	delete(e.execCtx, taskID)
-	e.execMu.Unlock()
-
-	e.runtimeMu.Lock()
-	if e.runtimes[taskID] == rt {
-		delete(e.runtimes, taskID)
-	}
-	e.runtimeMu.Unlock()
-
-	e.started.Delete(taskID)
-	e.lastAct.Delete(taskID)
-	e.llmCalls.Delete(taskID)
-	e.paused.Delete(taskID)
-	e.dropCnt.Delete(taskID)
-	e.plannerRound.Delete(taskID)
-	e.settling.Delete(taskID)
-	e.deadline.Delete(taskID)
-	e.stamped.Delete(taskID)
-	e.inflight.Delete(taskID)
-	e.coordStarted.Delete(taskID)
-	e.slotPlans.Delete(taskID)
-	e.slotState.Range(func(key, _ any) bool {
-		keyText, ok := key.(string)
-		if ok && strings.HasPrefix(keyText, taskID+"/") {
-			e.slotState.Delete(key)
-		}
-		return true
-	})
-	e.deleteMu.Lock()
-	e.deleting.Delete(taskID)
-	e.deleteMu.Unlock()
-}
-
-// cancelExec cancels a task's current per-task exec context (any in-flight
-// planner.Plan / worker.Execute), if present. Shared by Pause and the settle
-// sequence's hard-drain backstop.
-func (e *Engine) cancelExec(taskID string, cause error) {
-	e.execMu.Lock()
-	if cancel := e.execCancel[taskID]; cancel != nil {
-		cancel(cause)
-	}
-	e.execMu.Unlock()
-}
-
-// Resume un-pauses a task and nudges a fresh planning round. The next exec under
-// it gets a fresh (uncancelled) context.
-func (e *Engine) Resume(t *Task) {
-	// BeginDelete owns the pause barrier once deletion starts. A concurrent
-	// resume must never clear it and let a planner/worker re-enter while cleanup
-	// is waiting for task operations to drain.
-	if t == nil {
-		return
-	}
-	e.deleteMu.RLock()
-	defer e.deleteMu.RUnlock()
-	if e.IsDeleting(t.ID) {
-		return
-	}
-	e.paused.Delete(t.ID)
-	t.Notify()
-}
-
-// execContextFor returns a live per-task context derived from parent, recreating
-// it if a prior pause cancelled it.
-func (e *Engine) execContextFor(parent context.Context, taskID string) context.Context {
-	e.execMu.Lock()
-	defer e.execMu.Unlock()
-	if e.IsPaused(taskID) {
-		// never hand out a live context while paused (guards the claim→Execute race)
-		c, cancel := context.WithCancelCause(parent)
-		cancel(agent.AbortPausedRaceGuard)
-		return c
-	}
-	if c := e.execCtx[taskID]; c != nil && c.Err() == nil {
-		return c
-	}
-	c, cancel := context.WithCancelCause(parent)
-	e.execCtx[taskID] = c
-	e.execCancel[taskID] = cancel
-	return c
-}
-
-// IsPaused reports whether a task is user-paused.
-func (e *Engine) IsPaused(taskID string) bool {
-	v, ok := e.paused.Load(taskID)
-	return ok && v.(bool)
-}
-
-// Started reports whether the engine loops are running for a task.
-func (e *Engine) Started(taskID string) bool {
-	_, ok := e.started.Load(taskID)
-	return ok
-}
-
-// LastActivity returns the unix time of the last planner/worker activity for a
-// task (0 if none yet).
-func (e *Engine) LastActivity(taskID string) int64 {
-	if v, ok := e.lastAct.Load(taskID); ok {
-		return v.(int64)
-	}
-	return 0
-}
-
-// BeginLLMCall/EndLLMCall track actual provider calls separately from the
-// scheduler's task-operation counter. A task can have live loops while all of
-// them are waiting for a trigger; that state must remain idle in the UI.
-func (e *Engine) BeginLLMCall(taskID string) {
-	v, _ := e.llmCalls.LoadOrStore(taskID, new(int64))
-	atomic.AddInt64(v.(*int64), 1)
-}
-
-func (e *Engine) EndLLMCall(taskID string) {
-	if v, ok := e.llmCalls.Load(taskID); ok {
-		p := v.(*int64)
-		if atomic.AddInt64(p, -1) <= 0 {
-			atomic.StoreInt64(p, 0)
-		}
-	}
-}
-
-func (e *Engine) ActiveLLMCalls(taskID string) int64 {
-	if v, ok := e.llmCalls.Load(taskID); ok {
-		return atomic.LoadInt64(v.(*int64))
-	}
-	return 0
-}
-
-func (e *Engine) touch(taskID string) { e.lastAct.Store(taskID, time.Now().Unix()) }
-
-func NewEngine(m *Manager) *Engine {
-	return &Engine{m: m, debounce: 800 * time.Millisecond, bc: NewBroadcaster(),
-		execCancel: map[string]context.CancelCauseFunc{}, execCtx: map[string]context.Context{},
-		work: map[int64]*workExecution{}, steerBox: map[int64][]string{},
-		runtimes: map[string]*taskRuntime{}}
 }
 
 // registerWork records the cancel for the work currently running intentID.
@@ -739,27 +451,27 @@ func (e *Engine) SetWorkerResolver(fn func(t *Task, slot WorkerSlot) (*agent.Wor
 }
 
 func (e *Engine) reportSlotAvailability(t *Task, slot WorkerSlot, err error) {
-	key := t.ID + "/" + slot.Name
+	run := e.taskRun(t.ID)
 	now := time.Now()
-	value, loaded := e.slotState.LoadOrStore(key, slotAvailability{available: err == nil, lastEmit: now})
-	state := value.(slotAvailability)
+	run.slotsMu.Lock()
+	if run.slots == nil {
+		run.slots = make(map[string]slotAvailability)
+	}
+	state, loaded := run.slots[slot.Name]
 	if err == nil {
+		run.slots[slot.Name] = slotAvailability{available: true, lastEmit: now}
+		run.slotsMu.Unlock()
 		if loaded && !state.available {
-			e.slotState.Store(key, slotAvailability{available: true, lastEmit: now})
 			e.emitActivity(t, db.Activity{Worker: "system", Kind: "text", Summary: fmt.Sprintf("%s 绑定的 LLM 配置 #%d 已恢复，可以继续领取任务", slot.Name, slot.ProfileID)})
 		}
 		return
 	}
-	if loaded && state.available {
-		state.available = false
-		state.lastEmit = now
-		e.slotState.Store(key, state)
-	} else if loaded && now.Sub(state.lastEmit) < 5*time.Minute {
+	if loaded && !state.available && now.Sub(state.lastEmit) < 5*time.Minute {
+		run.slotsMu.Unlock()
 		return
-	} else {
-		state = slotAvailability{available: false, lastEmit: now}
-		e.slotState.Store(key, state)
 	}
+	run.slots[slot.Name] = slotAvailability{available: false, lastEmit: now}
+	run.slotsMu.Unlock()
 	summary := fmt.Sprintf("%s 绑定的 LLM 配置 #%d 不可用（已删除或配置无效），该会话暂停领取任务，不会回退到默认模型", slot.Name, slot.ProfileID)
 	e.emitActivity(t, db.Activity{Worker: "system", Kind: "text", IsError: true, Summary: summary, Detail: err.Error()})
 	log.Printf("[worker %s] task %s pinned profile #%d unavailable: %v", slot.Name, t.ID, slot.ProfileID, err)
@@ -802,21 +514,24 @@ func (e *Engine) Run(ctx context.Context, t *Task) {
 		slots, _ = ExpandWorkerSlots(nil, workerCountForTask(t, e.m.Workers()))
 	}
 	e.deleteMu.RLock()
-	if e.IsDeleting(t.ID) {
+	if e.closing.Load() || e.IsDeleting(t.ID) {
 		e.deleteMu.RUnlock()
 		return
 	}
-	if _, loaded := e.started.LoadOrStore(t.ID, true); loaded {
+	if !e.taskRun(t.ID).started.CompareAndSwap(false, true) {
 		e.deleteMu.RUnlock()
 		t.Notify() // already running — just nudge a planning round
 		return
 	}
-	rt := e.registerTaskRoutines(ctx, t.ID, 1+len(slots))
+	// Include this setup call: StopTask must not drop its owner while the final
+	// activity/intent read below is still using it.
+	rt := e.registerTaskRoutines(ctx, t.ID, 2+len(slots))
+	defer rt.wg.Done()
 	plan := make(map[string]int64, len(slots))
 	for _, slot := range slots {
 		plan[slot.Name] = slot.ProfileID
 	}
-	e.slotPlans.Store(t.ID, plan)
+	e.setSlotPlan(t.ID, plan)
 	e.deleteMu.RUnlock()
 	e.touch(t.ID)
 	runTaskRoutine(rt, func(loopCtx context.Context) { e.plannerLoop(loopCtx, t) })
@@ -889,9 +604,12 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 	runRound := func(src string) {
 		// debounce: coalesce a burst of changes into one planning round
 		timer := time.NewTimer(e.debounce)
+		defer timer.Stop()
 	drain:
 		for {
 			select {
+			case <-ctx.Done():
+				return
 			case <-t.notify:
 			case <-timer.C:
 				break drain
@@ -1211,7 +929,7 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 	// if a pause cancelled this run mid-flight, return the intent to the frontier
 	// so it is re-claimed on resume — the worker will resume the prior LLM
 	// conversation from its transcript instead of restarting from scratch.
-	if ectx.Err() != nil && taskExecutionPaused(context.Cause(ectx)) {
+	if ectx.Err() != nil && (taskExecutionPaused(context.Cause(ectx)) || ctx.Err() != nil) {
 		if err := transitionIntentState(t.Store, intent.ID, "running", "open"); err != nil {
 			log.Printf("[worker %s] task %s 意图 #%d 任务暂停回退失败: %v", name, t.ID, intent.ID, err)
 		}
@@ -1307,20 +1025,16 @@ func (e *Engine) runDetachedIntent(ctx context.Context, t *Task, intentID int64,
 	}
 	owner := node.Owner
 	var worker *agent.Worker
-	if value, ok := e.slotPlans.Load(t.ID); ok {
-		if plan, ok := value.(map[string]int64); ok {
-			if profileID, pinned := plan[owner]; pinned && profileID > 0 {
-				if e.workerResolve == nil {
-					return fmt.Errorf("意图所属的 LLM 配置 #%d 不可用：pinned worker resolver unavailable", profileID)
-				}
-				worker, err = e.workerResolve(t, WorkerSlot{Name: owner, ProfileID: profileID})
-				if err != nil || worker == nil {
-					if err == nil {
-						err = errors.New("worker resolver returned no worker")
-					}
-					return fmt.Errorf("意图所属的 LLM 配置 #%d 不可用：%w", profileID, err)
-				}
+	if profileID, pinned := e.slotProfile(t.ID, owner); pinned && profileID > 0 {
+		if e.workerResolve == nil {
+			return fmt.Errorf("意图所属的 LLM 配置 #%d 不可用：pinned worker resolver unavailable", profileID)
+		}
+		worker, err = e.workerResolve(t, WorkerSlot{Name: owner, ProfileID: profileID})
+		if err != nil || worker == nil {
+			if err == nil {
+				err = errors.New("worker resolver returned no worker")
 			}
+			return fmt.Errorf("意图所属的 LLM 配置 #%d 不可用：%w", profileID, err)
 		}
 	}
 	if worker == nil {
@@ -1358,7 +1072,7 @@ func taskExecutionPaused(cause error) bool {
 	}
 	switch abort.Code {
 	case "paused_by_schedule", "paused_by_user", "paused_by_orchestrator", "paused_by_proxy", "paused_on_reload", "paused_race_guard",
-		"queued_for_admission", "llm_unavailable_queued", "task_deleted":
+		"queued_for_admission", "llm_unavailable_queued", "task_deleted", "shutdown":
 		return true
 	default:
 		return false

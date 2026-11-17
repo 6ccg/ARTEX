@@ -37,7 +37,7 @@ func (m *basicAuthMemoryStore) SetSettingContext(ctx context.Context, _ string, 
 func basicAuthTestServer(t *testing.T) (*Server, *basicAuthMemoryStore) {
 	t.Helper()
 	store := &basicAuthMemoryStore{}
-	s := &Server{jwtKey: []byte("test-only-signing-key-32-characters")}
+	s := &Server{Runtime: &Runtime{}, jwtKey: []byte("test-only-signing-key-32-characters")}
 	if err := s.basicAuth.load(store); err != nil {
 		t.Fatal(err)
 	}
@@ -432,7 +432,7 @@ func TestBasicAuthPostgresLoginFlow(t *testing.T) {
 	if err != nil {
 		t.Skipf("postgres unavailable: %v", err)
 	}
-	defer m.Close()
+	t.Cleanup(func() { _ = m.Close() })
 	for _, key := range []string{basicAuthKey, authPassKey} {
 		old, exists, err := m.pg.GetSetting(key)
 		if err != nil {
@@ -456,7 +456,7 @@ func TestBasicAuthPostgresLoginFlow(t *testing.T) {
 	if err := m.pg.SetSetting(authPassKey, string(hash)); err != nil {
 		t.Fatal(err)
 	}
-	s := &Server{m: m, jwtKey: []byte("test-only-signing-key-32-characters")}
+	s := &Server{Runtime: &Runtime{m: m}, jwtKey: []byte("test-only-signing-key-32-characters")}
 	if err := s.basicAuth.load(m.pg); err != nil {
 		t.Fatal(err)
 	}
@@ -479,7 +479,7 @@ func TestBasicAuthPostgresLoginFlow(t *testing.T) {
 		t.Fatalf("save: %d %s", w.Code, w.Body.String())
 	}
 
-	restarted := &Server{m: m, jwtKey: s.jwtKey}
+	restarted := &Server{Runtime: &Runtime{m: m}, jwtKey: s.jwtKey}
 	if err := restarted.basicAuth.load(m.pg); err != nil {
 		t.Fatal(err)
 	}

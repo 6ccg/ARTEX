@@ -72,6 +72,27 @@ func seedExchange(t *testing.T, s *Store, id string, body []byte, spill bool) {
 	}
 }
 
+func TestWriteBodyPublishesAndVerifiesContent(t *testing.T) {
+	s := &Store{Dir: t.TempDir()}
+	body := []byte("original evidence")
+	sum := sha256.Sum256(body)
+	want := hex.EncodeToString(sum[:])
+	hash, err := s.writeBody(bytes.NewReader(body), int64(len(body)), want)
+	if err != nil || hash != want {
+		t.Fatalf("write body: hash=%q err=%v", hash, err)
+	}
+	path, err := hashPath(s.Dir, hash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyFile(path, want, int64(len(body))); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.writeBody(bytes.NewReader(body), int64(len(body)), "invalid hash"); err == nil {
+		t.Fatal("mismatched content hash accepted")
+	}
+}
+
 func TestEvidenceBindingLifecycle(t *testing.T) {
 	s, in, _ := evidenceFixture(t)
 	ctx := context.Background()

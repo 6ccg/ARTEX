@@ -116,7 +116,7 @@ Demo 只运行 `web/` 前端，构建时启用 `NEXT_PUBLIC_MOCK=1`，不需要 
 ```bash
 git clone https://github.com/RuoJi6/ARTEX.git
 cd ARTEX
-./install.sh
+bash install.sh
 ```
 
 脚本会：检测 / 自动安装 Docker → 让你选 **① 全部 Docker** 或 **② 本地编译运行**：
@@ -162,11 +162,10 @@ cp config.example.json config.json   # 填好 database 连接
 ```bash
 # 1) 前端静态导出
 cd web && npm ci && npm run build:static && cd ..
-# 2) 创建内嵌目录
+# 2) 拷进内嵌目录
 mkdir -p server/webui/dist
-# 3) 拷进内嵌目录
 cp -r web/out/. server/webui/dist
-# 4) 编译（-tags embedui 才内嵌前端）
+# 3) 编译（-tags embedui 才内嵌前端）
 CGO_ENABLED=0 go build -tags embedui -o artex ./cmd/artex
 ./start.sh
 ```
@@ -176,22 +175,24 @@ CGO_ENABLED=0 go build -tags embedui -o artex ./cmd/artex
 `build.sh` 会先构建并嵌入前端，再使用 Go linker 去除调试信息，并将发布文件压缩为 zip。Release 模式默认生成 Linux amd64/arm64、macOS amd64/arm64 和 Windows amd64 的 zip 包：
 
 ```bash
-./build.sh --release
+bash build.sh --release
 # 产物：dist/artex-0.3.3-*.zip
 ```
 
 UPX 自解压二进制可能与部分 Linux 内核、虚拟化环境或安全策略不兼容，因此默认不启用。可用 `ARTEX_TARGETS` 自定义目标；确认目标运行环境兼容时，可显式传入 `--upx` 进一步缩小二进制：
 
 ```bash
-ARTEX_TARGETS=linux/amd64,windows/amd64 ./build.sh --release
-./build.sh --target linux/amd64 --upx
+ARTEX_TARGETS=linux/amd64,windows/amd64 bash build.sh --release
+bash build.sh --target linux/amd64 --upx
 ```
 
 ---
 
 ## 更新升级
 
-> 升级只换程序、不动数据：Postgres 数据卷 `pgdata`、`./data`（jwt.key / SQLite 等）、`./skills` 都会保留。**数据库迁移无需手动执行**——`artex` 每次启动会幂等重跑 `schema.sql`（含 `ADD COLUMN` / `CREATE INDEX IF NOT EXISTS`），即“重启即迁移”。升级前仍建议先备份 `./data` 与数据库。
+> 升级保留 Postgres 数据卷 `pgdata`、`./data` 和 `./skills`。**数据库迁移无需手动执行**：空库直接建立当前结构，旧库在启动时按结构版本执行一次性转换；转换与版本号在同一事务提交，失败会整体回滚，后续启动跳过已完成的 DDL。
+
+当前结构版本为 **1**，由 `db.Open` 统一初始化，包含 LLM 记录与计量表。首次转换保留有效的任务资产关系、模型链、来源信息和历史设置，删除旧 `assets.task_ids`、`tasks.llm_profile_id` 及重复索引。更新时先停止旧实例，再启动新程序；转换后不能继续运行依赖旧列的版本。后续结构变更需同步更新 `db/schema.sql`，并在 `db/schema.go` 添加下一版本的转换，不要手工修改 `settings` 中的 `database_schema_revision`。
 
 ### 方式一：页面一键更新（推荐）
 
@@ -202,7 +203,7 @@ ARTEX_TARGETS=linux/amd64,windows/amd64 ./build.sh --release
 点「更新」后：下载当前平台的发布包 → 比对 Release 的 `SHA256SUMS` → 用 `-h` 冒烟测试新二进制 → 暂存为 `artex.new` → 程序退出，由 `start.sh` / `start.bat` 重新拉起并完成换装。页面会自动等到新版本上线后刷新。
 
 - **失败不会留下坏程序**：校验或冒烟不通过就丢弃暂存件、继续跑当前版本；换装后的新版若连续 3 次启动失败，会自动回滚到 `artex.old`（失败的那个留作 `artex.failed` 供排查）。
-- **随时可回退**：上一版本保留为 `artex.old`，卡片上有「回滚到上一版本」。注意数据库结构不会回退。
+- **程序回滚**：上一版本保留为 `artex.old`，卡片上有「回滚到上一版本」。数据库结构不会回退；如果升级已删除旧版依赖的列，则不能使用该旧版回滚。
 - **更新会中断正在运行的任务**——更新即重启，请在空闲时进行。
 - **开发构建不给更新**：版本号是 `dev` 或 `git describe` 带后缀时禁用，避免正式版覆盖掉本地调试的二进制。
 - **Docker 下只换程序、不换镜像**：镜像里的 playwright / nmap 等工具链不会跟着升级，且 `docker compose up -d` 重建容器后会退回镜像自带的版本。要连镜像一起升级仍请用 `docker compose pull artex && docker compose up -d artex`。
@@ -264,7 +265,7 @@ curl --fail http://127.0.0.1:8787/api/health
 
 ```bash
 cd ARTEX
-./update.sh
+bash update.sh
 ```
 
 脚本先可选 `git pull` 拉取最新代码，再让你选 **① Docker 更新** 或 **② 本地编译更新**（与 `install.sh` 对应）：
@@ -322,10 +323,6 @@ CGO_ENABLED=0 go build -tags embedui -o artex ./cmd/artex
 **LLM**：`export ANTHROPIC_API_KEY=sk-...`（或 `OPENAI_API_KEY`），也可在 UI 的「LLM 配置」页填写。
 可选：`ARTEX_LLM_PROVIDER` / `ARTEX_LLM_MODEL` / `ARTEX_LLM_BASE_URL` / `ARTEX_LLM_PROXY`。
 
-**HTTP User-Agent**：内置 WebFetch（worker / planner / main / chat）、资产 HTTP 自动补全、出口连通性探测、HTTP 自定义工具、请求重放器、GitHub 自更新和可选的 `harvest_static.py` / `spider_mpa.py` 默认从 20 个浏览器 UA 样本中随机抽选，不携带工具名称。Go 每次逻辑请求选择一次，重定向及 WebFetch 的代理失败直连重试复用同一个值；Python 脚本每次运行选择一次，入口、下载与重试保持一致。随机抽选允许重复，不依赖 AI 服务。通过 `ARTEX_HTTP_USER_AGENT` 可指定固定值；留空或非法值使用随机策略。直接运行时导出环境变量并重启服务，Docker 在 `.env` 配置后重建容器。Python 的 `--user-agent VALUE`、自定义工具和重放器中的显式 UA 优先，显式空值仍可省略此头。值去除首尾空格，仅接受可打印 ASCII。记录代理保留已有 UA 及显式省略语义。UA 随机化不代表 TLS、Cookie 或其他浏览器特征同步改变，也不保证无法识别客户端。此设置不影响浏览器、SDK 联网搜索、LLM / MCP / Webhook 服务通信或外部独立工具；本仓库未包含 phpfinger，其 `--user-agent` 需在该工具中单独配置。
-
-完整排查范围、额外发现及未接管的服务通信见 [HTTP 请求标识排查](HTTP_USER_AGENT.md)。
-
 **并发**：每个任务的 work agent 数在「系统设置」里配置（默认 3）。
 
 **常用参数**：`./start.sh -addr :8787 -proxy :8788`（`-addr` 前端+API，`-proxy` 流量录制代理）。启动脚本会把参数原样透传给 `artex`。
@@ -334,7 +331,7 @@ CGO_ENABLED=0 go build -tags embedui -o artex ./cmd/artex
 
 在 **系统配置 → HTTP Basic Auth** 中填写独立的验证用户名和密码，打开「启用访问验证」并点击「保存访问验证」。默认关闭，保存后立即生效，无需重启；密码至少 8 位、最多 72 字节，用户名不能包含冒号。
 
-开启后，访客先完成浏览器原生账号密码验证，再进入原有 ARTEX 登录页。网页、静态资源和 API 均受保护（MCP 服务端的 `/mcp` 端点除外：它不经过 Basic Auth，也不能用 Basic 账号密码访问，只认访问令牌，见下文「MCP 服务端」），`/api/health` 的 GET/HEAD 健康检查同样需要通过 Basic Auth，未认证时返回 `401`；通过后仅返回 `{"ok":true}`，不暴露应用名称或版本。健康检查不额外要求管理员 JWT；外部探针需要配置相同的 Basic Auth 凭据，例如使用 `curl --fail --user '验证用户名' http://127.0.0.1:8787/api/health` 并按提示输入密码。未启用 Basic Auth 时保留原有的无需凭据探活行为。版本号由需要管理员 JWT 的 `/api/version` 提供，启用访问验证后该接口同时受 Basic Auth 保护。未认证请求的 Basic Auth realm 使用通用名称 `Restricted`；通过访问验证仍需登录 ARTEX 才能使用业务 API。公网部署请通过 HTTPS 访问。
+开启后，访客先完成浏览器原生账号密码验证，再进入原有 ARTEX 登录页。网页、静态资源和 API 均受保护，`/api/health` 的 GET/HEAD 健康检查同样需要通过 Basic Auth，未认证时返回 `401`；通过后仅返回 `{"ok":true}`，不暴露应用名称或版本。健康检查不额外要求管理员 JWT；外部探针需要配置相同的 Basic Auth 凭据，例如使用 `curl --fail --user '验证用户名' http://127.0.0.1:8787/api/health` 并按提示输入密码。未启用 Basic Auth 时保留原有的无需凭据探活行为。版本号由需要管理员 JWT 的 `/api/version` 提供，启用访问验证后该接口同时受 Basic Auth 保护。未认证请求的 Basic Auth realm 使用通用名称 `Restricted`；通过访问验证仍需登录 ARTEX 才能使用业务 API。公网部署请通过 HTTPS 访问。
 
 从仍使用 `/api/health` 读取版本的旧版网页升级到此版本时，旧页面可能无法自动判断升级完成；服务重启后手动刷新页面即可。新版网页的版本显示和升级轮询均使用 `/api/version`。
 
@@ -350,84 +347,6 @@ SET value = jsonb_set(value::jsonb, '{enabled}', 'false'::jsonb)::text,
     updated_at = now()
 WHERE key = 'auth.http_basic';
 ```
-
-### MCP 服务端（供外部智能体编排任务）
-
-ARTEX 可以作为 MCP 服务端，让外部智能体（个人助手、bot 等）查看任务与漏洞、创建任务、暂停或恢复任务。
-
-注意区分：「系统 → MCP」页面管理的是 ARTEX 自己的 agent **去调用**的外部 MCP；本文说的是 ARTEX **对外提供**的 MCP 端点。
-
-#### 开启与接入
-
-1. 「系统设置 → 系统与账号 → MCP 服务端」打开开关。默认关闭，关闭时 `/mcp` 返回 404。
-2. 在同一处「新建令牌」，选择权限范围。令牌只显示一次。
-3. 在智能体里配置：
-
-| 项 | 值 |
-| --- | --- |
-| 地址 | `https://<你的 ARTEX 地址>/mcp` |
-| 传输 | Streamable HTTP（无状态，只响应 `application/json`，不提供 SSE，不支持 stdio） |
-| 鉴权 | 请求头 `Authorization: Bearer artex_mcp_...` |
-
-```bash
-curl -s https://artex.example.com/mcp \
-  -H 'Authorization: Bearer artex_mcp_xxx' -H 'Content-Type: application/json' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
-```
-
-#### 无法使用 HTTP Basic Auth
-
-`/mcp` **不经过** HTTP Basic Auth 验证，也**不接受** Basic 账号密码、ARTEX 登录密码或管理员登录后的 JWT，只认访问令牌。
-
-原因：一个 HTTP 请求只有一个 `Authorization` 头，外部智能体无法同时带上 Basic 凭证和 Bearer 令牌。因此：
-
-- 即使启用了 HTTP Basic Auth，`/mcp` 仍可直接凭访问令牌访问，Basic Auth 不会给它加一层保护。
-- 需要限制谁能连 `/mcp` 的话，请用下文的「来源白名单」，不要依赖 Basic Auth。
-- 公网暴露请使用 HTTPS，令牌是明文放在请求头里的。
-
-#### 来源白名单
-
-在「MCP 服务端」卡片的「来源白名单」里填写允许调用 `/mcp` 的来源地址，每行一个 IP 或 CIDR（如 `203.0.113.7`、`10.0.0.0/8`，支持 IPv6）。留空表示不限制来源。
-
-- 白名单在令牌之前检查：不在名单内的来源即使持有有效令牌也会被拒绝，返回 `403`，响应里带有服务器看到的来源地址，便于排查。
-- 白名单只作用于 `/mcp`，不影响网页和管理 API，填错不会把自己锁在后台之外。
-- **部署在反向代理之后**：此时直连地址永远是代理。需要把代理地址填进「可信代理」，ARTEX 才会改用 `X-Forwarded-For` 里的地址作为来源（从右往左取第一个不属于可信代理的地址）。不填可信代理时该请求头一律忽略，避免调用方伪造来源。代理需要把真实来源追加到该请求头，例如 nginx 的 `proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;`。
-- 卡片里会显示「服务器看到的你当前的来源地址」，可用来确认可信代理是否配置正确。
-
-#### 权限范围与工具
-
-令牌只能看到、调用它的权限范围内的工具。
-
-| 权限范围 | 工具 | 说明 |
-| --- | --- | --- |
-| `read` | `list_tasks` | 列出任务，可按 `company_id`、`category_id`、`status` 筛选 |
-| `read` | `get_task` | 单个任务的状态、运行时长、目标完成数、漏洞数；用它轮询进度 |
-| `read` | `get_task_graph` | 任务的探索图总览 |
-| `read` | `list_task_findings` | 任务的确认漏洞（不含原始请求/响应流量） |
-| `read` | `list_companies` / `list_task_categories` / `list_llm_profiles` | 建任务时可选的企业、分类、模型配置（不含 API Key） |
-| `task:create` | `spawn_task` | 新建并启动任务，可带 `company_ids`、`category_id` |
-| `task:control` | `pause_task` / `resume_task` / `add_task_hint` | 暂停、恢复、补充提示 |
-
-ARTEX 没有独立的「项目」实体。智能体说的“某个项目”对应某个企业或某个任务分类下的一组任务。
-
-不会暴露的能力：建/改自定义工具、MCP、skill，workspace 文件读写，LLM 密钥，系统设置。
-
-#### 令牌的限制项
-
-- **限定企业**：勾选后，令牌只能在这些企业下建任务（必须带 `company_ids`，且目标地址须归属这些企业的范围），也只能看到、控制这些企业下的任务，其余任务对它表现为不存在。这是把任务绑定到企业的资产范围，不是网络层拦截；要硬性限制任务能访问什么，请配合资产拦截规则。
-- **未结束任务上限**：该令牌创建的、尚未结束的任务数（含暂停和排队）。
-- **每小时建任务上限**：按该令牌过去一小时创建的任务数计，任务删除后仍计入。
-- **有效期**与**吊销**：吊销立即生效，不可恢复。
-
-#### 审计
-
-每次工具调用都会记录：令牌、工具、参数、是否成功、失败原因、来源地址、时间，包括因权限不足被拒绝的调用。在设置页的「调用审计」查看，保留最近 20000 条。
-
-#### 安全提示
-
-- 创建任务会对目标发起真实的安全测试，只把 `task:create` 令牌交给可信的智能体，并尽量限定企业、设置限额。
-- 任务描述、漏洞摘要等返回内容可能包含来自被测目标的文本，对智能体而言是不可信输入，可能夹带提示注入。
-- 带 `Origin` 头的跨源浏览器请求会被拒绝（403），`/mcp` 不发送 CORS 头。
 
 ### 反向代理部署（HTTPS / 只开放 443）
 
@@ -472,7 +391,7 @@ server {
 
 新上报由现有 Reporter 生成独立报告并检查重复。升级首次补充 Reporter 的归并工具和运行指引，保留自定义提示词及触发设置；已删除或停用的 Reporter 不会重建、启用。历史记录不会自动扫描：展开并选择原始记录，点击「整理所选」，按任务分别排队执行，可查看执行记录及失败信息。同一任务已有排队或运行中的整理时拒绝重复提交。历史整理以只读方式复用原报告，禁止覆盖原报告或补绑证据；已有报告为空或过期时如实说明，单独通过报告撰写流程处理。结束前需提交每条所选记录的根因判断，检查读取范围、建议、统一报告完整性及版本，通过验收才显示完成。文件夹详情可重新生成统一报告；需要启用 Reporter 并配置可用模型。判断和写作会消耗模型 token，候选检索先分页返回摘要，详情证据按需读取，不重新探测目标。
 
-成员、报告或证据变化后统一报告标记待更新，写入时校验实际读取版本。导出默认每组一份统一报告及未归并记录，可勾选「包含原始子报告」；统一报告未生成或过期时附明确说明及全部原始材料。原始上报显示所属任务、资产及时间；按任务先展开任务，再展开漏洞文件夹；按资产保留资产树，命中任一成员即展示整个文件夹，展开时标明未命中筛选的成员。折叠状态只读取轻量摘要，不加载成员报告。升级沿用启动时幂等数据库迁移，无需执行独立 SQL。
+成员、报告或证据变化后统一报告标记待更新，写入时校验实际读取版本。导出默认每组一份统一报告及未归并记录，可勾选「包含原始子报告」；统一报告未生成或过期时附明确说明及全部原始材料。原始上报显示所属任务、资产及时间；按任务先展开任务，再展开漏洞文件夹；按资产保留资产树，命中任一成员即展示整个文件夹，展开时标明未命中筛选的成员。折叠状态只读取轻量摘要，不加载成员报告。升级沿用启动时按结构版本执行的数据库迁移，无需执行独立 SQL。
 
 ### 手动漏洞复测
 
@@ -492,20 +411,42 @@ server {
 
 ### 本地运行与测试
 
-```bash
-./dev.sh    # 后端(:8787) + 流量代理(:8788) + 前端 next dev(:5173) → http://localhost:5173
+源码与运行文件按下面的目录组织；以下命令均从仓库根目录执行：
+
+```text
+go.mod / go.sum      Go 模块
+cmd/artex/           后端入口
+agent/、db/、server/ 等 业务包
+internal/            共享辅助包
+third_party/         本地依赖
+web/                 Next.js 前端
+*.sh / start.bat     构建、开发、安装和维护脚本
+skills/              技能
+screenshots/         README 截图
+.artifacts/          本地检查和基准测试记录
 ```
 
-- 后端：`go run ./cmd/artex`（不带 `-tags embedui` 则不内嵌前端）
+Dockerfile、Compose、配置示例和 `start.sh` / `start.bat` 保留在根目录；`data/`、`dist/` 为本地运行数据和构建产物，不放进源码目录。
+
+```bash
+bash dev.sh    # 后端(:8787) + 流量代理(:8788) + 前端 next dev(:5173) → http://localhost:5173
+```
+
+- 后端：`go build -o artex ./cmd/artex && ./artex`（不带 `-tags embedui` 则不内嵌前端）
 - 前端：`cd web && npm run dev`（`/api` 反代到后端，带热更新）
 - 测试：`go test ./...`
+- 静态检查与构建：`go vet ./...`、`go build ./...`
 - Mock 预览（无后端）：`cd web && NEXT_PUBLIC_MOCK=1 npm run dev`
+
+数据库集成测试应通过进程环境变量 `ARTEX_PG_DSN` 指向独立测试库；未配置数据库时，相关测试会跳过。支持 CGO 的环境还可用 `go test -race ./server ./agent ./traffic` 检查核心并发路径。
 
 ---
 
 ## 系统技术架构
 
 ARTEX 是一套 **LLM 多 agent 驱动的自主渗透系统**：Go 单体后端（内嵌 Next.js 前端）+ PostgreSQL，agent 能力由 [`norma`](https://github.com/Autumn-27/norma) SDK 提供（`agentcore` / `tool` / `permission` / `harness` / `memory` / `transcript`）。核心是**双图架构**，以及围绕它的两条自主性机制：**worker 间过程级信息交换**与 **planner 多轮共享 todolist 稳定攻击链路**。
+
+Norma 的完整源码随项目保存在 `third_party/norma/`，通过 `go.mod` 的本地替换参与构建。上游提交及来源记录在该目录的 `UPSTREAM.md`；正常检出项目即可使用这份 SDK 源码。
 
 ### 总体分层
 
@@ -557,11 +498,13 @@ flowchart TB
 | 层 | 职责 |
 | --- | --- |
 | **前端** | Next.js 静态导出，`go:embed` 内嵌进单二进制；可视化任务/资产/探索链路/覆盖图，人在环路对话 |
-| **server** | `net/http` 路由 + JWT 鉴权 + SSE；`Manager` 托管任务、引擎、DB store 的生命周期 |
-| **engine** | 每任务一个 `plannerLoop` + N 个 worker goroutine；意图领取、超时/暂停/drain |
-| **agent** | goals / planner / worker / mainagent，`ToolSet` 把双图暴露成 LLM 工具 |
-| **db** | 双图的 Postgres 落地（pgx）；schema 随 `go:embed` 每次启动幂等建表 |
+| **server** | `Server` 提供 HTTP/JWT/SSE；`Runtime` 托管引擎、调度和后台任务；`Manager` 管理持久任务及存储资源 |
+| **engine** | 每任务一个 `taskRun` 集中管理执行上下文、循环、计数和 worker 状态；意图领取、超时/暂停/drain |
+| **agent** | goals / planner / worker / mainagent，`ToolSet` 暴露双图工具；实例级 `Host` 注入提示、工具及业务回调 |
+| **db** | 双图的 Postgres 落地（pgx）；内嵌当前 schema，启动时按结构版本执行一次性升级 |
 | **支撑** | 记录型 MITM 代理、审批门、异步补全、MCP/技能/记忆/报告 |
+
+应用入口依次创建 `Manager`、`NewRuntime`、`NewHandler`，最后显式调用 `Runtime.Start`。构造函数只准备依赖，后台循环由 `Start` 启动；退出时先关闭 `Runtime`，停止接收新工作并等待已接收的操作结束，再关闭 `Manager` 的存储。HTTP 适配器不负责启动和关闭运行时。
 
 ### 双图架构：探索图 + 资产图
 

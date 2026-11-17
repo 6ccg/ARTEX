@@ -149,17 +149,18 @@ ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value`, key, value)
 // TaskEvent is a finding/goal event carrying the owning task's info, used to
 // compose the trigger message context.
 type TaskEvent struct {
-	NodeID     int64  `json:"node_id"`
-	TaskID     int64  `json:"task_id"`
-	TaskDesc   string `json:"task_description"`
-	TaskGoal   string `json:"task_goal"`
-	Summary    string `json:"summary"`     // finding summary / goal text
-	VulnClass  string `json:"vulnclass"`   // finding only
-	Severity   string `json:"severity"`    // finding only
-	Tool       string `json:"tool"`        // tool-call only: tool name
-	ToolInput  string `json:"tool_input"`  // tool-call only: 入参(JSON 文本)
-	ToolOutput string `json:"tool_output"` // tool-call only: 返回内容
-	ToolIsErr  bool   `json:"tool_is_err"` // tool-call only: 工具返回是否为错误
+	CompletedAt time.Time `json:"completed_at,omitempty"`
+	NodeID      int64     `json:"node_id"`
+	TaskID      int64     `json:"task_id"`
+	TaskDesc    string    `json:"task_description"`
+	TaskGoal    string    `json:"task_goal"`
+	Summary     string    `json:"summary"`     // finding summary / goal text
+	VulnClass   string    `json:"vulnclass"`   // finding only
+	Severity    string    `json:"severity"`    // finding only
+	Tool        string    `json:"tool"`        // tool-call only: tool name
+	ToolInput   string    `json:"tool_input"`  // tool-call only: 入参(JSON 文本)
+	ToolOutput  string    `json:"tool_output"` // tool-call only: 返回内容
+	ToolIsErr   bool      `json:"tool_is_err"` // tool-call only: 工具返回是否为错误
 }
 
 // NewFindingsSince returns findings with node id > lastID across all live tasks,
@@ -189,13 +190,29 @@ ORDER BY n.id`, lastID)
 	return out, rows.Err()
 }
 
-// TimedOutTasksSince returns tasks that reached status='timeout' with id > lastID,
-// ordered by id (monotonic watermark → no double-fire across restarts).
-func (d *DB) TimedOutTasksSince(lastID int64) ([]TaskEvent, error) {
+type TaskTimeoutCursor struct {
+	CompletedAt time.Time `json:"completed_at"`
+	TaskID      int64     `json:"task_id"`
+}
+
+func (d *DB) LatestTaskTimeoutCursor() (TaskTimeoutCursor, error) {
+	var cursor TaskTimeoutCursor
+	err := d.QueryRow(`SELECT id,COALESCE(completed_at,created_at) FROM tasks
+		WHERE status='timeout' AND deleted_at IS NULL
+		ORDER BY COALESCE(completed_at,created_at) DESC,id DESC LIMIT 1`).Scan(&cursor.TaskID, &cursor.CompletedAt)
+	if err == sql.ErrNoRows {
+		err = nil
+	}
+	return cursor, err
+}
+
+// Completion order differs from creation order, and a revived task can time out
+// again. The timestamp and ID together preserve both events across restarts.
+func (d *DB) TimedOutTasksSince(cursor TaskTimeoutCursor) ([]TaskEvent, error) {
 	rows, err := d.Query(`
-SELECT id, description, goal FROM tasks
-WHERE status='timeout' AND deleted_at IS NULL AND id > $1
-ORDER BY id`, lastID)
+SELECT id,description,goal,COALESCE(completed_at,created_at) FROM tasks
+WHERE status='timeout' AND deleted_at IS NULL AND (COALESCE(completed_at,created_at),id)>($1,$2)
+ORDER BY COALESCE(completed_at,created_at),id`, cursor.CompletedAt, cursor.TaskID)
 	if err != nil {
 		return nil, err
 	}
@@ -203,10 +220,10 @@ ORDER BY id`, lastID)
 	out := []TaskEvent{}
 	for rows.Next() {
 		var e TaskEvent
-		if err := rows.Scan(&e.NodeID, &e.TaskDesc, &e.TaskGoal); err != nil {
+		if err := rows.Scan(&e.NodeID, &e.TaskDesc, &e.TaskGoal, &e.CompletedAt); err != nil {
 			return nil, err
 		}
-		e.TaskID = e.NodeID // task id doubles as NodeID for the watermark
+		e.TaskID = e.NodeID
 		e.Summary = e.TaskGoal
 		out = append(out, e)
 	}

@@ -146,7 +146,7 @@ func uploadZip(t *testing.T, skillDir string, filename string, data []byte) (*ht
 	req := httptest.NewRequest(http.MethodPost, "/api/skills/upload", &body)
 	req.Header.Set("Content-Type", mw.FormDataContentType())
 	rr := httptest.NewRecorder()
-	(&Server{skillDir: skillDir}).fsUploadSkill(rr, req)
+	(&Server{Runtime: &Runtime{skillDir: skillDir}}).fsUploadSkill(rr, req)
 
 	var out map[string]any
 	_ = json.Unmarshal(rr.Body.Bytes(), &out)

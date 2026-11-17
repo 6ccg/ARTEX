@@ -126,12 +126,6 @@ func TestTaskArchiveDatabaseRoundTrip(t *testing.T) {
 		t.Skipf("postgres unavailable (%v) — skipping", err)
 	}
 	defer d.Close()
-	if err := d.EnsureLLMRecordsTable(); err != nil {
-		t.Fatal(err)
-	}
-	if err := d.EnsureLLMUsageTable(); err != nil {
-		t.Fatal(err)
-	}
 	task, err := d.CreateTaskWithOptions("archive database roundtrip", "restore exact graph", TaskCreateOptions{
 		Name: "cold task", WorkerCount: 7, ShareGlobalAssets: true,
 	})
@@ -153,7 +147,7 @@ func TestTaskArchiveDatabaseRoundTrip(t *testing.T) {
 	}
 	exhaustedAt := time.Now().UTC().Add(-time.Hour).Truncate(time.Microsecond)
 	chainCreatedAt := exhaustedAt.Add(-time.Hour)
-	if _, err := d.Exec(`UPDATE tasks SET company_id=$2,llm_profile_id=$3,active_llm_profile_id=$3 WHERE id=$1`, task.ID, companyID, llmProfileID); err != nil {
+	if _, err := d.Exec(`UPDATE tasks SET company_id=$2,active_llm_profile_id=$3 WHERE id=$1`, task.ID, companyID, llmProfileID); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := d.Exec(`INSERT INTO task_llm_profiles(task_id,profile_id,position,status,last_error,exhausted_at,created_at,updated_at)
@@ -305,7 +299,7 @@ VALUES($1,$2,0,'quota_exhausted','balance exhausted',$3,$4,$3)`, task.ID, llmPro
 	if err := d.QueryRow(`SELECT count(*) FROM exploration_nodes WHERE exploration_id=$1`, task.ExplorationID).Scan(&nodes); err != nil {
 		t.Fatal(err)
 	}
-	if err := d.QueryRow(`SELECT count(*) FROM assets WHERE id=$1 AND $2=ANY(task_ids)`, assetID, task.ID).Scan(&assets); err != nil {
+	if err := d.QueryRow(`SELECT count(*) FROM task_asset_links WHERE asset_id=$1 AND task_id=$2`, assetID, task.ID).Scan(&assets); err != nil {
 		t.Fatal(err)
 	}
 	if err := d.QueryRow(`SELECT count(*) FROM llm_usage WHERE task_id=$1`, fmt.Sprint(task.ID)).Scan(&usage); err != nil {

@@ -283,13 +283,15 @@ type Manager struct {
 	// taskStateMu preserves commit order between PostgreSQL lifecycle writes and
 	// their in-memory mirrors. lifecycleMu makes snapshots race-free, but without
 	// this outer write lock an older request could commit first and publish last.
-	taskStateMu sync.Mutex
-	controlMu   *sync.Mutex // Server's admission/task-control mutex, when attached.
-	mu          sync.RWMutex
-	tasks       map[string]*Task
-	active      string
-	trafficOn   bool // 流量捕获开关（默认关；settings.traffic_capture）
-	llmRecOn    bool // LLM 录制开关（默认关；settings.llm_record）
+	taskStateMu   sync.Mutex
+	taskControlMu sync.Mutex // Owns admission across HTTP, schedules and proxy control.
+	closeOnce     sync.Once
+	closeErr      error
+	mu            sync.RWMutex
+	tasks         map[string]*Task
+	active        string
+	trafficOn     bool // 流量捕获开关（默认关；settings.traffic_capture）
+	llmRecOn      bool // LLM 录制开关（默认关；settings.llm_record）
 	// 联网搜索开关与来源（默认关；settings.web_search_*）。brave-free 需要 braveKey；tavily 需要 tavilyKey。
 	// webSearchProxy 是独立出口代理(http/https/socks5)，与记录流量的 MITM 代理无关。
 	webSearchOn      bool
@@ -307,10 +309,6 @@ type Manager struct {
 	forwardProxy        *dynamicForwardProxy
 	proxyPoolConfigured atomic.Bool
 }
-
-// SetTaskControlMutex lets lifecycle operations that originate in Manager
-// participate in the Server's admission/task-control critical section.
-func (m *Manager) SetTaskControlMutex(mu *sync.Mutex) { m.controlMu = mu }
 
 // Settings keys the UI toggles at runtime.
 const (
@@ -602,13 +600,13 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 		pg.Close()
 		return nil, fmt.Errorf("recover finding retests: %w", err)
 	}
-	if err := pg.EnsureLLMRecordsTable(); err != nil {
-		log.Printf("[llmrec] create table: %v", err)
-	}
-	if err := pg.EnsureLLMUsageTable(); err != nil {
-		log.Printf("[llmusage] create table: %v", err)
-	}
 	m := &Manager{dir: dir, pg: pg, assets: pg.Assets(), tasks: map[string]*Task{}, interceptor: intercept.New(pg)}
+	ready := false
+	defer func() {
+		if !ready {
+			_ = m.Close()
+		}
+	}()
 	m.network = egress.FromEnvironment()
 	if m.network == nil {
 		if fp, ferr := newDynamicForwardProxy(func() string { return m.GlobalProxy() }); ferr == nil {
@@ -637,7 +635,6 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 			})
 			if err != nil {
 				_ = tr.Close()
-				_ = pg.Close()
 				return nil, fmt.Errorf("recover traffic delete staging: %w", err)
 			}
 		}
@@ -681,22 +678,18 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 	m.initProxyPool()
 	v, _, err := pg.GetSetting(settingLLMProxy)
 	if err != nil {
-		pg.Close()
 		return nil, err
 	}
 	m.llmProxy = strings.TrimSpace(v)
 	if err := egress.SetLLMProxy(m.llmProxy); err != nil {
-		pg.Close()
 		return nil, err
 	}
 	if err := egress.SetSearchProxy(m.webSearchProxy); err != nil {
-		pg.Close()
 		return nil, err
 	}
 	if m.network != nil {
 		m.egressAllowIPv6 = pg.GetBool(settingEgressAllowIPv6, false)
 		if err := m.network.ApplyAll(egress.ProxySettings{Execution: m.globalProxy, LLM: m.llmProxy, Search: m.webSearchProxy, AllowIPv6: m.egressAllowIPv6}); err != nil {
-			pg.Close()
 			return nil, err
 		}
 	}
@@ -709,6 +702,7 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 	// Reconcile the seeded browser MCP with the persisted capture state, so a
 	// restart with capture already on keeps Playwright routed through the proxy.
 	m.syncBrowserMCPProxy()
+	ready = true
 	return m, nil
 }
 
@@ -1226,16 +1220,28 @@ func (m *Manager) SetGlobalProxy(raw string) error {
 	return nil
 }
 
+// Close releases stores after the application has closed its server/runtime.
 func (m *Manager) Close() error {
-	if m.forwardProxy != nil {
-		_ = m.forwardProxy.Close()
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.traffic != nil {
-		m.traffic.Close()
-	}
-	return m.pg.Close()
+	m.closeOnce.Do(func() {
+		m.mu.RLock()
+		forward, tr, pg := m.forwardProxy, m.traffic, m.pg
+		m.mu.RUnlock()
+		var errs []error
+		if m.enrich != nil {
+			m.enrich.Close()
+		}
+		if forward != nil {
+			errs = append(errs, forward.Close())
+		}
+		if tr != nil {
+			errs = append(errs, tr.Close())
+		}
+		if pg != nil {
+			errs = append(errs, pg.Close())
+		}
+		m.closeErr = errors.Join(errs...)
+	})
+	return m.closeErr
 }
 
 // isTerminalStatus reports whether a task status is terminal (done/failed/timeout).
@@ -1781,10 +1787,8 @@ func (m *Manager) ApplyProxyPause(id string) error {
 // state have committed. This lets callers install the Engine barrier before a
 // concurrent user/orchestrator pause can observe the new paused state.
 func (m *Manager) ApplyProxyPauseWithCallback(id string, callback func()) (transitioned bool, err error) {
-	if m.controlMu != nil {
-		m.controlMu.Lock()
-		defer m.controlMu.Unlock()
-	}
+	m.taskControlMu.Lock()
+	defer m.taskControlMu.Unlock()
 	m.taskStateMu.Lock()
 	defer m.taskStateMu.Unlock()
 	n, err := strconv.ParseInt(id, 10, 64)

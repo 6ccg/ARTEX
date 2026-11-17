@@ -11,7 +11,6 @@ import (
 
 func TestTaskAssetSharingLiveToolPolicy(t *testing.T) {
 	d := testDB(t)
-	defer d.Close()
 	task, err := d.CreateTask("tool sharing", "goal", nil, 0, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -31,7 +30,7 @@ func TestTaskAssetSharingLiveToolPolicy(t *testing.T) {
 	if _, err = d.Exec(`UPDATE assets SET company_id=$2 WHERE id=$1`, foreign, company); err != nil {
 		t.Fatal(err)
 	}
-	tools := NewToolSet(d.Exploration(task.ExplorationID), "planner")
+	tools := NewToolSet(nil, d.Exploration(task.ExplorationID), "planner")
 	tools.SetTaskID(task.ID)
 	tools.SetAssetStore(assets, d.Companies())
 	idJSON, _ := json.Marshal(foreign)

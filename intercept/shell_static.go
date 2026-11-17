@@ -67,13 +67,30 @@ func inlineShellWords(w *syntax.Word, bindings map[string][]string) ([]string, b
 	}
 	var words []string
 	for _, env := range envs {
-		fields, err := expand.Fields(&expand.Config{Env: expand.ListEnviron(env...), NoUnset: true}, w)
+		variables := shellVariables{}
+		for _, pair := range env {
+			name, value, _ := strings.Cut(pair, "=")
+			variables[name] = expand.Variable{Kind: expand.String, Str: value}
+		}
+		fields, err := expand.Fields(&expand.Config{Env: variables, NoUnset: true}, w)
 		if err != nil || len(fields) != 1 || len(fields[0]) > maxReviewScriptBytes {
 			return nil, false
 		}
 		words = append(words, fields[0])
 	}
 	return words, true
+}
+
+// Shell names stay case-sensitive even when the host OS is Windows.
+type shellVariables map[string]expand.Variable
+
+func (v shellVariables) Get(name string) expand.Variable { return v[name] }
+func (v shellVariables) Each(yield func(string, expand.Variable) bool) {
+	for name, value := range v {
+		if !yield(name, value) {
+			return
+		}
+	}
 }
 
 // Avoid guessing loop values in the presence of assignments or commands which

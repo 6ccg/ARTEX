@@ -431,7 +431,7 @@ func TestDeleteProfileRetriesReferenceCommittedAfterInitialScan(t *testing.T) {
 	}
 	defer referenceTx.Rollback()
 	if _, err := referenceTx.Exec(`UPDATE tasks
-SET llm_profile_id=$2, active_llm_profile_id=$2
+SET active_llm_profile_id=$2
 WHERE id=$1`, task.ID, profileID); err != nil {
 		t.Fatal(err)
 	}

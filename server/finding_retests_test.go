@@ -35,6 +35,8 @@ func (p retestProvider) Stream(context.Context, llm.CompletionRequest) iter.Seq2
 }
 
 func newRetestServer(t *testing.T) (*Server, int64) {
+	agentHost := &agent.Host{}
+
 	t.Helper()
 	dsn, _, err := db.DSN()
 	if err != nil {
@@ -46,8 +48,7 @@ func newRetestServer(t *testing.T) (*Server, int64) {
 	}
 	td := t.TempDir()
 	ctx, cancel := context.WithCancel(context.Background())
-	s := &Server{ctx: ctx, m: &Manager{pg: pg, dir: td, tasks: map[string]*Task{}},
-		chatBusy: map[string]bool{}, chatCancel: map[string]context.CancelCauseFunc{}}
+	s := &Server{Runtime: &Runtime{host: agentHost, ctx: ctx, m: &Manager{pg: pg, dir: td, tasks: map[string]*Task{}}, chatBusy: map[string]bool{}, chatCancel: map[string]context.CancelCauseFunc{}}}
 	if err := s.seedFindingRetester(); err != nil {
 		t.Fatal(err)
 	}
@@ -55,16 +56,16 @@ func newRetestServer(t *testing.T) (*Server, int64) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	oldAugment, oldResolve, oldPrompt := agent.ToolAugment, agent.ToolResolve, agent.PromptOverride
-	agent.ToolAugment = func(context.Context, string) ([]actool.CoreTool, agent.DeferredInfo, func()) {
+
+	agentHost.ToolAugment = func(context.Context, string) ([]actool.CoreTool, agent.DeferredInfo, func()) {
 		return s.findingRetestTools(), agent.DeferredInfo{}, func() {}
 	}
-	agent.ToolResolve = nil
-	agent.PromptOverride = func(string) (string, bool) { return agent.RetesterDefaultPrompt, true }
+	agentHost.ToolResolve = nil
+	agentHost.PromptOverride = func(string) (string, bool) { return agent.RetesterDefaultPrompt, true }
 	t.Cleanup(func() {
 		cancel()
 		waitRetestIdle(t, s)
-		agent.ToolAugment, agent.ToolResolve, agent.PromptOverride = oldAugment, oldResolve, oldPrompt
+
 		_, _ = pg.Exec(`DELETE FROM conversations WHERE id IN (SELECT conversation_id FROM finding_retests WHERE finding_id=$1)`, fid)
 		_, _ = pg.DeleteFinding(fid)
 		pg.Close()
@@ -73,7 +74,7 @@ func newRetestServer(t *testing.T) (*Server, int64) {
 }
 
 func setRetestProvider(s *Server, p retestProvider) {
-	s.chatAgent = agent.NewChatAgent(p, "test", s.m.dir, nil, 10000)
+	s.chatAgent = agent.NewChatAgent(s.host, p, "test", s.m.dir, nil, 10000)
 	s.chatAgent.SetNonStreaming(func() bool { return true })
 }
 

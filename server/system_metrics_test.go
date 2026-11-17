@@ -8,7 +8,7 @@ import (
 )
 
 func TestSystemMetricsReturnsContainerAndDiskValues(t *testing.T) {
-	s := &Server{dataDir: t.TempDir()}
+	s := &Server{Runtime: &Runtime{dataDir: t.TempDir()}}
 	r := httptest.NewRequest("GET", "/api/system/metrics", nil)
 	w := httptest.NewRecorder()
 	s.systemMetrics(w, r)

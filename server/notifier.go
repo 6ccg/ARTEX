@@ -74,7 +74,7 @@ var notifyBackoff = []time.Duration{
 // Scheduler 的 tick：推送的实时性要求（3 秒）与触发器的业务节奏不同，
 // 且两者的失败互不牵连——推送卡住不该影响 agent 触发。
 type Notifier struct {
-	s  *Server
+	s  *Runtime
 	pg *db.DB
 
 	// mu 保护 buckets。渠道数量少、竞争低，一把互斥锁足够，
@@ -93,7 +93,7 @@ type notifyBucket struct {
 	lastFill time.Time
 }
 
-func newNotifier(s *Server) *Notifier {
+func newNotifier(s *Runtime) *Notifier {
 	return &Notifier{s: s, pg: s.m.pg, buckets: map[int64]*notifyBucket{}}
 }
 

@@ -33,7 +33,7 @@ type archiveBatchItem struct {
 	Archive int64  `json:"archive_id,omitempty"`
 }
 
-func (s *Server) startTaskArchiveWorker() {
+func (s *Runtime) startTaskArchiveWorker() {
 	if s.m == nil || s.m.pg == nil {
 		return
 	}
@@ -77,7 +77,7 @@ func (s *Server) startTaskArchiveWorker() {
 	s.notifyTaskArchiveWorker()
 }
 
-func (s *Server) notifyTaskArchiveWorker() {
+func (s *Runtime) notifyTaskArchiveWorker() {
 	if s == nil || s.archiveWake == nil {
 		return
 	}
@@ -87,7 +87,7 @@ func (s *Server) notifyTaskArchiveWorker() {
 	}
 }
 
-func (s *Server) runOneTaskArchiveJob() error {
+func (s *Runtime) runOneTaskArchiveJob() error {
 	job, err := s.m.pg.ClaimTaskArchiveJob(s.ctx)
 	if err != nil || job == nil {
 		return err
@@ -114,7 +114,7 @@ func (s *Server) runOneTaskArchiveJob() error {
 	return nil
 }
 
-func (s *Server) archiveTask(job *pgdb.TaskArchive) (runErr error) {
+func (s *Runtime) archiveTask(job *pgdb.TaskArchive) (runErr error) {
 	taskID := strconv.FormatInt(job.TaskID, 10)
 	if !s.beginTaskDelete(taskID) {
 		return errors.New("任务正在进行其他归档或删除操作")
@@ -238,7 +238,7 @@ func (s *Server) archiveTask(job *pgdb.TaskArchive) (runErr error) {
 	return nil
 }
 
-func (s *Server) restoreTaskArchive(job *pgdb.TaskArchive) (runErr error) {
+func (s *Runtime) restoreTaskArchive(job *pgdb.TaskArchive) (runErr error) {
 	if err := validateArchivePath(s.m.dir, job.ArchivePath); err != nil {
 		return err
 	}
@@ -289,7 +289,7 @@ func (s *Server) restoreTaskArchive(job *pgdb.TaskArchive) (runErr error) {
 	})
 }
 
-func (s *Server) restoreTaskArchivePayload(job *pgdb.TaskArchive, snapshot *pgdb.TaskArchiveSnapshot, extracted string) (runErr error) {
+func (s *Runtime) restoreTaskArchivePayload(job *pgdb.TaskArchive, snapshot *pgdb.TaskArchiveSnapshot, extracted string) (runErr error) {
 	var err error
 	var llmRecordsFile *os.File
 	relative, hasStreamedLLMRecords := snapshot.StreamedTables["llm_records"]
@@ -366,7 +366,7 @@ func (s *Server) restoreTaskArchivePayload(job *pgdb.TaskArchive, snapshot *pgdb
 	return nil
 }
 
-func (s *Server) loadRestoredTask(taskID int64) {
+func (s *Runtime) loadRestoredTask(taskID int64) {
 	id := strconv.FormatInt(taskID, 10)
 	var restored *Task
 	for _, task := range s.m.LoadExisting() {
@@ -392,7 +392,7 @@ func (s *Server) loadRestoredTask(taskID int64) {
 	}
 }
 
-func (s *Server) deleteTaskArchive(job *pgdb.TaskArchive) error {
+func (s *Runtime) deleteTaskArchive(job *pgdb.TaskArchive) error {
 	if err := validateArchivePath(s.m.dir, job.ArchivePath); err != nil {
 		return err
 	}
@@ -611,7 +611,7 @@ func normalizeArchiveIDs(ids []int64) ([]int64, error) {
 	return out, nil
 }
 
-func (s *Server) orderLiveTaskArchiveBatch(ids []string) []string {
+func (s *Runtime) orderLiveTaskArchiveBatch(ids []string) []string {
 	sources := map[string][]string{}
 	for _, id := range ids {
 		if task, ok := s.m.Task(id); ok {
@@ -623,7 +623,7 @@ func (s *Server) orderLiveTaskArchiveBatch(ids []string) []string {
 	return topoTaskIDs(ids, sources, false)
 }
 
-func (s *Server) orderColdTaskArchiveBatch(ids []int64, restore bool) []int64 {
+func (s *Runtime) orderColdTaskArchiveBatch(ids []int64, restore bool) []int64 {
 	taskToArchive := map[string]int64{}
 	sources := map[string][]string{}
 	var taskIDs []string

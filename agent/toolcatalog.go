@@ -32,7 +32,7 @@ type ToolSeed struct {
 // 里（本表只覆盖 Description()，会造成半覆盖误导）。不 seed → 无 DB 行 → ToolResolve
 // 原样放行、不覆盖，行为与从前一致。只有 artex 自己的领域工具入表可管。
 func builtinToolsByAgent() map[string][]actool.CoreTool {
-	ts := NewToolSet(nil, "")
+	ts := NewToolSet(nil, nil, "")
 	return map[string][]actool.CoreTool{
 		"mainagent": ts.MainAgentTools(),
 		"planner":   ts.PlannerTools(),
@@ -100,13 +100,6 @@ func BuiltinToolSeeds() []ToolSeed {
 	}
 	return out
 }
-
-// ToolResolve, if set, post-processes an agent's fully-assembled tool list against
-// the DB tools table: it drops tools not bound to this agent (or globally disabled)
-// and wraps the rest so the model sees the DB-overridden description/schema and
-// 缺省入参 get injected. Tools with no matching DB row (MCP/skill/host tools like
-// traffic) pass through untouched. nil = tools unchanged. Wired in server/assembly.go.
-var ToolResolve func(ctx context.Context, agentKey string, tools []actool.CoreTool) []actool.CoreTool
 
 // DecorateTool wraps t so Description()/InputSchema() report the DB overrides and
 // Call() injects scalar parameter defaults (from schema's "default" props) whenever

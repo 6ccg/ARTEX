@@ -24,13 +24,9 @@ import (
 	"github.com/Autumn-27/artex/egress"
 	"github.com/Autumn-27/artex/intercept"
 	"github.com/Autumn-27/artex/intercept/jev"
-	"github.com/Autumn-27/artex/llmpool"
-	"github.com/Autumn-27/artex/llmrec"
 	"github.com/Autumn-27/artex/report"
 	"github.com/Autumn-27/artex/traffic"
-	"github.com/Autumn-27/norma/llm"
 	actool "github.com/Autumn-27/norma/tool"
-	"github.com/Autumn-27/norma/transcript"
 )
 
 // BuildVersion is the backend application version, injected from cmd/artex at
@@ -41,756 +37,26 @@ var BuildVersion = "dev"
 // Server exposes the ARTEX backend over a JSON HTTP API for the shadcn/ui
 // frontend.
 type Server struct {
-	scheduleMu sync.Mutex
-	m          *Manager
-	engine     *Engine
-	ctx        context.Context
-	dataDir    string
+	*Runtime
+	jwtKey     []byte
 	metricsMu  sync.Mutex
 	lastCPUUse uint64
 	lastCPUAt  time.Time
 
-	skillDir  string // root directory for skill subdirectories
-	jwtKey    []byte // HS256 signing key loaded from / generated into dataDir/jwt.key
-	basicAuth basicAuthGate
-
-	// mcpStoreOverride replaces the PostgreSQL-backed MCP server store in tests.
 	mcpStoreOverride mcpStore
-	// mcpCreateMu serializes MCP task creation so a token's quota check and the
-	// creation it guards cannot interleave with another request on the same token.
 	mcpCreateMu sync.Mutex
-
-	// concMu serializes concurrency-cap decisions (admission + reconcile) so a
-	// scheduler tick and an HTTP settings change / task creation can't both count
-	// free slots off the same snapshot and over-promote past the limit.
-	concMu sync.Mutex
-
-	cfgMu     sync.Mutex
-	chatAgent *agent.ChatAgent // conversational runner for the chat page; nil w/o LLM
-	// llmProv is the fully-decorated global provider (recorder + failover chain)
-	// installed by applyLLM. Task routers use it after an explicit chain is cleared.
-	llmProv   llm.Provider
-	llmDirect llm.Provider // concrete global provider, before any failover pool
-	llmCfg    agent.Config // current LLM config (key not exposed)
-	llmOn     bool
-	llmProf   string // active LLM profile name (for llmrec tagging)
-
-	// chatBusy guards the per-task main-agent run: the chat handler launches the
-	// agent on the server's background ctx (not the request ctx) and returns
-	// immediately, so a page reload / proxy timeout can't abort a live run. This
-	// map serializes turns per task — one main-agent run at a time per task, so
-	// concurrent messages don't corrupt the shared exp<id>-main transcript.
-	chatMu   sync.Mutex
-	chatBusy map[string]bool
-	// chatCancel holds the cancel func for each in-flight conversation run (keyed by
-	// convBusyKey), so a manual stop can abort JUST that session's agent run. Set/
-	// cleared alongside chatBusy under chatMu. Aborting a run does NOT touch the P3
-	// trigger queue — the drain goroutine simply proceeds to the next queued fire.
-	chatCancel map[string]context.CancelCauseFunc
-
-	// triggerQ buffers P3 trigger fires PER AGENT. A per-agent "pump" launches runs up
-	// to a concurrency limit derived from the agent's策略: serial → limit 1 (+ optional
-	// merge); parallel → limit = trigger_max_parallel (0=∞), no merge. triggerActive
-	// counts in-flight runs per agent (replaces a boolean drain flag); a run's
-	// completion decrements it and re-pumps to fill the freed slot. triggerCfg caches
-	// the agent's last-read策略 so the pump never queries the DB while holding queueMu.
-	// Distinct agents always run concurrently. Queue is in-memory (matches chatBusy); a
-	// restart drops pending fires — the scheduler re-fires from watermarks next tick.
-	queueMu       sync.Mutex
-	triggerQ      map[string][]triggeredRun
-	triggerActive map[string]int
-	triggerCfg    map[string]triggerBehavior
-
-	// profChatAgents caches a per-profile ChatAgent (chat page), keyed by profile id.
-	// Built lazily on first use; invalidated when any profile is saved/activated/deleted
-	// so edits take effect.
-	profMu         sync.Mutex
-	profChatAgents map[int64]*agent.ChatAgent // per-profile ChatAgent cache (chat page)
-
-	// provByProfile caches ONE provider per LLM profile id so every agent bound or
-	// pinned to the same profile shares a single provider instance — hence one rate
-	// limiter. applyLLM also resolves the persisted global-active profile through this
-	// cache, so global fallback and task chains do not accidentally double the
-	// configured request rate. Cleared on profile edits, then repopulated by active reapply.
-	provCacheMu   sync.Mutex
-	provByProfile map[int64]*provEntry
-	provCacheGen  uint64
-	// Quota histories survive provider/agent cache invalidation. Key 0 belongs
-	// to the non-persisted global config; persisted profiles use their DB IDs.
-	requestLimiters map[int64]*agent.RequestLimiter
-
-	// llmHealth is the process-wide circuit-breaker state for LLM failover (轮询).
-	// It deliberately lives OUTSIDE the provider caches: rebuilding the chain
-	// (saving an unrelated profile, flipping a setting) must not erase what we
-	// learned about which backends are out of credit / rate-limited.
-	llmHealth *llmpool.Registry
-
-	// Explicit task chains use one task-scoped dynamic provider shared by goals,
-	// planner, workers, and the main agent. Bundles are stable; their runtime reads
-	// the persisted current profile at every new LLM call.
-	taskAgentMu sync.Mutex
-	taskAgents  map[string]*taskAgentBundle
-
-	// Cold task archives run through one persistent FIFO worker. The buffered wake
-	// channel coalesces enqueue bursts; the database remains the source of truth.
-	archiveWake       chan struct{}
-	archiveWG         sync.WaitGroup
-	credentialWake    chan struct{}
-	proxyReconnect    proxyReconnectSupervisor
-	proxyPoolWake     chan struct{}
-	proxyPoolWG       sync.WaitGroup
-	proxyPoolProbeSem chan struct{}
-	proxyPoolTickMu   sync.Mutex
-	// proxyProbe is injectable for deterministic reconnect race tests. Production
-	// servers leave it nil and use probeEgress directly.
-	proxyProbe func(context.Context, string, string, []string, time.Duration) egressProbeResult
-	side       *sideQuestionState
 }
 
-// provEntry is a cached provider + its config for one LLM profile id.
-type provEntry struct {
-	prov llm.Provider
-	cfg  agent.Config
-	// jev is retained in the cache entry so a cached chat provider can be
-	// returned without consulting the DB on every hot-path resolution.
-	jev bool
-}
-
-// triggeredRun is one queued P3 trigger fire awaiting its turn for an agent.
-// taskID + mergeable let the drainer coalesce several event triggers (finding/goal)
-// from the SAME task into one conversation before it starts (interval fires don't merge).
-type triggeredRun struct {
-	conversationID int64 // pre-created manual finding review; never coalesced
-
-	agentKey  string
-	title     string
-	message   string // 事件正文(触发语 + 工具/入参/返回等);不含任务描述/目标头
-	taskID    int64  // source task for finding/goal triggers; 0 for interval/none
-	taskDesc  string // 任务描述(任务级,同任务相同);合并时只渲染一次
-	taskGoal  string // 任务目标(任务级,同任务相同);合并时只渲染一次
-	mergeable bool   // true for finding/goal event triggers (merge by taskID)
-}
-
-func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDir string) *Server {
-	key, err := loadOrCreateJWTKey(keyDir, dataDir)
+// NewHandler adapts an existing runtime to HTTP. It does not start runtime work.
+func NewHandler(runtime *Runtime, keyDir string) (*Server, error) {
+	if runtime == nil {
+		return nil, fmt.Errorf("runtime is required")
+	}
+	key, err := loadOrCreateJWTKey(keyDir, runtime.dataDir)
 	if err != nil {
-		log.Fatalf("[auth] JWT key: %v", err)
+		return nil, fmt.Errorf("load JWT key: %w", err)
 	}
-	s := &Server{m: m, engine: NewEngine(m), ctx: ctx, skillDir: skillDir, dataDir: dataDir, jwtKey: key, chatBusy: map[string]bool{},
-		chatCancel: map[string]context.CancelCauseFunc{}, triggerQ: map[string][]triggeredRun{},
-		triggerActive: map[string]int{}, triggerCfg: map[string]triggerBehavior{}, proxyPoolWake: make(chan struct{}, 1), proxyPoolProbeSem: make(chan struct{}, proxyPoolMaxProbeConcurrency),
-		profChatAgents: map[int64]*agent.ChatAgent{},
-		provByProfile:  map[int64]*provEntry{}, llmHealth: newLLMHealthRegistry(m.pg),
-		taskAgents: map[string]*taskAgentBundle{}, archiveWake: make(chan struct{}, 1), credentialWake: make(chan struct{}, 1)}
-	m.SetTaskControlMutex(&s.concMu)
-	s.initSideQuestions()
-	if m.pg != nil {
-		if err := s.basicAuth.load(m.pg); err != nil {
-			log.Fatalf("[auth] load HTTP Basic Auth: %v", err)
-		}
-	}
-	// 熔断阈值/冷却是失败路径上的热参数，启动时把全局重试策略推给 Registry 一次；
-	// 之后每次保存策略再推一次（saveLLMRetryPolicy）。
-	s.applyRetryPolicy()
-	// Every task uses a stable task router. An empty explicit chain is resolved by
-	// that router through Agent bindings and then the global provider, so adding a
-	// first chain to a running task takes effect on its very next LLM call.
-	s.engine.SetAuthoritativeAgentResolver(func(t *Task) (*agent.Planner, *agent.Worker) {
-		if !s.taskRuntimeAvailable(t, "planner", "worker") {
-			return nil, nil
-		}
-		b := s.agentsForTask(t)
-		return b.pl, b.wk
-	})
-	s.engine.SetWorkerResolver(func(t *Task, slot WorkerSlot) (*agent.Worker, error) {
-		return s.workerForTaskSlot(t, slot)
-	})
-	// Global readiness (Ready()/llm_configured): a global active LLM provider is
-	// installed. Task-level runnability is separate (ReadyFor → the resolver above).
-	s.engine.SetReadiness(func() bool {
-		s.cfgMu.Lock()
-		defer s.cfgMu.Unlock()
-		return s.llmOn
-	})
-	s.engine.SetProxyFailureHandler(s.handleProxyFailure)
-	if m.traffic != nil {
-		m.traffic.SetUpstreamFailureHandler(s.handleProxyTrafficFailure)
-	}
-	// Wire DB-stored prompt templates into the agents (新版方案 §3.3 / §5a). With no
-	// override row, agents keep their built-in defaults — behavior is unchanged.
-	if m.pg != nil {
-		agent.OpsecEnabled = func() bool { return m.pg.GetBool(settingOpsecEnabled, false) }
-		agent.PromptOverride = func(key string) (string, bool) {
-			a, err := m.pg.GetAgentByKey(key)
-			if err != nil || a == nil {
-				return "", false
-			}
-			t, err := m.pg.CurrentPrompt(a.ID)
-			if err != nil || t == "" {
-				return "", false
-			}
-			if key == "reporter" && m.pg.GetBool(settingBrowserScreenshot, false) {
-				t += `
-
-【报告步骤截图已开启】
-				报告撰写时，针对每个复现步骤中真实出现且仍可访问的 HTTP 页面，使用 browser MCP 的 browser_navigate 和 browser_take_screenshot 截取页面证据。只导航到漏洞证据中出现的目标 URL，不要自行扩大测试范围。将截图保存到当前工作目录下的 findings/screenshots/ 目录，文件名使用 finding-<finding_id>-step-<n>.png；确认文件存在后，在对应步骤中**统一使用工作区相对路径**加入 Markdown 图片：![步骤 <n> 截图](findings/screenshots/finding-<finding_id>-step-<n>.png)。禁止使用绝对路径、workspace://、file://，也不要混用相对路径和绝对路径；报告中所有截图都必须使用这一种格式。截图失败时如实写明，不要用占位图或把截图描述冒充图片。`
-			}
-			return t, true
-		}
-		// Wire DB-stored wrap-up (settlement) prompts. Empty column → built-in default.
-		agent.WrapupOverride = func(key string) (string, bool) {
-			a, err := m.pg.GetAgentByKey(key)
-			if err != nil || a == nil || a.WrapupPrompt == "" {
-				return "", false
-			}
-			return a.WrapupPrompt, true
-		}
-		// Wire DB-stored wrap-up turn budgets. 0 / missing → built-in per-agent default.
-		agent.WrapupMaxTurnsOverride = func(key string) (int, bool) {
-			a, err := m.pg.GetAgentByKey(key)
-			if err != nil || a == nil || a.WrapupMaxTurns <= 0 {
-				return 0, false
-			}
-			return a.WrapupMaxTurns, true
-		}
-		// Wire DB-stored TASK-TIMEOUT wrap-up prompt/turns (worker/planner). Empty/0 → default.
-		agent.WrapupTaskTimeoutOverride = func(key string) (string, bool) {
-			a, err := m.pg.GetAgentByKey(key)
-			if err != nil || a == nil || a.TaskTimeoutWrapupPrompt == "" {
-				return "", false
-			}
-			return a.TaskTimeoutWrapupPrompt, true
-		}
-		agent.WrapupTaskTimeoutTurnsOverride = func(key string) (int, bool) {
-			a, err := m.pg.GetAgentByKey(key)
-			if err != nil || a == nil || a.TaskTimeoutWrapupMaxTurns <= 0 {
-				return 0, false
-			}
-			return a.TaskTimeoutWrapupMaxTurns, true
-		}
-		wireAgentAugment(m.pg, s.skillDir, s.hostTools) // 可见 skills/MCP + 流量/编排 host 工具装配进 agent 工具集
-		domainReg := buildDomainReg(m.Assets())
-		wireTools(m.pg, domainReg) // 内置工具表：按 agent 过滤 + 覆盖描述/schema + 注入默认值
-		seedPrompts(m.pg)          // 内置 agent 默认提示词正文播种进 agent_prompts(仅空时)
-		s.seedOrchestrationTools() // P2 跨任务编排工具 seed 进 tools 表(可按 agent 绑定)
-		if err := s.seedFindingRetester(); err != nil {
-			log.Printf("[retester] seed: %v", err)
-		}
-		go s.evidenceStore().RunGC(s.ctx)
-		s.seedPythonInterpreter() // 自定义脚本工具:开机检测 python 解释器入库(仅空时)
-		// Calendar scheduler starts after persisted tasks are restored.
-		// 漏洞 IM 推送投递引擎。与 Scheduler 并列但独立：推送的实时性要求(3s)
-		// 与触发器的业务节奏不同，且两者失败互不牵连——推送卡住不该影响 agent 触发。
-		go newNotifier(s).Run(s.ctx)
-		// Fill the tool cache for any enabled MCP that has none yet (notably the
-		// seeded browser MCP on first run). Async so it never blocks startup.
-		go s.discoverEmptyMCPsOnStartup()
-		logSink.SetDB(ctx, m.pg) // restore last 100 log rows and enable async persistence
-	}
-	// precedence: persisted DB config > env.
-	if cfg, ok := s.loadLLMConfig(); ok {
-		if err := s.applyLLM(cfg); err != nil {
-			log.Printf("[engine] saved LLM config init failed — engine idle: %v", err)
-		} else {
-			log.Printf("[engine] LLM configured from DB: %s / %s", cfg.Provider(), cfg.Model)
-		}
-	} else if cfg, ok := agent.FromEnv(); ok {
-		if err := s.applyLLM(cfg); err != nil {
-			log.Printf("[engine] env provider init failed — engine idle: %v", err)
-		} else {
-			log.Printf("[engine] LLM configured from env: %s / %s", cfg.Provider(), cfg.Model)
-		}
-	} else {
-		log.Printf("[engine] no LLM provider configured — engine idle until set via /api/llm or env")
-	}
-	s.restoreTaskRuntimes()
-	s.ensureProxySupervisor()
-	s.proxyPoolWG.Add(1)
-	go func() { defer s.proxyPoolWG.Done(); s.runProxyPoolSupervisor(s.ctx) }()
-	go s.reconcileConcurrency()
-	s.startTaskArchiveWorker()
-	if m.pg != nil {
-		agent.CredentialRecorded = func() {
-			select {
-			case s.credentialWake <- struct{}{}:
-			default:
-			}
-		}
-		s.seedCredentialProcessor()
-		go s.runCredentialProcessor()
-	}
-	s.wireInterceptReviewer() // LLM 兜底审批:未命中拦截规则的命令交给模型判定
-	return s
-}
-
-// Close waits for proxy pool supervision to stop before Manager closes the DB.
-func (s *Server) Close() {
-	if s != nil {
-		s.proxyPoolWG.Wait()
-	}
-}
-
-// Restored deadline and worker loops must inherit the same context as new tasks,
-// including the side-question checkpoint publisher installed during startup.
-func (s *Server) restoreTaskRuntimes() {
-	m := s.m
-	// reload tasks persisted on disk so the task list survives a restart, and
-	// restore persisted paused state (so a task paused before restart stays paused).
-	for _, t := range m.LoadExisting() {
-		lifecycle := t.lifecycleSnapshot()
-		// clear stale 'running' intents from a prior crash/restart (no live worker
-		// owns them) so they re-claim instead of spinning forever in the UI.
-		if n, _ := t.Store.ResetRunningIntents(); n > 0 {
-			log.Printf("[engine] task %s 重置 %d 个残留 running 意图为 open", t.ID, n)
-		}
-		if lifecycle.Paused {
-			s.engine.Pause(t.ID, agent.AbortPausedOnReload)
-		}
-		// 任务级超时:为每个未终态、带 timeout 的任务起 deadline 协调器,独立于 planner/worker
-		// loop——非活跃任务重启后也能在到点后被收尾(deadline 已过则立即走收尾时序)。
-		if !isTerminalStatus(lifecycle.Status) {
-			s.engine.startDeadlineCoordinator(s.ctx, t)
-		}
-	}
-	go newScheduler(s).Run(s.ctx)
-	// Restore every task that had already been admitted before shutdown. Starting
-	// only the active UI task left other non-queued tasks counted as concurrency
-	// occupants without live loops, which could permanently block the persistent
-	// FIFO. Paused loops remain idle; queued tasks are admitted below as slots allow.
-	for _, t := range m.List() {
-		lifecycle := t.lifecycleSnapshot()
-		if !lifecycle.Queued && !isTerminalStatus(lifecycle.Status) {
-			s.engine.Run(s.ctx, t)
-		}
-	}
-}
-
-// agentMaxTurns returns the configured max_turns for an agent key (0 = unlimited,
-// also the fallback when no DB or no row).
-func (s *Server) agentMaxTurns(key string) int {
-	if s.m.pg == nil {
-		return 0
-	}
-	a, err := s.m.pg.GetAgentByKey(key)
-	if err != nil || a == nil {
-		return 0
-	}
-	return a.MaxTurns
-}
-
-// agentRunSeconds returns the configured wall-clock run budget (seconds) for an
-// agent key (0 = unlimited; 1200 fallback when no DB or no row, matching schema).
-func (s *Server) agentRunSeconds(key string) int {
-	if s.m.pg == nil {
-		return 1200
-	}
-	a, err := s.m.pg.GetAgentByKey(key)
-	if err != nil || a == nil {
-		return 1200
-	}
-	return a.RunSecs
-}
-
-// loadLLMConfig reads the active LLM profile from PG (llm_profiles).
-func (s *Server) loadLLMConfig() (agent.Config, bool) {
-	p, err := s.m.pg.ActiveProfile()
-	if err != nil || p == nil {
-		return agent.Config{}, false
-	}
-	if p.Format == "jev" {
-		return agent.Config{}, false
-	}
-	cfg := agent.ConfigFrom(p.Format, p.Model, p.BaseURL, p.APIKey)
-	cfg.RatePerSecond, cfg.RatePerMinute = p.RatePerSecond, p.RatePerMinute
-	cfg.ContextWindowK = p.ContextWindowK
-	cfg.ThinkingType = p.ThinkingType
-	cfg.ReasoningEffort = p.ReasoningEffort
-	cfg.Stream = p.Streaming
-	cfg.MaxTokens, cfg.MaxTokensField = p.MaxTokens, p.MaxTokensField
-	cfg.SessionHeaderKey = p.SessionHeaderKey
-	s.applyProfileRetry(&cfg, p)
-	if cfg.APIKey == "" {
-		return cfg, false
-	}
-	s.cfgMu.Lock()
-	s.llmProf = p.Name
-	s.cfgMu.Unlock()
-	return cfg, true
-}
-
-// saveLLMConfig persists the LLM config as the active "default" profile in PG.
-func (s *Server) saveLLMConfig(cfg agent.Config) error {
-	if cfg.Jev || cfg.Provider() == "jev" {
-		return db.ErrJevProfileJudgeOnly
-	}
-	// cfg.Provider() returns one of the chat format strings
-	// (anthropic / openai / openai-responses), matching the DB CHECK constraint;
-	// Jev is intentionally handled by the dedicated intercept path.
-	format := cfg.Provider()
-	var id int64
-	// 这个 legacy 端点的请求体不含轮询/收发/输出上限参数,故把库里已存的值原样带回 —
-	// 否则每次保存都会把 profile 的 priority、pool_exclude、streaming 以及输出上限
-	// (max_tokens / max_tokens_field)悄悄重置成零值。
-	var priority int
-	var poolExclude bool
-	streaming := true // 旧库/新建默认流式
-	var maxTokens int
-	var maxTokensField string
-	var sessionHeaderKey string
-	var retry db.RetryOverride
-	if profs, _ := s.m.pg.ListProfiles(); profs != nil {
-		for _, p := range profs {
-			if p.Name == "default" {
-				id, priority, poolExclude, streaming = p.ID, p.Priority, p.PoolExclude, p.Streaming
-				maxTokens, maxTokensField = p.MaxTokens, p.MaxTokensField
-				sessionHeaderKey = p.SessionHeaderKey
-				retry = p.Retry
-				break
-			}
-		}
-	}
-	newID, err := s.m.pg.SaveProfile(&db.LLMProfile{
-		ID: id, Name: "default", Format: format, Model: cfg.Model, BaseURL: cfg.BaseURL,
-		APIKey: cfg.APIKey, RatePerSecond: cfg.RatePerSecond, RatePerMinute: cfg.RatePerMinute,
-		ContextWindowK: cfg.ContextWindowK, ThinkingType: cfg.ThinkingType, ReasoningEffort: cfg.ReasoningEffort, IsDefault: true,
-		Priority: priority, PoolExclude: poolExclude, Streaming: streaming,
-		MaxTokens: maxTokens, MaxTokensField: maxTokensField, SessionHeaderKey: sessionHeaderKey,
-		Retry: retry,
-	})
-	if err != nil {
-		return err
-	}
-	return s.m.pg.SetActiveProfile(newID)
-}
-
-// reapplyActiveProfile hot-reloads the engine from the active DB profile so that
-// saving or activating a profile takes effect without a restart. Best-effort:
-// logs on failure and leaves the running engine untouched.
-func (s *Server) reapplyActiveProfile() {
-	cfg, ok := s.loadLLMConfig()
-	if !ok {
-		return
-	}
-	if err := s.applyLLM(cfg); err != nil {
-		log.Printf("[engine] reapply active profile failed: %v", err)
-		return
-	}
-	log.Printf("[engine] LLM reapplied from active profile: %s / %s", cfg.Provider(), cfg.Model)
-}
-
-// webSearchFor gates the global web-search opts (backend/key) by an agent's own
-// web_search flag: the backend/key come from the global config, each agent decides on/off.
-func (s *Server) webSearchFor(key string) agent.WebSearchOpts {
-	o := s.m.WebSearchOpts()
-	if a, err := s.m.pg.GetAgentByKey(key); err != nil || a == nil || !a.WebSearch {
-		o.Enabled = false
-	}
-	return o
-}
-
-// nonStreamingResolver returns a resolver capturing a profile's streaming choice.
-// The agents read it per run; a profile change rebuilds the agents (applyLLM),
-// so the captured value is always the one in effect for this build.
-func nonStreamingResolver(cfg agent.Config) func() bool {
-	nonStreaming := !cfg.Stream
-	return func() bool { return nonStreaming }
-}
-
-// maxTokensResolver mirrors nonStreamingResolver for the per-reply output cap.
-func maxTokensResolver(cfg agent.Config) func() int {
-	maxTokens := cfg.MaxTokens
-	return func() int { return maxTokens }
-}
-
-// applyLLM (re)builds the planner/worker/main-agent from cfg and installs them on
-// the running engine as the GLOBAL active pair. Safe to call at runtime (UI configures LLM).
-func (s *Server) applyLLM(cfg agent.Config) error {
-	if cfg.Jev {
-		return fmt.Errorf("Jev System One 仅可用于拦截判定模型，不能作为聊天 provider")
-	}
-	var prov llm.Provider
-	// A persisted active profile must use the same cached provider as task chains
-	// and Agent bindings, otherwise each path owns a separate rate limiter.
-	if active, _ := s.m.pg.ActiveProfile(); active != nil {
-		if activeCfg, ok := s.loadProfileConfig(active.ID); ok && activeCfg == cfg {
-			prov, _, _ = s.providerForProfile(active.ID)
-		}
-	}
-	if prov == nil {
-		var err error
-		prov, err = cfg.NewProviderWithLimiter(s.requestLimiterForProfile(0))
-		if err != nil {
-			return err
-		}
-		// Non-persisted/env configs do not have a profile cache key.
-		s.cfgMu.Lock()
-		profName := s.llmProf
-		s.cfgMu.Unlock()
-		prov = llmrec.Wrap(prov, s.m.PG(), cfg.Model, profName, cfg.ThinkingType, cfg.ReasoningEffort, s.m.LLMRecordEnabled)
-		prov = bindSideProvider(prov, cfg, 0, profName)
-	}
-	s.cfgMu.Lock()
-	s.llmDirect = prov
-	s.cfgMu.Unlock()
-	// LLM 轮询(默认关):把激活配置包进故障转移链,当前配置不可用时自动切下一个。
-	// 只影响「走全局激活配置」的这条路径——agent 绑定 / 任务 pin 的走 providerForProfile,
-	// 默认仍然独占该配置(见 poolForBinding)。关闭或无备选时返回原 provider,行为不变。
-	if act, err := s.m.pg.ActiveProfile(); err == nil && act != nil {
-		prov = s.poolForActive(act.ID, prov, cfg)
-	}
-	// No global planner/worker pair: every task runs on its own task-routed pair
-	// (agentsForTask), resolved through the engine's authoritative resolver. Global
-	// readiness (Ready()/llm_configured) is reported from s.llmOn, set below.
-
-	tx := transcript.NewStore(filepath.Join(s.m.dir, "transcripts"))
-	win := cfg.CompactionWindow()
-	// chat stays the GLOBAL fallback since one ChatAgent serves many agent keys — its
-	// per-agent binding is resolved at Chat time (runConversationSync →
-	// chatAgentForProfile). The main-agent has no global instance: each task builds its
-	// own via agentsForTask (task-routed), so nothing is constructed for it here.
-	s.cfgMu.Lock()
-	// chat agent serves MANY custom agents by key → it holds the GLOBAL opts
-	// (backend/key) and gates Enabled per-conversation-agent at Chat time. 对话始终用激活配置。
-	s.chatAgent = agent.NewChatAgent(prov, cfg.Model, s.m.dir, tx, win) // chat page runner
-	s.chatAgent.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert())
-	s.chatAgent.SetProxyProvider(s.m.ProxyAddr)
-	s.chatAgent.SetWebSearch(s.m.WebSearchOpts())
-	s.chatAgent.SetGuard(s.chatGuard())
-	s.chatAgent.SetNonStreaming(nonStreamingResolver(cfg))
-	s.chatAgent.SetMaxTokens(maxTokensResolver(cfg))
-	s.chatAgent.SetNoaEnabled(s.m.NoaCompactionEnabled) // 实验功能:noa 上下文压缩(每 run 读)
-	s.llmProv = prov
-	s.llmCfg = cfg
-	s.llmOn = true
-	s.cfgMu.Unlock()
-	s.invalidateTaskAgents()
-
-	// wake the active task so a task created while idle starts exploring.
-	if t := s.m.ActiveTask(); t != nil {
-		t.Notify()
-	}
-	return nil
-}
-
-// loadProfileConfig builds an agent.Config from a specific profile id (with its key).
-// ok=false when the profile is missing or has no api key.
-func (s *Server) loadProfileConfig(id int64) (agent.Config, bool) {
-	p, err := s.m.pg.ProfileByID(id)
-	if err != nil || p == nil {
-		return agent.Config{}, false
-	}
-	return s.profileConfig(p)
-}
-
-func (s *Server) profileConfig(p *db.LLMProfile) (agent.Config, bool) {
-	if p == nil {
-		return agent.Config{}, false
-	}
-	if p.Format == "jev" {
-		return agent.Config{}, false
-	}
-	cfg := agent.ConfigFrom(p.Format, p.Model, p.BaseURL, p.APIKey)
-	cfg.RatePerSecond, cfg.RatePerMinute = p.RatePerSecond, p.RatePerMinute
-	cfg.ContextWindowK = p.ContextWindowK
-	cfg.ThinkingType = p.ThinkingType
-	cfg.ReasoningEffort = p.ReasoningEffort
-	cfg.Stream = p.Streaming
-	cfg.MaxTokens, cfg.MaxTokensField = p.MaxTokens, p.MaxTokensField
-	cfg.SessionHeaderKey = p.SessionHeaderKey
-	s.applyProfileRetry(&cfg, p)
-	if cfg.APIKey == "" {
-		return cfg, false
-	}
-	return cfg, true
-}
-
-// effectiveProfileForAgent resolves the LLM profile id an agent should run on, by
-// precedence: agent binding (agents.llm_profile_id) → pin (task/conversation) → nil
-// (caller falls back to the global active profile). A binding to a deleted profile
-// can't happen (FK ON DELETE SET NULL); an otherwise-invalid one is dropped downstream
-// by loadProfileConfig, letting the caller fall back.
-func (s *Server) effectiveProfileForAgent(agentKey string, pinID *int64) *int64 {
-	if s.m.pg != nil && agentKey != "" {
-		if a, _ := s.m.pg.GetAgentByKey(agentKey); a != nil && a.LLMProfileID != nil {
-			return a.LLMProfileID
-		}
-	}
-	return pinID
-}
-
-// resolveChatAgent picks the ChatAgent for one conversation: the agent's own
-// binding or this conversation's chosen profile first, the global active config
-// only as a fallback. Both the send precheck and the background runner MUST use
-// this — resolving differently in the two paths is how a conversation that had
-// picked a valid profile still got rejected with "LLM 未配置" when no global
-// config was active.
-func (s *Server) resolveChatAgent(c *db.Conversation) *agent.ChatAgent {
-	ca := s.chatAgentRef()
-	if eff := s.effectiveProfileForAgent(c.AgentKey, c.LLMProfileID); eff != nil {
-		if pa := s.chatAgentForProfile(*eff); pa != nil {
-			ca = pa
-		}
-	}
-	return ca
-}
-
-// chatUnavailableReason explains why no ChatAgent could be resolved, so the user
-// knows whether to add a config, activate one, or pick one for this conversation
-// — rather than a flat "not configured" that hides which of those it is.
-func (s *Server) chatUnavailableReason() string {
-	if s.m.pg != nil {
-		if profiles, err := s.m.pg.ListProfiles(); err == nil && len(profiles) == 0 {
-			return "尚未配置 LLM：请到 系统 → LLM 配置 添加一个配置"
-		}
-		if active, err := s.m.pg.ActiveProfile(); err == nil && active == nil {
-			return "没有已激活的 LLM 配置：请到 系统 → LLM 配置 激活一个，或在本对话为该会话指定一个配置"
-		}
-	}
-	return "LLM 未就绪，无法对话：请检查 系统 → LLM 配置是否有可用且已激活的配置"
-}
-
-// providerForProfile returns a cached provider+cfg for a profile id, so every agent
-// bound/pinned to the same profile shares one provider instance (one rate limiter).
-// ok=false when the profile is missing/invalid; pinned callers surface that error
-// while legacy callers retain their existing fallback behavior.
-func (s *Server) providerForProfile(id int64) (llm.Provider, agent.Config, bool) {
-	s.provCacheMu.Lock()
-	if s.provByProfile == nil {
-		s.provByProfile = make(map[int64]*provEntry)
-	}
-	if e := s.provByProfile[id]; e != nil {
-		if e.jev {
-			s.provCacheMu.Unlock()
-			return nil, agent.Config{}, false
-		}
-		s.provCacheMu.Unlock()
-		return e.prov, e.cfg, true
-	}
-	generation := s.provCacheGen
-	s.provCacheMu.Unlock()
-	// Only a cache miss reaches the DB. This preserves an already-built chat
-	// provider during a transient profile lookup failure and avoids a query for
-	// every agent/task resolution.
-	profile, err := s.m.pg.ProfileByID(id)
-	if err != nil || profile == nil {
-		return nil, agent.Config{}, false
-	}
-	if profile.Format == "jev" {
-		// Cache the negative result too. Profile writes/activation invalidate this
-		// generation, while a transient DB error on a cached chat profile above
-		// still returns that already-built provider.
-		s.provCacheMu.Lock()
-		if generation == s.provCacheGen {
-			if s.provByProfile == nil {
-				s.provByProfile = map[int64]*provEntry{}
-			}
-			s.provByProfile[id] = &provEntry{jev: true}
-		}
-		s.provCacheMu.Unlock()
-		return nil, agent.Config{}, false
-	}
-	cfg, ok := s.profileConfig(profile)
-	if !ok {
-		return nil, agent.Config{}, false
-	}
-	s.provCacheMu.Lock()
-	if generation != s.provCacheGen {
-		s.provCacheMu.Unlock()
-		return s.providerForProfile(id)
-	}
-	if e := s.provByProfile[id]; e != nil { // lost the race → keep the winner
-		if e.jev {
-			s.provCacheMu.Unlock()
-			return nil, agent.Config{}, false
-		}
-		s.provCacheMu.Unlock()
-		return e.prov, e.cfg, true
-	}
-	// Building the HTTP client does not perform network I/O. Keep this step
-	// under the generation lock so a stale build cannot overwrite the retained
-	// limiter's settings after a newer configuration has already been installed.
-	prov, err := cfg.NewProviderWithLimiter(s.requestLimiterForProfileLocked(id))
-	if err != nil {
-		s.provCacheMu.Unlock()
-		log.Printf("[engine] build provider for LLM profile %d failed: %v", id, err)
-		return nil, agent.Config{}, false
-	}
-	if profile != nil {
-		prov = llmrec.Wrap(prov, s.m.PG(), cfg.Model, profile.Name, cfg.ThinkingType, cfg.ReasoningEffort, s.m.LLMRecordEnabled)
-		prov = bindSideProvider(prov, cfg, id, profile.Name)
-	}
-	s.provByProfile[id] = &provEntry{prov: prov, cfg: cfg, jev: false}
-	log.Printf("[engine] built provider for LLM profile %d (%s / %s)", id, cfg.Provider(), cfg.Model)
-	s.provCacheMu.Unlock()
-	return prov, cfg, true
-}
-
-func (s *Server) requestLimiterForProfile(id int64) *agent.RequestLimiter {
-	s.provCacheMu.Lock()
-	defer s.provCacheMu.Unlock()
-	return s.requestLimiterForProfileLocked(id)
-}
-
-func (s *Server) requestLimiterForProfileLocked(id int64) *agent.RequestLimiter {
-	if s.requestLimiters == nil {
-		s.requestLimiters = make(map[int64]*agent.RequestLimiter)
-	}
-	if s.requestLimiters[id] == nil {
-		s.requestLimiters[id] = &agent.RequestLimiter{}
-	}
-	return s.requestLimiters[id]
-}
-
-// chatAgentForProfile returns a ChatAgent built from a specific LLM profile, cached
-// per profile id. Returns nil if the profile is missing or has no API key.
-func (s *Server) chatAgentForProfile(id int64) *agent.ChatAgent {
-	s.profMu.Lock()
-	cached := s.profChatAgents[id]
-	s.profMu.Unlock()
-	if cached != nil {
-		return cached
-	}
-	prov, cfg, ok := s.providerForProfile(id)
-	if !ok {
-		return nil
-	}
-	tx := transcript.NewStore(filepath.Join(s.m.dir, "transcripts"))
-	ca := agent.NewChatAgent(s.poolForBinding(id, prov, cfg), cfg.Model, s.m.dir, tx, cfg.CompactionWindow())
-	ca.SetProxy(s.m.ProxyAddr(), s.m.ProxyCACert())
-	ca.SetProxyProvider(s.m.ProxyAddr)
-	ca.SetWebSearch(s.m.WebSearchOpts())
-	ca.SetGuard(s.chatGuard())
-	ca.SetNonStreaming(nonStreamingResolver(cfg))
-	ca.SetMaxTokens(maxTokensResolver(cfg))
-	ca.SetNoaEnabled(s.m.NoaCompactionEnabled) // 实验功能:noa 上下文压缩(每 run 读)
-	s.profMu.Lock()
-	if ex := s.profChatAgents[id]; ex != nil { // lost the race → keep the winner
-		ca = ex
-	} else {
-		s.profChatAgents[id] = ca
-	}
-	s.profMu.Unlock()
-	return ca
-}
-
-// invalidateProfileAgents drops the per-profile ChatAgent + provider caches so a profile
-// save/activate/delete — or an agent's binding change — rebuilds pinned tasks' agents
-// (and re-resolves each agent's bound model) on their next round.
-func (s *Server) invalidateProfileAgents() {
-	s.profMu.Lock()
-	s.profChatAgents = map[int64]*agent.ChatAgent{}
-	s.profMu.Unlock()
-	s.provCacheMu.Lock()
-	s.provCacheGen++
-	s.provByProfile = map[int64]*provEntry{}
-	s.provCacheMu.Unlock()
-	s.invalidateTaskAgents()
-}
-
-func (s *Server) chatAgentRef() *agent.ChatAgent {
-	s.cfgMu.Lock()
-	defer s.cfgMu.Unlock()
-	return s.chatAgent
+	return &Server{Runtime: runtime, jwtKey: key}, nil
 }
 
 func (s *Server) Handler() http.Handler {
@@ -1172,7 +438,7 @@ func (s *Server) Handler() http.Handler {
 	top := http.NewServeMux()
 	top.HandleFunc(mcpEndpointPath, s.serveMCP)
 	top.Handle("/", s.requireBasicAuth(root))
-	return top
+	return s.withRequestLifetime(top)
 }
 
 // --- handlers ---
@@ -1308,33 +574,6 @@ func (s *Server) listTasks(w http.ResponseWriter, r *http.Request) {
 		dtos = append(dtos, dto)
 	}
 	writeJSON(w, 200, map[string]any{"tasks": dtos, "active": active})
-}
-
-func (s *Server) resolvedTaskStatus(t *Task) string {
-	if t == nil {
-		return "created"
-	}
-	lifecycle := t.lifecycleSnapshot()
-	return s.resolvedTaskStatusFromSnapshot(t, lifecycle)
-}
-
-func (s *Server) resolvedTaskStatusFromSnapshot(t *Task, lifecycle taskLifecycleState) string {
-	switch {
-	case isTerminalStatus(lifecycle.Status):
-		return lifecycle.Status
-	case lifecycle.Queued:
-		return "queued"
-	case lifecycle.Paused || s.engine.IsPaused(t.ID):
-		return "paused"
-	case t.llmStateSnapshot().FailoverState == "chain_exhausted" && s.engine.Started(t.ID):
-		// LLM readiness is an execution dependency, not lifecycle state. Keeping
-		// an exhausted task running lets the user edit/reset its chain directly.
-		return "running"
-	case s.engine.ReadyFor(t) && s.engine.Started(t.ID):
-		return "running"
-	default:
-		return "created"
-	}
 }
 
 func (s *Server) setActive(w http.ResponseWriter, r *http.Request) {
@@ -1859,23 +1098,6 @@ func (s *Server) createTaskFromRequest(req createTaskReq) (*Task, *taskCreateErr
 	return t, nil
 }
 
-func (s *Server) validateTaskProfileIDs(ids []int64) error {
-	seen := map[int64]bool{}
-	for _, id := range ids {
-		if id <= 0 || seen[id] {
-			return fmt.Errorf("LLM 配置 id 无效或重复")
-		}
-		seen[id] = true
-		if p, err := s.m.pg.ProfileByID(id); err == nil && p != nil && p.Format == "jev" {
-			return db.ErrJevProfileJudgeOnly
-		}
-		if _, ok := s.loadProfileConfig(id); !ok {
-			return fmt.Errorf("LLM 配置 #%d 不存在或未设置 API Key", id)
-		}
-	}
-	return nil
-}
-
 func (s *Server) updateTaskLLMProfiles(w http.ResponseWriter, r *http.Request) {
 	t, ok := s.m.Task(r.PathValue("id"))
 	if !ok {
@@ -1911,7 +1133,7 @@ func (s *Server) updateTaskLLMProfiles(w http.ResponseWriter, r *http.Request) {
 	// live slot and postpones an unavailable task's pause/queue transition until
 	// the call returns; a nudge lets an idle running task resume promptly.
 	t.Notify()
-	go s.reconcileConcurrency()
+	s.backgroundWG.Go(s.reconcileConcurrency)
 	llmState := t.llmStateSnapshot()
 	result := map[string]any{
 		"id": t.ID, "llm_profile_ids": llmState.ProfileIDs,
@@ -1976,81 +1198,6 @@ func schemeForPort(p int) string {
 		return "https"
 	}
 	return "http"
-}
-
-// llmHost returns the host of the configured LLM endpoint (to keep it out of scope).
-func (s *Server) llmHost() string {
-	s.cfgMu.Lock()
-	base := s.llmCfg.BaseURL
-	s.cfgMu.Unlock()
-	if base == "" {
-		return ""
-	}
-	if u, err := url.Parse(base); err == nil {
-		return strings.ToLower(u.Hostname())
-	}
-	return ""
-}
-
-func (s *Server) seed(t *Task, text string) {
-	scheme, host, port, ok := parseTarget(text)
-	if !ok {
-		log.Printf("[seed] task %s: 未能从 %q 解析出目标 host/IP，不创建站点（请手动配置 scope）", t.ID, text)
-		return
-	}
-	// P0-1 guard: never treat the configured LLM gateway as a target.
-	if gw := s.llmHost(); gw != "" && host == gw {
-		log.Printf("[seed] task %s: 目标 %q 是 LLM 网关，拒绝作为渗透目标", t.ID, host)
-		return
-	}
-
-	u := scheme + "://" + host
-	if !(scheme == "https" && port == 443) && !(scheme == "http" && port == 80) {
-		u += ":" + strconv.Itoa(port)
-	}
-	var rootID int64
-	if as := s.m.Assets(); as != nil {
-		taskID, _ := strconv.ParseInt(t.ID, 10, 64)
-		if net.ParseIP(host) != nil {
-			rootID, _ = as.UpsertIP(db.UpsertIPReq{IP: host, TaskID: taskID})
-		} else if scheme == "https" || scheme == "http" {
-			rootID, _ = as.UpsertHTTPService(db.UpsertHTTPServiceReq{URL: u, TaskID: taskID})
-		} else {
-			rootID, _ = as.UpsertRootDomain(db.UpsertRootDomainReq{Domain: host, TaskID: taskID})
-		}
-		if rootID > 0 {
-			_ = as.SetTaskAssetSource(taskID, rootID, "task", "由任务描述或目标初始化", nil)
-		}
-	}
-	// anchor the seeded assets to this task's begin root as lineage/provenance
-	// (the asset graph is global and shared; anchoring no longer gates reads).
-	if rootID > 0 {
-		if begin, _ := t.Store.OriginFactID(); begin > 0 {
-			_ = t.Store.Anchor(begin, rootID)
-		}
-	}
-	log.Printf("[seed] task %s: 目标站点 %s", t.ID, u)
-	// 不在这里 Notify:首轮是否触发统一由 engine.Run 的 HasActiveIntent 决定(种子意图任务
-	// 跳过首轮)。seed 早于 Run 执行,若在此 Notify 会 buffered 到通道、被 plannerLoop 启动时
-	// 消费掉而绕过 Run 的门控 → 种子任务仍误触发首轮。
-}
-
-// seedFirstIntent writes ONE open intent (summary = 描述+目标) into the task's
-// frontier at creation, so a worker can claim and run it immediately without first
-// waiting a planner round. Mirrors a planner top-level intent: it links from the
-// origin fact (RelDerivedFrom) so it still traces back to a fact node. Best-effort —
-// a failure just falls back to the normal planner-driven flow.
-func (s *Server) seedFirstIntent(t *Task) {
-	summary := fmt.Sprintf("完成任务目标：%s（任务：%s）", t.Goal, t.Description)
-	id, err := t.Store.AddIntent(map[string]any{"summary": summary}, 8, nil, "seed")
-	if err != nil {
-		log.Printf("[seed] task %s: 下发种子意图失败: %v", t.ID, err)
-		return
-	}
-	if origin, _ := t.Store.OriginFactID(); origin > 0 {
-		_ = t.Store.Link(origin, db.RelDerivedFrom, id)
-	}
-	log.Printf("[seed] task %s: 已下发种子意图 #%d", t.ID, id)
 }
 
 func (s *Server) getTask(w http.ResponseWriter, r *http.Request) {
@@ -2336,40 +1483,6 @@ func normFilter(v string) string {
 		return ""
 	}
 	return v
-}
-
-// resolveFindingAssets loads every asset anchored by the given findings, keyed by
-// id, so each finding DTO can render its assets' labels.
-func (s *Server) resolveFindingAssets(fs []*db.DBFinding) map[int64]*db.Asset {
-	var ids []int64
-	for _, f := range fs {
-		ids = append(ids, f.AssetIDs...)
-	}
-	return s.resolveAssetIDs(ids)
-}
-
-// resolveAssetIDs de-dupes ids and loads their asset rows into an id→asset map.
-func (s *Server) resolveAssetIDs(ids []int64) map[int64]*db.Asset {
-	assets := map[int64]*db.Asset{}
-	seen := map[int64]bool{}
-	var uniq []int64
-	for _, id := range ids {
-		if id > 0 && !seen[id] {
-			seen[id] = true
-			uniq = append(uniq, id)
-		}
-	}
-	if len(uniq) == 0 {
-		return assets
-	}
-	list, err := s.m.pg.Assets().GetByIDs(uniq)
-	if err != nil {
-		log.Printf("[findings] resolve assets: %v", err)
-	}
-	for _, a := range list {
-		assets[a.ID] = a
-	}
-	return assets
 }
 
 // findingStats serves filtered, pagination-independent counts and global options.
@@ -2954,30 +2067,6 @@ func (s *Server) explorationNodes(w http.ResponseWriter, r *http.Request) {
 		"refs":   refs,
 		"assets": s.nodeAnchoredAssets(t, append(ids, neighbourIDs...)),
 	})
-}
-
-// nodeAnchoredAssets resolves the exploration_anchors of the given nodes into
-// display-ready asset labels, keyed by node id. Anchors are provenance decoration
-// for the 播报板 — a failure here must not cost the caller its page, so errors are
-// logged and degrade to "no assets".
-func (s *Server) nodeAnchoredAssets(t *Task, nodeIDs []int64) map[string][]FindingAssetDTO {
-	out := map[string][]FindingAssetDTO{}
-	anchors, err := t.Store.NodeAssets(nodeIDs)
-	if err != nil {
-		log.Printf("[broadcast] node assets: %v", err)
-		return out
-	}
-	var flat []int64
-	for _, ids := range anchors {
-		flat = append(flat, ids...)
-	}
-	assets := s.resolveAssetIDs(flat)
-	for nodeID, ids := range anchors {
-		if dtos := findingAssetDTOs(ids, assets); len(dtos) > 0 {
-			out[i64s(nodeID)] = dtos
-		}
-	}
-	return out
 }
 
 // csvValues splits a comma-separated query parameter, dropping empty entries.
@@ -3685,78 +2774,6 @@ func (s *Server) getSettings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, s.settingsPayload())
 }
 
-func (s *Server) settingsPayload() map[string]any {
-	on, backend, braveKey, tavilyKey, proxy := s.m.WebSearch()
-	pyStored, _, _ := s.m.pg.GetSetting(settingPythonInterp)
-	concOn, concLimit := s.m.ConcurrencyLimit()
-	if concLimit == 0 {
-		concLimit = defaultConcurrencyLimit // 关闭时也回显一个合理默认值给 UI
-	}
-	return map[string]any{
-		"traffic_capture":                      s.m.TrafficEnabled(),
-		"browser_screenshot_enabled":           s.m.pg.GetBool(settingBrowserScreenshot, false),
-		"browser_screenshot_timestamp_enabled": s.m.pg.GetBool(settingScreenshotTimestamp, false),
-		"opsec_enabled":                        s.m.pg.GetBool(settingOpsecEnabled, false),
-		"agent_traffic_binding":                s.m.pg.GetBool(settingAgentTrafficBinding, false),
-		"task_intelligence_enabled":            s.m.pg.GetBool(db.SettingTaskIntelligence, false),
-		db.SettingTaskAutoTitle:                s.m.pg.GetBool(db.SettingTaskAutoTitle, false),
-		db.SettingChatAutoTitle:                s.m.pg.GetBool(db.SettingChatAutoTitle, false),
-		db.SettingCredentialAgent:              s.m.pg.GetBool(db.SettingCredentialAgent, false),
-		db.SettingCredentialTraffic:            s.m.pg.GetBool(db.SettingCredentialAgent, false) && s.m.pg.GetBool(db.SettingCredentialTraffic, false),
-		"llm_record":                           s.m.LLMRecordEnabled(),
-		"web_search_enabled":                   on,
-		"web_search_backend":                   backend,
-		"brave_key_set":                        strings.TrimSpace(braveKey) != "",
-		"tavily_key_set":                       strings.TrimSpace(tavilyKey) != "",
-		"deepseek_search_key_set":              s.m.deepSeekSearchKey() != "",
-		"web_search_proxy":                     maskSecrets(proxy),             // 独立出口代理(http/https/socks5)，空=直连
-		"global_proxy":                         maskSecrets(s.m.GlobalProxy()), // 全局出口代理(http/https/socks5)，所有目标流量走它，空=直连
-		"global_proxy_transparent":             s.m.TransparentProxy(),
-		"egress_allow_ipv6":                    s.m.EgressAllowIPv6(),
-		"llm_proxy":                            s.m.LLMProxy(),
-		"proxy_pool":                           func() []ProxyPoolEntry { e, _, _ := s.m.ProxyPoolSnapshot(); return e }(),
-		"proxy_pool_active_id":                 func() string { _, a, _ := s.m.ProxyPoolSnapshot(); return a }(),
-		"proxy_pool_switch_log":                func() []ProxySwitchLog { _, _, l := s.m.ProxyPoolSnapshot(); return l }(),
-		"proxy_rotate_timed_enabled":           s.m.pg.GetBool(settingProxyRotateTimed, false),
-		"proxy_rotate_interval_seconds":        proxyIntSetting(s.m.pg, settingProxyRotateInterval, defaultProxyRotateInterval),
-		"proxy_rotate_on_failure":              s.m.pg.GetBool(settingProxyRotateFailure, false),
-		"proxy_rotate_strategy": func() string {
-			v, ok, _ := s.m.pg.GetSetting(settingProxyRotateStrategy)
-			if ok && (v == "random" || v == "sequential") {
-				return v
-			}
-			return "sequential"
-		}(),
-		"proxy_health_fail_threshold":         proxyIntSetting(s.m.pg, settingProxyHealthThreshold, defaultProxyHealthThreshold),
-		"proxy_health_cooldown_seconds":       proxyIntSetting(s.m.pg, settingProxyHealthCooldown, defaultProxyHealthCooldown),
-		"proxy_health_check_interval_seconds": proxyIntSetting(s.m.pg, settingProxyHealthInterval, defaultProxyHealthInterval),
-		"proxy_reconnect_max_attempts":        func() int { n, _ := s.proxyReconnectConfig(); return n }(),
-		"proxy_reconnect_interval_seconds":    func() int { _, d := s.proxyReconnectConfig(); return int(d / time.Second) }(),
-		"show_egress_ip":                      s.m.pg.GetBool(settingShowEgressIP, false),
-		"egress_probe_url":                    s.m.EgressProbeURL(),
-		"python_interpreter":                  strings.TrimSpace(pyStored), // 用户/自动设的值(空=用运行时检测)
-		"workers":                             s.m.Workers(),               // 并发工作 agent 数(默认3)；对之后启动的任务生效
-		"worker_pools":                        s.m.WorkerPools(),           // 非空时按池顺序绑定 worker 会话
-		"task_concurrency_enabled":            concOn,                      // 任务并发上限开关(默认关)
-		"task_concurrency_limit":              concLimit,                   // 同时运行任务上限(开启后默认5)
-		// LLM 轮询(故障转移)。默认关；开启后走全局激活配置的 agent 在当前配置不可用时
-		// 自动切到下一个配置。bind_fallback 仅在轮询开启时有意义(默认关)。
-		"llm_pool_enabled":       s.m.LLMPoolEnabled(),
-		"llm_pool_bind_fallback": s.m.LLMPoolBindFallback(),
-		// 操作约束注入范围(默认都开):把本任务的 allow/deny 约束拼进对应 agent 的系统提示。
-		"constraints_inject_planner": s.constraintInjectPlanner(),
-		"constraints_inject_worker":  s.constraintInjectWorker(),
-		// 实验功能:noa 模型驱动上下文压缩(默认关)。开启后平台接入的四类 agent 由 noa
-		// 接管上下文压缩,取代内置 compaction;每 run 读一次,对之后启动的 run 生效。
-		"noa_compaction": s.m.NoaCompactionEnabled(),
-		// 漏洞 IM 推送的全局项。渠道本身是独立资源，走 /api/notify/* 管理；
-		// 这里只放「作用于全部渠道」的三项。
-		"notify_enabled":             s.m.pg.GetBool(settingNotifyEnabled, true),
-		"notify_public_base_url":     notifyPublicBaseURL(s.m.pg),
-		"notify_digest_interval_min": notifyDigestIntervalMin(s.m.pg),
-	}
-}
-
 // notifyPublicBaseURL 读推送回链用的外部地址。
 func notifyPublicBaseURL(pg *db.DB) string {
 	v, _, _ := pg.GetSetting(settingNotifyPublicBaseURL)
@@ -3969,7 +2986,7 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		// 立即协调一次:关闭时放行全部排队,调高上限时补位启动,不必等下一个 tick。
-		go s.reconcileConcurrency()
+		s.backgroundWG.Go(s.reconcileConcurrency)
 	}
 	if req.PythonInterp != nil {
 		if err := s.m.pg.SetSetting(settingPythonInterp, strings.TrimSpace(*req.PythonInterp)); err != nil {
@@ -4172,6 +3189,7 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		changed = true
 	}
 	if changed {
+		s.invalidateProfileAgents()
 		// rebuild agents so the new proxy/tools/prompt/web-search take hold (only if LLM configured).
 		s.cfgMu.Lock()
 		cfg, on := s.llmCfg, s.llmOn
@@ -4184,39 +3202,6 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, 200, s.settingsPayload())
-}
-
-// setReporterBrowserScreenshotVisibility keeps the report writer's browser MCP
-// permission in sync with the screenshot setting. Other agents retain their
-// explicit MCP permissions.
-func (s *Server) setReporterBrowserScreenshotVisibility(enabled bool) error {
-	reporter, err := s.m.pg.GetAgentByKey("reporter")
-	if err != nil || reporter == nil {
-		return err
-	}
-	servers, err := s.m.pg.ListMCP()
-	if err != nil {
-		return err
-	}
-	for _, server := range servers {
-		if server.Name == browserMCPName {
-			// Turning screenshots on is an explicit opt-in. Make the browser MCP
-			// usable in the shipped root-based container at the same time as the
-			// permission toggle, so the next reporter run gets a working browser
-			// instead of a deterministic Chromium sandbox error.
-			if enabled {
-				server.Args = encodeJSON(ensureBrowserMCPArgs(decodeStrSlice(server.Args), true))
-				server.Enabled = true
-				if _, err := s.m.pg.SaveMCP(server); err != nil {
-					return err
-				}
-			}
-			return s.m.pg.ToggleVisibility(reporter.ID, "mcp", server.ID, enabled)
-		}
-	}
-	// The built-in browser MCP may be deleted by an administrator. Keep the
-	// setting writable so it takes effect automatically if the server returns.
-	return nil
 }
 
 // testWebSearch runs a real "test" search with the given (or currently saved)
@@ -4408,7 +3393,7 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 		// a page reload / proxy timeout cancelled it mid-run ("context canceled"). The
 		// steps + final answer stream back live via SSE (worker="mainagent"), so the
 		// handler returns immediately and the browser never needs to hold the request.
-		go func() {
+		s.backgroundWG.Go(func() {
 			defer func() {
 				s.finishTaskChat(t.ID, cancel)
 			}()
@@ -4431,7 +3416,7 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 			if err != nil && ctx.Err() == nil {
 				s.engine.emitActivity(t, db.Activity{Worker: "mainagent", Kind: "text", IsError: true, Summary: "（主 Agent 出错：" + err.Error() + "）", MainSeg: segPtr})
 			}
-		}()
+		})
 		writeJSON(w, 202, map[string]any{"status": "accepted", "mode": "llm"})
 		return
 	}
@@ -4439,24 +3424,6 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 	s.engine.emitActivity(t, db.Activity{Worker: "mainagent", Kind: "text", Summary: reply, MainSeg: segPtr})
 	s.finishTaskChat(t.ID, cancel)
 	writeJSON(w, 200, map[string]any{"reply": reply, "mode": "rule"})
-}
-
-func (s *Server) cancelTaskChat(taskID string, cause error) bool {
-	s.chatMu.Lock()
-	cancel := s.chatCancel[taskID]
-	if cancel != nil {
-		cancel(cause)
-	}
-	s.chatMu.Unlock()
-	return cancel != nil
-}
-
-func (s *Server) finishTaskChat(taskID string, cancel context.CancelCauseFunc) {
-	cancel(agent.AbortChatTurnFinished)
-	s.chatMu.Lock()
-	delete(s.chatBusy, taskID)
-	delete(s.chatCancel, taskID)
-	s.chatMu.Unlock()
 }
 
 // taskChatStatus reports the authoritative state of the task's main-agent turn.
@@ -4488,31 +3455,6 @@ func (s *Server) stopChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, 200, map[string]any{"status": "stopping"})
-}
-
-// fallbackChat is the no-LLM human-steering handler: simple命令 + 态势摘要.
-func (s *Server) fallbackChat(t *Task, msg string) string {
-	m := strings.TrimSpace(msg)
-	lower := strings.ToLower(m)
-	switch {
-	case strings.HasPrefix(m, "意图") || strings.HasPrefix(lower, "intent"):
-		text := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(m, "意图"), "intent"))
-		_, _ = t.Store.AddIntent(map[string]any{"summary": text}, 9, nil, "human")
-		return "已注入一条高优先级意图：" + text
-	case strings.HasPrefix(m, "提示") || strings.HasPrefix(lower, "hint"):
-		text := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(m, "提示"), "hint"))
-		_, _ = t.Store.AddNode(db.KindHint, map[string]any{"text": text}, 0, "active", "human", nil)
-		return "已记录提示，规划者下次会读到：" + text
-	default:
-		assetCounts, _ := s.m.Assets().CountsByType()
-		assets := 0
-		for _, c := range assetCounts {
-			assets += c
-		}
-		fnd, _ := t.Store.ListByKind(db.KindFinding, 1000)
-		fr, _ := t.Store.Frontier(1000)
-		return fmt.Sprintf("（规则模式，未配置 LLM）当前态势：资产 %d，待领意图 %d，确认发现 %d。\n可用指令：以\"意图 ...\"注入意图，\"提示 ...\"给规划者提示。", assets, len(fr), len(fnd))
-	}
 }
 
 func (s *Server) getReport(w http.ResponseWriter, r *http.Request) {

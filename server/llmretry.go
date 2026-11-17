@@ -18,7 +18,7 @@ import (
 
 // retryPolicy reads the global policy; a nil DB yields the zero policy (all
 // layers on their built-in defaults).
-func (s *Server) retryPolicy() db.LLMRetryPolicy {
+func (s *Runtime) retryPolicy() db.LLMRetryPolicy {
 	if s.m == nil || s.m.pg == nil {
 		return db.LLMRetryPolicy{}
 	}
@@ -42,7 +42,7 @@ func resolveRetry(o db.RetryOverride, pol db.LLMRetryPolicy) agent.RetryConfig {
 }
 
 // applyProfileRetry fills cfg.Retry for a profile read from the DB.
-func (s *Server) applyProfileRetry(cfg *agent.Config, p *db.LLMProfile) {
+func (s *Runtime) applyProfileRetry(cfg *agent.Config, p *db.LLMProfile) {
 	if p == nil {
 		return
 	}
@@ -55,7 +55,7 @@ func (s *Server) applyProfileRetry(cfg *agent.Config, p *db.LLMProfile) {
 // applyRetryPolicy pushes the process-wide layers of the policy into the objects
 // that consume them on a hot path: the circuit-breaker registry. Called at
 // startup and whenever the policy is saved.
-func (s *Server) applyRetryPolicy() {
+func (s *Runtime) applyRetryPolicy() {
 	pol := s.retryPolicy()
 	if s.llmHealth != nil {
 		s.llmHealth.SetPolicy(pol.Breaker.Attempts, pol.Breaker.Interval())

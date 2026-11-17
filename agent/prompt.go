@@ -6,17 +6,6 @@ import (
 	"time"
 )
 
-// PromptOverride, if set, returns the stored system-prompt template for an agent
-// key and whether one exists. The server wires it to the PG agent_prompts table.
-// When nil or no override exists, agents use their built-in default prompt — so
-// behavior is identical until a user edits a prompt in the UI.
-var PromptOverride func(agentKey string) (string, bool)
-
-// OpsecEnabled is wired by the server to the persisted global setting. Keeping
-// the block here makes it a code-owned runtime tail: database-edited prompts
-// cannot accidentally remove the operational safety guidance.
-var OpsecEnabled func() bool
-
 const opsecPromptBlock = `【OPSEC 准则（硬约束，仅次于授权范围和任务操作约束）】
 
 - 先复用已有流量、浏览器会话和已验证证据；能通过 traffic_search/traffic_get 或浏览器完成时，不要重复直接请求。
@@ -50,27 +39,27 @@ func nowStr() string { return time.Now().Format("2006-01-02 15:04:05 MST") }
 // default template, then to the raw default string — an agent never starts with a
 // half-rendered prompt. Callers append the code-owned tail (trafficTool / 中间产物
 // 输出规约) AFTER this, so those can't be edited away via the DB body.
-func renderSystem(agentKey, def string, vars any) string {
+func (host *Host) renderSystem(agentKey, def string, vars any) string {
 	tmpl := def
-	if PromptOverride != nil {
-		if t, ok := PromptOverride(agentKey); ok && t != "" {
+	if host != nil && host.PromptOverride != nil {
+		if t, ok := host.PromptOverride(agentKey); ok && t != "" {
 			tmpl = t
 		}
 	}
 	if out, err := renderTmpl(tmpl, vars); err == nil {
-		if OpsecEnabled != nil && OpsecEnabled() {
+		if host != nil && host.OpsecEnabled != nil && host.OpsecEnabled() {
 			return out + "\n\n" + opsecPromptBlock
 		}
 		return out
 	}
 	// DB template broke (e.g. references an out-of-catalog var) → code default.
 	if out, err := renderTmpl(def, vars); err == nil {
-		if OpsecEnabled != nil && OpsecEnabled() {
+		if host != nil && host.OpsecEnabled != nil && host.OpsecEnabled() {
 			return out + "\n\n" + opsecPromptBlock
 		}
 		return out
 	}
-	if OpsecEnabled != nil && OpsecEnabled() {
+	if host != nil && host.OpsecEnabled != nil && host.OpsecEnabled() {
 		return def + "\n\n" + opsecPromptBlock
 	}
 	return def

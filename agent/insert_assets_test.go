@@ -9,20 +9,6 @@ import (
 	"github.com/Autumn-27/artex/db"
 )
 
-// testDB opens a DB connection, skipping if PG is unavailable.
-func testDB(t *testing.T) *db.DB {
-	t.Helper()
-	dsn, _, err := db.DSN()
-	if err != nil {
-		t.Skipf("no database config (%v)", err)
-	}
-	d, err := db.Open(dsn)
-	if err != nil {
-		t.Skipf("postgres unavailable (%v)", err)
-	}
-	return d
-}
-
 // callInsertAssets calls the insert_assets tool with the given payload.
 func callInsertAssets(t *testing.T, ts *ToolSet, payload any) map[string]any {
 	t.Helper()
@@ -46,9 +32,8 @@ func callInsertAssets(t *testing.T, ts *ToolSet, payload any) map[string]any {
 // =====================================================================
 func TestInsertAssetsSubdomainSideEffects(t *testing.T) {
 	d := testDB(t)
-	defer d.Close()
 
-	ts := NewToolSet(nil, "")
+	ts := NewToolSet(nil, nil, "")
 	ts.SetAssetStore(d.Assets(), d.Companies())
 	defer d.Exec(`DELETE FROM assets WHERE domain IN ('ia-sub.sideeffect-test.com','sideeffect-test.com') OR ip='7.8.9.10'`)
 
@@ -115,9 +100,8 @@ func TestInsertAssetsSubdomainSideEffects(t *testing.T) {
 // =====================================================================
 func TestInsertAssetsMultiIPSubdomain(t *testing.T) {
 	d := testDB(t)
-	defer d.Close()
 
-	ts := NewToolSet(nil, "")
+	ts := NewToolSet(nil, nil, "")
 	ts.SetAssetStore(d.Assets(), d.Companies())
 	defer d.Exec(`DELETE FROM assets WHERE domain IN ('multi.multiip-test.io','multiip-test.io') OR ip IN ('1.1.1.1','2.2.2.2')`)
 
@@ -163,9 +147,8 @@ func TestInsertAssetsMultiIPSubdomain(t *testing.T) {
 // =====================================================================
 func TestInsertAssetsHTTPServiceTechnologies(t *testing.T) {
 	d := testDB(t)
-	defer d.Close()
 
-	ts := NewToolSet(nil, "")
+	ts := NewToolSet(nil, nil, "")
 	ts.SetAssetStore(d.Assets(), d.Companies())
 	defer d.Exec(`DELETE FROM assets WHERE url='https://tech-test.example.com' OR domain IN ('tech-test.example.com','example.com') OR ip='3.4.5.6'`)
 
@@ -246,9 +229,8 @@ func TestInsertAssetsHTTPServiceTechnologies(t *testing.T) {
 // =====================================================================
 func TestInsertAssetsOtherService(t *testing.T) {
 	d := testDB(t)
-	defer d.Close()
 
-	ts := NewToolSet(nil, "")
+	ts := NewToolSet(nil, nil, "")
 	ts.SetAssetStore(d.Assets(), d.Companies())
 	defer d.Exec(`DELETE FROM assets WHERE
 		(type='service' AND ip='10.20.30.40') OR
@@ -307,9 +289,8 @@ func TestInsertAssetsOtherService(t *testing.T) {
 // =====================================================================
 func TestInsertAssetsMixedBatch(t *testing.T) {
 	d := testDB(t)
-	defer d.Close()
 
-	ts := NewToolSet(nil, "")
+	ts := NewToolSet(nil, nil, "")
 	ts.SetAssetStore(d.Assets(), d.Companies())
 	defer d.Exec(`DELETE FROM assets WHERE
 		domain IN ('batch-sub.batch-test.org','batch-test.org') OR
@@ -365,9 +346,8 @@ func TestInsertAssetsMixedBatch(t *testing.T) {
 // =====================================================================
 func TestInsertAssetsDedup(t *testing.T) {
 	d := testDB(t)
-	defer d.Close()
 
-	ts := NewToolSet(nil, "")
+	ts := NewToolSet(nil, nil, "")
 	ts.SetAssetStore(d.Assets(), d.Companies())
 	defer d.Exec(`DELETE FROM assets WHERE domain='dedup-ia.deduptest.net' OR domain='deduptest.net'`)
 
@@ -403,9 +383,8 @@ func TestInsertAssetsDedup(t *testing.T) {
 // =====================================================================
 func TestInsertAssetsRejectsHostnameIPPerItem(t *testing.T) {
 	d := testDB(t)
-	defer d.Close()
 
-	ts := NewToolSet(nil, "")
+	ts := NewToolSet(nil, nil, "")
 	ts.SetAssetStore(d.Assets(), d.Companies())
 	defer d.Exec(`DELETE FROM assets WHERE ip IN ('198.51.100.23','cdn.badip-test.com') OR domain='badip-test.com'`)
 

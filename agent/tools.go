@@ -51,6 +51,8 @@ func compactIntents(ns []*db.Node, parentsOf, yieldsOf map[int64][]int64) []map[
 // ToolSet exposes the PG-backed dual graph (asset + exploration) to an LLM agent.
 // One ToolSet is created per planner/worker run; per-run signals live here.
 type ToolSet struct {
+	host *Host
+
 	findingRecorder FindingRecorder
 	as              *db.AssetStore   // asset store (optional; nil = asset tools not available)
 	cs              *db.CompanyStore // company store (optional)
@@ -165,8 +167,8 @@ func (w WriteCounts) String() string {
 // honest breakdown instead of calling assets/findings "facts").
 func (t *ToolSet) Writes() WriteCounts { return t.writes }
 
-func NewToolSet(ts *db.ExplorationStore, worker string) *ToolSet {
-	return &ToolSet{ts: ts, worker: worker}
+func NewToolSet(host *Host, ts *db.ExplorationStore, worker string) *ToolSet {
+	return &ToolSet{host: host, ts: ts, worker: worker}
 }
 
 // SetTaskID sets the PG task id on this ToolSet so that report_finding can
@@ -374,7 +376,7 @@ func (t *ToolSet) graphOverviewData() map[string]any {
 		var p map[string]any
 		_ = json.Unmarshal(h.Payload, &p)
 		hint := map[string]any{"id": h.ID, "state": h.State, "text": p["text"]}
-		if findingTrafficBindingEnabled() && p["traffic_refs"] != nil {
+		if t.host.findingTrafficBindingEnabled() && p["traffic_refs"] != nil {
 			hint["traffic_refs"] = p["traffic_refs"]
 		}
 		hsum = append(hsum, hint)
@@ -1265,7 +1267,7 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 		// models routinely emit fields anyway — failing here would discard a confirmed
 		// finding over a stray parameter. The success path below reports evidence_status
 		// "not_bound" with the "已关闭，可在页面人工关联" note, which is what the caller needs.
-		if !findingTrafficBindingEnabled() {
+		if !t.host.findingTrafficBindingEnabled() {
 			a.TrafficRefs, a.EvidenceHintID = nil, nil
 		}
 		if len(a.EvidenceHintID) > 0 && pid(a.EvidenceHintID) <= 0 {
@@ -1310,7 +1312,7 @@ func (t *ToolSet) addFinding() actool.CoreTool {
 		if len(recorded.Traffic.Bindings) == 0 {
 			result.EvidenceStatus = "not_bound"
 			result.EvidenceNote = "漏洞已保存，未绑定流量。TCP/无包情形可正常继续；若已有核实的 HTTP 流量，请用可用的 bind_finding_traffic 或漏洞页面补绑，再完成证据交接。不要重复创建漏洞。"
-			if !findingTrafficBindingEnabled() {
+			if !t.host.findingTrafficBindingEnabled() {
 				result.EvidenceNote = "漏洞已保存。Agent 自动绑定流量已关闭，可在页面人工关联流量。"
 			}
 		}
@@ -1412,7 +1414,7 @@ func (t *ToolSet) recordFact() actool.CoreTool {
 					continue
 				}
 				ids[i] = id
-				if intelligenceEnabled() {
+				if t.host.intelligenceEnabled() {
 					if len(it.Intelligence) > 20 {
 						errs[strconv.Itoa(i)] = "事实已保存，情报每次最多 20 条"
 						continue
@@ -1451,7 +1453,7 @@ type hintItem struct {
 
 // addOneHint 挂一条 hint 节点(active/human)到探索图,可锚定资产,返回 id。
 func (t *ToolSet) addOneHint(it hintItem) (int64, error) {
-	if len(it.TrafficRefs) > 0 && !findingTrafficBindingEnabled() {
+	if len(it.TrafficRefs) > 0 && !t.host.findingTrafficBindingEnabled() {
 		return 0, fmt.Errorf("Agent 自动绑定流量已关闭，未保存携带 traffic_refs 的提示；可在系统设置开启，或仅交接文字")
 	}
 	if strings.TrimSpace(it.Text) == "" {

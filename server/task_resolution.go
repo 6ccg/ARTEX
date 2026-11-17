@@ -17,7 +17,7 @@ type taskLLMResolution struct {
 	Reason    string `json:"reason,omitempty"`
 }
 
-func (s *Server) resolutionFromProfile(p *db.LLMProfile, source string) taskLLMResolution {
+func (s *Runtime) resolutionFromProfile(p *db.LLMProfile, source string) taskLLMResolution {
 	if p == nil {
 		return taskLLMResolution{Source: source, Reason: "LLM 配置不存在"}
 	}
@@ -44,7 +44,7 @@ func (s *Server) resolutionFromProfile(p *db.LLMProfile, source string) taskLLMR
 // resolveTaskRoleLLM mirrors taskLLMRuntime.current without creating a provider:
 // role Agent binding -> explicit task chain -> active/global environment config.
 // Database failures are returned rather than represented as an unavailable model.
-func (s *Server) resolveTaskRoleLLM(t *Task, agentKey string) (taskLLMResolution, error) {
+func (s *Runtime) resolveTaskRoleLLM(t *Task, agentKey string) (taskLLMResolution, error) {
 	if s == nil || s.m == nil || s.m.pg == nil {
 		return taskLLMResolution{}, fmt.Errorf("database unavailable")
 	}

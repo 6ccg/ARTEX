@@ -20,7 +20,7 @@ func TestDomainToolsSurviveNilStores(t *testing.T) {
 		`{"id":379,"asset_id":1,"goal_id":1,"evidence_id":1,"intent_id":1,"node_id":1,"work_id":1,` +
 			`"summary":"x","reason":"x","name":"x","severity":"low","vulnclass":"x","text":"x","q":"x"}`,
 	}
-	for _, tool := range NewToolSet(nil, "").AllDomainTools() {
+	for _, tool := range NewToolSet(nil, nil, "").AllDomainTools() {
 		for _, in := range inputs {
 			func() {
 				defer func() {
@@ -39,7 +39,7 @@ func TestDomainToolsSurviveNilStores(t *testing.T) {
 // node_detail is the one that took the process down; assert it now answers with a
 // usable refusal rather than dying.
 func TestExplorationToolRefusesWithoutTask(t *testing.T) {
-	ts := NewToolSet(nil, "")
+	ts := NewToolSet(nil, nil, "")
 	res, err := ts.NodeDetailTool().Call(context.Background(), json.RawMessage(`{"id":379}`), nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)

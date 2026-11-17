@@ -7,6 +7,24 @@ import (
 	"testing"
 )
 
+func TestIndependentRecordersDoNotReplaceExchanges(t *testing.T) {
+	first, dir := openTraffic(t)
+	second, err := Open(dir, "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Close()
+	first.record(newFlow("id.example", "GET", "/first", nil, []byte("first proof")))
+	second.record(newFlow("id.example", "GET", "/second", nil, []byte("second proof")))
+	var count int
+	if err := first.DB().QueryRow("SELECT COUNT(*) FROM exchanges").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 2 {
+		t.Fatalf("independent recorders retained %d exchanges, want 2", count)
+	}
+}
+
 func TestTrafficIDSearchAndToolReference(t *testing.T) {
 	tr, _ := openTraffic(t)
 	tr.record(newFlow("id.example", "GET", "/proof", nil, []byte("verified proof")))

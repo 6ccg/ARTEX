@@ -69,7 +69,7 @@ type batchControlItem struct {
 	Error  string `json:"error,omitempty"`
 }
 
-func (s *Server) resumeAdmissionMode(t *Task) string {
+func (s *Runtime) resumeAdmissionMode(t *Task) string {
 	if t == nil {
 		return "resume"
 	}
@@ -89,19 +89,19 @@ func (s *Server) resumeAdmissionMode(t *Task) string {
 // applyTaskControl is shared by the single and batch endpoints. Task resume is
 // deliberately limited to paused tasks; reruns and finding follow-ups use
 // admitTask directly when they need to revive a terminal task.
-func (s *Server) applyTaskControl(t *Task, action string) (taskControlResult, error) {
+func (s *Runtime) applyTaskControl(t *Task, action string) (taskControlResult, error) {
 	return s.applyTaskControlWithCause(t, action, agent.AbortPausedByUser)
 }
 
-func (s *Server) applyTaskControlWithCause(t *Task, action string, pauseCause error) (taskControlResult, error) {
+func (s *Runtime) applyTaskControlWithCause(t *Task, action string, pauseCause error) (taskControlResult, error) {
 	if t == nil {
 		return taskControlResult{}, fmt.Errorf("task not found")
 	}
 	out := taskControlResult{ID: t.ID}
 	switch action {
 	case "pause":
-		s.concMu.Lock()
-		defer s.concMu.Unlock()
+		s.m.taskControlMu.Lock()
+		defer s.m.taskControlMu.Unlock()
 		current, exists := s.m.Task(t.ID)
 		if !exists || current != t || s.engine.IsDeleting(t.ID) {
 			return out, fmt.Errorf("任务正在删除，无法控制")
@@ -139,7 +139,7 @@ func (s *Server) applyTaskControlWithCause(t *Task, action string, pauseCause er
 				})
 				// The lifecycle row may already have been paused by another
 				// actor. Reinstall the requested cause barrier while holding
-				// concMu instead of assuming the existing barrier is sufficient.
+				// taskControlMu instead of assuming the existing barrier is sufficient.
 				s.engine.Pause(t.ID, pauseCause)
 				out.Paused = true
 				out.Status = "paused"
@@ -178,7 +178,7 @@ func (s *Server) applyTaskControlWithCause(t *Task, action string, pauseCause er
 		// compensated and does not lose an otherwise valid conversation turn.
 		s.cancelTaskChat(t.ID, agent.AbortChatPausedWithTask)
 		out.Paused, out.Status = true, "paused"
-		go s.reconcileConcurrency()
+		s.backgroundWG.Go(s.reconcileConcurrency)
 	case "resume":
 		queued, err := s.admitTaskWhenScheduled(t, "resume", true, pauseCause == agent.AbortPausedBySchedule)
 		if err != nil {
@@ -207,7 +207,7 @@ func intentSummaryOf(n *db.Node) string {
 	return ""
 }
 
-func (s *Server) applyIntentControl(ctx context.Context, t *Task, iid int64, action, reason, mode string) (intentControlResult, error) {
+func (s *Runtime) applyIntentControl(ctx context.Context, t *Task, iid int64, action, reason, mode string) (intentControlResult, error) {
 	out := intentControlResult{ID: iid}
 	node, err := t.Store.GetNode(iid)
 	if err != nil {

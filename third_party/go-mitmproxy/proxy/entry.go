@@ -3,6 +3,7 @@ package proxy
 import (
 	"bufio"
 	"context"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -32,6 +33,14 @@ func (l *wrapListener) Accept() (net.Conn, error) {
 	for _, addon := range proxy.Addons {
 		addon.ClientConnected(connCtx.ClientConn)
 	}
+	proxy.entry.mu.Lock()
+	if proxy.entry.closed {
+		proxy.entry.mu.Unlock()
+		wc.Close()
+		return nil, net.ErrClosed
+	}
+	proxy.entry.clients[wc] = struct{}{}
+	proxy.entry.mu.Unlock()
 
 	return wc, nil
 }
@@ -47,6 +56,7 @@ type wrapClientConn struct {
 	closed    bool
 	closeErr  error
 	closeChan chan struct{}
+	upstream  net.Conn // protected by closeMu, including late dial completion
 }
 
 func newWrapClientConn(c net.Conn, proxy *Proxy) *wrapClientConn {
@@ -80,18 +90,40 @@ func (c *wrapClientConn) Close() error {
 
 	c.closed = true
 	c.closeErr = c.Conn.Close()
+	upstream := c.upstream
 	c.closeMu.Unlock()
 	close(c.closeChan)
+	c.proxy.entry.mu.Lock()
+	delete(c.proxy.entry.clients, c)
+	c.proxy.entry.mu.Unlock()
 
 	for _, addon := range c.proxy.Addons {
 		addon.ClientDisconnected(c.connCtx.ClientConn)
 	}
 
-	if c.connCtx.ServerConn != nil && c.connCtx.ServerConn.Conn != nil {
-		c.connCtx.ServerConn.Conn.Close()
+	if upstream != nil {
+		upstream.Close()
 	}
 
 	return c.closeErr
+}
+
+func (c *wrapClientConn) attachUpstream(upstream net.Conn) error {
+	c.closeMu.Lock()
+	if c.closed {
+		c.closeMu.Unlock()
+		upstream.Close()
+		return net.ErrClosed
+	}
+	c.upstream = upstream
+	c.closeMu.Unlock()
+	return nil
+}
+
+func (c *wrapClientConn) markTLS() {
+	c.closeMu.Lock()
+	c.connCtx.ClientConn.Tls = true
+	c.closeMu.Unlock()
 }
 
 // wrap tcpConn for remote server
@@ -121,11 +153,18 @@ func (c *wrapServerConn) Close() error {
 		addon.ServerDisconnected(c.connCtx)
 	}
 
-	if !c.connCtx.ClientConn.Tls {
+	client := c.connCtx.ClientConn.Conn.(*wrapClientConn)
+	client.closeMu.Lock()
+	closed, tls := client.closed, c.connCtx.ClientConn.Tls
+	client.closeMu.Unlock()
+	if closed {
+		return c.closeErr
+	}
+	if !tls {
 		c.connCtx.ClientConn.Conn.(*wrapClientConn).Conn.(*net.TCPConn).CloseRead()
 	} else {
 		// if keep-alive connection close
-		if !c.connCtx.closeAfterResponse {
+		if !c.connCtx.closeAfterResponse.Load() {
 			c.connCtx.ClientConn.Conn.Close()
 		}
 	}
@@ -134,12 +173,15 @@ func (c *wrapServerConn) Close() error {
 }
 
 type entry struct {
-	proxy  *Proxy
-	server *http.Server
+	proxy   *Proxy
+	server  *http.Server
+	mu      sync.Mutex
+	clients map[*wrapClientConn]struct{}
+	closed  bool
 }
 
 func newEntry(proxy *Proxy) *entry {
-	e := &entry{proxy: proxy}
+	e := &entry{proxy: proxy, clients: make(map[*wrapClientConn]struct{})}
 	e.server = &http.Server{
 		Addr:    proxy.Opts.Addr,
 		Handler: e,
@@ -169,7 +211,18 @@ func (e *entry) start() error {
 }
 
 func (e *entry) close() error {
-	return e.server.Close()
+	e.mu.Lock()
+	e.closed = true
+	clients := make([]*wrapClientConn, 0, len(e.clients))
+	for client := range e.clients {
+		clients = append(clients, client)
+	}
+	e.mu.Unlock()
+	err := e.server.Close()
+	for _, client := range clients {
+		err = errors.Join(err, client.Close())
+	}
+	return err
 }
 
 func (e *entry) shutdown(ctx context.Context) error {
@@ -340,7 +393,7 @@ func (e *entry) httpsDialFirstAttack(res http.ResponseWriter, req *http.Request,
 	}
 
 	if helper.IsTls(peek) {
-		f.ConnContext.ClientConn.Tls = true
+		cconn.(*wrapClientConn).markTLS()
 		proxy.attacker.httpsTlsDial(req.Context(), cconn, conn)
 		return
 	}
@@ -392,7 +445,7 @@ func (e *entry) httpsDialLazyAttack(res http.ResponseWriter, req *http.Request, 
 	}
 
 	if helper.IsTls(peek) {
-		f.ConnContext.ClientConn.Tls = true
+		cconn.(*wrapClientConn).markTLS()
 		proxy.attacker.httpsLazyAttack(req.Context(), cconn, req)
 		return
 	}

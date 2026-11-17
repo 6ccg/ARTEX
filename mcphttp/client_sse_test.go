@@ -12,6 +12,35 @@ import (
 	"time"
 )
 
+func TestLegacySSEStartupCancellation(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.(http.Flusher).Flush()
+		close(entered)
+		select {
+		case <-r.Context().Done():
+		case <-release:
+		}
+	}))
+	defer srv.Close()
+	defer close(release)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { _, err := NewSSE(ctx, "test", srv.URL, nil, false); done <- err }()
+	<-entered
+	cancel()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("cancelled initialization succeeded")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("SSE startup ignored cancellation")
+	}
+}
+
 func TestLegacySSEClientDiscoverAndCall(t *testing.T) {
 	var mu sync.Mutex
 	var stream http.ResponseWriter
@@ -93,6 +122,11 @@ func TestLegacySSEClientDiscoverAndCall(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer c.Close()
+	// Discovery's deadline must stop governing the long-lived stream once the
+	// connection is ready; subsequent calls carry their own contexts.
+	cancel()
+	ctx, cancelCall := context.WithTimeout(context.Background(), time.Second)
+	defer cancelCall()
 	tools, err := c.Tools(ctx)
 	if err != nil {
 		t.Fatal(err)

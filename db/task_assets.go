@@ -102,7 +102,7 @@ func (s *AssetStore) SetTaskAssetSource(taskID, assetID int64, source, summary s
 INSERT INTO task_asset_links(task_id, asset_id, source, source_summary, source_node_id)
 SELECT task.id, asset.id, $3, $4, $5
 FROM tasks task
-JOIN assets asset ON asset.id=$2 AND task.id=ANY(asset.task_ids)
+JOIN assets asset ON asset.id=$2 AND EXISTS (SELECT 1 FROM task_asset_links membership WHERE membership.asset_id=asset.id AND membership.task_id=task.id)
 WHERE task.id=$1 AND task.deleted_at IS NULL
 ON CONFLICT (task_id, asset_id) DO UPDATE
 SET source=EXCLUDED.source,
@@ -182,7 +182,7 @@ func (s *AssetStore) RegisterTaskAssetScopes(taskID int64, inputs []ScopeInput) 
 			taskScope.Kind = "root_domain"
 			taskScope.Domain = rule.Domain
 			var alreadyLinked bool
-			err := tx.QueryRow(`SELECT id, $2=ANY(task_ids) FROM assets WHERE type='root_domain' AND domain=$1`, rule.Domain, taskID).
+			err := tx.QueryRow(`SELECT id, EXISTS (SELECT 1 FROM task_asset_links membership WHERE membership.asset_id=assets.id AND membership.task_id=$2) FROM assets WHERE type='root_domain' AND domain=$1`, rule.Domain, taskID).
 				Scan(&assetID, &alreadyLinked)
 			if err != nil && !errors.Is(err, sql.ErrNoRows) {
 				return mutation, err
@@ -205,7 +205,7 @@ func (s *AssetStore) RegisterTaskAssetScopes(taskID int64, inputs []ScopeInput) 
 			}
 			ipValue := ip.String()
 			var alreadyLinked bool
-			err := tx.QueryRow(`SELECT id, $2=ANY(task_ids) FROM assets WHERE type='ip' AND ip=$1`, ipValue, taskID).
+			err := tx.QueryRow(`SELECT id, EXISTS (SELECT 1 FROM task_asset_links membership WHERE membership.asset_id=assets.id AND membership.task_id=$2) FROM assets WHERE type='ip' AND ip=$1`, ipValue, taskID).
 				Scan(&assetID, &alreadyLinked)
 			if err != nil && !errors.Is(err, sql.ErrNoRows) {
 				return mutation, err
@@ -281,22 +281,12 @@ func (s *AssetStore) AttachAssetsToTask(taskID int64, assetIDs []int64, sourceSu
 	}
 	var found, existing int
 	if err := tx.QueryRow(`
-SELECT count(*), count(*) FILTER (WHERE $1=ANY(task_ids))
+SELECT count(*), count(*) FILTER (WHERE EXISTS (SELECT 1 FROM task_asset_links membership WHERE membership.asset_id=assets.id AND membership.task_id=$1))
 FROM assets WHERE id=ANY($2::bigint[])`, taskID, assetIDs).Scan(&found, &existing); err != nil {
 		return mutation, err
 	}
 	if found != len(assetIDs) {
 		return mutation, ErrTaskAssetAssetNotFound
-	}
-	// Order matters: this UPDATE fires trg_assets_task_links, which creates the
-	// link rows with the generic source='system'. The INSERT below must stay
-	// after it so the operator-authored 'manual' provenance wins; swapping the
-	// two statements silently degrades every manual attach back to 'system'.
-	if _, err := tx.Exec(`
-UPDATE assets
-SET task_ids=CASE WHEN $1=ANY(task_ids) THEN task_ids ELSE array_append(task_ids,$1) END
-WHERE id=ANY($2::bigint[])`, taskID, assetIDs); err != nil {
-		return mutation, err
 	}
 	if _, err := tx.Exec(`
 INSERT INTO task_asset_links(task_id, asset_id, source, source_summary)
@@ -319,9 +309,8 @@ func (s *AssetStore) DetachAssetFromTask(taskID, assetID int64) (bool, error) {
 	}
 	var detachedID int64
 	err := s.db.QueryRow(`
-UPDATE assets SET task_ids=array_remove(task_ids,$1)
-WHERE id=$2 AND $1=ANY(task_ids)
-RETURNING id`, taskID, assetID).Scan(&detachedID)
+DELETE FROM task_asset_links WHERE asset_id=$2 AND task_id=$1
+RETURNING asset_id`, taskID, assetID).Scan(&detachedID)
 	if err == sql.ErrNoRows {
 		return false, nil
 	}

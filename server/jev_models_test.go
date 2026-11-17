@@ -32,7 +32,7 @@ func TestJevModelListAndConnectionEndpoints(t *testing.T) {
 		}
 	}))
 	defer upstream.Close()
-	s := &Server{}
+	s := &Server{Runtime: &Runtime{}}
 	for _, tc := range []struct {
 		name    string
 		handler http.HandlerFunc

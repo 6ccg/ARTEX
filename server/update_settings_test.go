@@ -17,7 +17,7 @@ func TestUpdateSettingsHTTPPersistence(t *testing.T) {
 	if err != nil {
 		t.Skipf("postgres unavailable: %v", err)
 	}
-	defer m.Close()
+	t.Cleanup(func() { _ = m.Close() })
 	old, existed, err := m.pg.GetSetting(updateSettingsKey)
 	if err != nil {
 		t.Fatal(err)
@@ -33,7 +33,8 @@ func TestUpdateSettingsHTTPPersistence(t *testing.T) {
 	dir := t.TempDir()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	s := New(ctx, m, dir, dir, dir)
+	s := newStartedServer(t, ctx, m, dir, dir, dir)
+	defer s.Close()
 	token, err := signJWT(s.jwtKey)
 	if err != nil {
 		t.Fatal(err)
@@ -71,7 +72,7 @@ func TestUpdateSettingsHTTPPersistence(t *testing.T) {
 			t.Fatalf("save: %d %s", r.Code, r.Body.String())
 		}
 		// Read through a fresh Server to prove the setting comes from the DB.
-		fresh := &Server{m: m}
+		fresh := &Server{Runtime: &Runtime{m: m}}
 		cfg, err := fresh.loadUpdateSettings()
 		if err != nil || cfg.Proxy != strings.TrimSpace(proxy) {
 			t.Fatalf("reload: %+v %v", cfg, err)

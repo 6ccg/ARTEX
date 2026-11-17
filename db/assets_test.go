@@ -16,6 +16,7 @@ func testSetup(t *testing.T) (*DB, *AssetStore, *CompanyStore) {
 	if err != nil {
 		t.Skipf("postgres unavailable (%v)", err)
 	}
+	t.Cleanup(func() { _ = d.Close() })
 	return d, d.Assets(), d.Companies()
 }
 
@@ -24,15 +25,29 @@ func deleteAsset(d *DB, id int64) {
 	d.Exec(`DELETE FROM assets WHERE id = $1`, id)
 }
 
+func assetFixtureTask(t *testing.T, d *DB) int64 {
+	t.Helper()
+	task, err := d.CreateTask("asset fixture", "goal", nil, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := d.DeleteTask(task.ID); err != nil {
+			t.Error(err)
+		}
+	})
+	return task.ID
+}
+
 // =====================================================================
 // RootDomain
 // =====================================================================
 
 func TestUpsertRootDomain(t *testing.T) {
 	d, av2, _ := testSetup(t)
-	defer d.Close()
 
-	id1, err := av2.UpsertRootDomain(UpsertRootDomainReq{Domain: "roottest.io", ICP: "A12345", TaskID: 1})
+	first, second := assetFixtureTask(t, d), assetFixtureTask(t, d)
+	id1, err := av2.UpsertRootDomain(UpsertRootDomainReq{Domain: "roottest.io", ICP: "A12345", TaskID: first})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -42,7 +57,7 @@ func TestUpsertRootDomain(t *testing.T) {
 	}
 
 	// upsert again — same id (dedup), ICP preserved
-	id2, err := av2.UpsertRootDomain(UpsertRootDomainReq{Domain: "roottest.io", TaskID: 2})
+	id2, err := av2.UpsertRootDomain(UpsertRootDomainReq{Domain: "roottest.io", TaskID: second})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,9 +65,10 @@ func TestUpsertRootDomain(t *testing.T) {
 		t.Errorf("dedup failed: %d != %d", id2, id1)
 	}
 
-	// task_ids should now contain both 1 and 2
-	var taskIDs []byte
-	d.QueryRow(`SELECT task_ids FROM assets WHERE id = $1`, id1).Scan(&taskIDs)
+	var associations int
+	if err := d.QueryRow(`SELECT count(*) FROM task_asset_links WHERE asset_id=$1 AND task_id=ANY($2::bigint[])`, id1, []int64{first, second}).Scan(&associations); err != nil || associations != 2 {
+		t.Fatalf("asset associations=%d err=%v", associations, err)
+	}
 
 	// ICP should still be set (COALESCE keeps existing)
 	var icp *string
@@ -63,8 +79,7 @@ func TestUpsertRootDomain(t *testing.T) {
 }
 
 func TestUpsertRootDomainEmpty(t *testing.T) {
-	d, av2, _ := testSetup(t)
-	defer d.Close()
+	_, av2, _ := testSetup(t)
 
 	_, err := av2.UpsertRootDomain(UpsertRootDomainReq{Domain: ""})
 	if err == nil {
@@ -78,7 +93,6 @@ func TestUpsertRootDomainEmpty(t *testing.T) {
 
 func TestUpsertIP(t *testing.T) {
 	d, av2, _ := testSetup(t)
-	defer d.Close()
 
 	id1, err := av2.UpsertIP(UpsertIPReq{
 		IP:        "192.168.10.5",
@@ -120,7 +134,6 @@ func TestUpsertIP(t *testing.T) {
 
 func TestUpsertIPBoundDomains(t *testing.T) {
 	d, av2, _ := testSetup(t)
-	defer d.Close()
 
 	id, err := av2.UpsertIP(UpsertIPReq{
 		IP:           "10.1.2.3",
@@ -152,7 +165,6 @@ func TestUpsertIPBoundDomains(t *testing.T) {
 
 func TestAppendIPPort(t *testing.T) {
 	d, av2, _ := testSetup(t)
-	defer d.Close()
 
 	id, err := av2.UpsertIP(UpsertIPReq{IP: "10.9.8.7"})
 	if err != nil {
@@ -180,7 +192,6 @@ func TestAppendIPPort(t *testing.T) {
 
 func TestUpsertSubdomain(t *testing.T) {
 	d, av2, _ := testSetup(t)
-	defer d.Close()
 
 	id, err := av2.UpsertSubdomain(UpsertSubdomainReq{
 		Domain:      "sub.subdtest.com",
@@ -222,7 +233,6 @@ func TestUpsertSubdomain(t *testing.T) {
 
 func TestUpsertSubdomainDedup(t *testing.T) {
 	d, av2, _ := testSetup(t)
-	defer d.Close()
 
 	id1, err := av2.UpsertSubdomain(UpsertSubdomainReq{Domain: "dedup.subdtest2.net", RecordType: "A", RecordValue: []string{"5.5.5.5"}})
 	if err != nil {
@@ -245,7 +255,6 @@ func TestUpsertSubdomainDedup(t *testing.T) {
 
 func TestUpsertAppByBundle(t *testing.T) {
 	d, av2, _ := testSetup(t)
-	defer d.Close()
 
 	id1, err := av2.UpsertApp(UpsertAppReq{Name: "MyApp", BundleID: "com.example.myapp", Category: "tools"})
 	if err != nil {
@@ -265,7 +274,6 @@ func TestUpsertAppByBundle(t *testing.T) {
 
 func TestUpsertAppByName(t *testing.T) {
 	d, av2, _ := testSetup(t)
-	defer d.Close()
 
 	id1, err := av2.UpsertApp(UpsertAppReq{Name: "UniqueAppNoBundle", Category: "utility"})
 	if err != nil {
@@ -288,7 +296,6 @@ func TestUpsertAppByName(t *testing.T) {
 
 func TestUpsertHTTPService(t *testing.T) {
 	d, av2, _ := testSetup(t)
-	defer d.Close()
 
 	sc := 200
 	cl := int64(1024)
@@ -337,7 +344,6 @@ func TestUpsertHTTPService(t *testing.T) {
 
 func TestUpsertHTTPServiceAuthAppend(t *testing.T) {
 	d, av2, _ := testSetup(t)
-	defer d.Close()
 
 	auth1 := []map[string]any{{"type": "basic", "username": "admin", "password": "pass"}}
 	id1, err := av2.UpsertHTTPService(UpsertHTTPServiceReq{
@@ -377,7 +383,6 @@ func TestUpsertHTTPServiceAuthAppend(t *testing.T) {
 
 func TestUpsertOtherService(t *testing.T) {
 	d, av2, _ := testSetup(t)
-	defer d.Close()
 
 	id1, err := av2.UpsertOtherService(UpsertOtherServiceReq{
 		IP:          "172.16.0.1",
@@ -417,7 +422,6 @@ func TestUpsertOtherService(t *testing.T) {
 
 func TestUpsertOtherServiceAuthAppend(t *testing.T) {
 	d, av2, _ := testSetup(t)
-	defer d.Close()
 
 	auth1 := []map[string]any{{"username": "admin", "password": "secret"}}
 	id1, err := av2.UpsertOtherService(UpsertOtherServiceReq{
@@ -455,7 +459,6 @@ func TestUpsertOtherServiceAuthAppend(t *testing.T) {
 
 func TestUpsertEndpoint(t *testing.T) {
 	d, av2, _ := testSetup(t)
-	defer d.Close()
 
 	params1 := []map[string]any{{"location": "query", "name": "id", "value": "1"}}
 	id1, err := av2.UpsertEndpoint(UpsertEndpointReq{
@@ -496,8 +499,7 @@ func TestUpsertEndpoint(t *testing.T) {
 }
 
 func TestUpsertEndpointRequiredFields(t *testing.T) {
-	d, av2, _ := testSetup(t)
-	defer d.Close()
+	_, av2, _ := testSetup(t)
 
 	_, err := av2.UpsertEndpoint(UpsertEndpointReq{URL: "", Method: "GET"})
 	if err == nil {
@@ -516,7 +518,6 @@ func TestUpsertEndpointRequiredFields(t *testing.T) {
 
 func TestQueryByType(t *testing.T) {
 	d, av2, _ := testSetup(t)
-	defer d.Close()
 
 	id, err := av2.UpsertRootDomain(UpsertRootDomainReq{Domain: "querytest.example.net"})
 	if err != nil {
@@ -542,10 +543,8 @@ func TestQueryByType(t *testing.T) {
 // TestDeleteByTaskID: 独有资产被删,与其他任务共享的资产仅解除关联(保留),host 反查正确。
 func TestDeleteByTaskID(t *testing.T) {
 	d, av2, _ := testSetup(t)
-	defer d.Close()
 
-	const taskA = int64(90001)
-	const taskB = int64(90002)
+	taskA, taskB := assetFixtureTask(t, d), assetFixtureTask(t, d)
 	// solo:仅属 taskA
 	solo, err := av2.UpsertRootDomain(UpsertRootDomainReq{Domain: "solo-del.test", TaskID: taskA})
 	if err != nil {
@@ -594,9 +593,8 @@ func TestDeleteByTaskID(t *testing.T) {
 
 func TestQueryByTask(t *testing.T) {
 	d, av2, _ := testSetup(t)
-	defer d.Close()
 
-	const taskID = int64(99999)
+	taskID := assetFixtureTask(t, d)
 	id, err := av2.UpsertRootDomain(UpsertRootDomainReq{Domain: "taskquery.net", TaskID: taskID})
 	if err != nil {
 		t.Fatal(err)
@@ -643,9 +641,8 @@ func TestQueryByTask(t *testing.T) {
 // 任务资产列表按页取,不再被固定条数截断:60 条资产用 25/页要能完整翻出来。
 func TestQueryByTaskPaging(t *testing.T) {
 	d, av2, _ := testSetup(t)
-	defer d.Close()
 
-	const taskID = int64(99998)
+	taskID := assetFixtureTask(t, d)
 	const n = 60
 	for i := 0; i < n; i++ {
 		id, err := av2.UpsertRootDomain(UpsertRootDomainReq{
@@ -687,7 +684,6 @@ func TestQueryByTaskPaging(t *testing.T) {
 
 func TestQueryByCompany(t *testing.T) {
 	d, av2, cs := testSetup(t)
-	defer d.Close()
 
 	companyID, _, err := cs.UpsertCompany("QueryByCompanyCorp", "")
 	if err != nil {
@@ -742,7 +738,6 @@ func TestQueryByCompany(t *testing.T) {
 // 企业资产列表同样按页取,不被固定条数截断。
 func TestQueryByCompanyPaging(t *testing.T) {
 	d, av2, cs := testSetup(t)
-	defer d.Close()
 
 	companyID, _, err := cs.UpsertCompany("QueryByCompanyPagingCorp", "")
 	if err != nil {
@@ -795,7 +790,6 @@ func TestQueryByCompanyPaging(t *testing.T) {
 
 func TestCountsByType(t *testing.T) {
 	d, av2, _ := testSetup(t)
-	defer d.Close()
 
 	id, err := av2.UpsertRootDomain(UpsertRootDomainReq{Domain: "counttest.example.biz"})
 	if err != nil {
@@ -818,7 +812,6 @@ func TestCountsByType(t *testing.T) {
 
 func TestCompanyAttributionAtInsertTime(t *testing.T) {
 	d, av2, cs := testSetup(t)
-	defer d.Close()
 
 	companyID, _, err := cs.UpsertCompany("InsertAttrCorp", "")
 	if err != nil {
@@ -902,18 +895,16 @@ func TestNormalizeURL(t *testing.T) {
 
 func TestAssetPaginationUsesStableIDTieBreaker(t *testing.T) {
 	d, assets, _ := testSetup(t)
-	defer d.Close()
 
 	stamp := time.Now().UnixNano()
-	taskID := stamp
+	taskID := assetFixtureTask(t, d)
 	marker := fmt.Sprintf("stable-page-%d", stamp)
 	sharedSeen := time.Date(2026, time.August, 21, 9, 0, 0, 0, time.UTC)
 	ids := make([]int64, 0, 5)
 	for i := 0; i < 5; i++ {
 		var id int64
 		domain := fmt.Sprintf("%s-%d.invalid", marker, i)
-		if err := d.QueryRow(`INSERT INTO assets(type,domain,root_domain,task_ids,last_seen)
-			VALUES ('root_domain',$1,$1,ARRAY[$2]::bigint[],$3) RETURNING id`,
+		if err := d.QueryRow(`WITH asset AS (INSERT INTO assets(type,domain,root_domain,last_seen) VALUES ('root_domain',$1,$1,$3) RETURNING id), linked AS (INSERT INTO task_asset_links(task_id,asset_id) SELECT $2,id FROM asset) SELECT id FROM asset`,
 			domain, taskID, sharedSeen).Scan(&id); err != nil {
 			t.Fatal(err)
 		}
@@ -954,7 +945,6 @@ func TestAssetPaginationUsesStableIDTieBreaker(t *testing.T) {
 // refuse a non-address, and the message must tell the caller how to fix it.
 func TestAssetIPRejectsHostname(t *testing.T) {
 	d, av2, _ := testSetup(t)
-	defer d.Close()
 
 	hostname := "d63cd476.cdn.ucloud.com.cn"
 	cases := []struct {
@@ -1005,7 +995,6 @@ func TestAssetIPRejectsHostname(t *testing.T) {
 func TestQueryDSLInScopeMembership(t *testing.T) {
 	d, assets, companies := testSetup(t)
 	t.Cleanup(func() { _ = d.Close() })
-	// Older asset fixtures tag synthetic task IDs 1/2; use a task with no existing membership.
 	task, err := d.CreateTask("isolated task", "goal", nil, 0, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -1013,24 +1002,6 @@ func TestQueryDSLInScopeMembership(t *testing.T) {
 	source, err := d.CreateTaskWithOptions("source", "goal", TaskCreateOptions{ShareGlobalAssets: true})
 	if err != nil {
 		t.Fatal(err)
-	}
-	for _, candidate := range []*Task{task, source} {
-		for {
-			var count int
-			if err := d.QueryRow(`SELECT count(*) FROM assets WHERE $1=ANY(task_ids)`, candidate.ID).Scan(&count); err != nil {
-				t.Fatal(err)
-			}
-			if count == 0 {
-				break
-			}
-			shared := candidate.ShareGlobalAssets
-			_ = d.DeleteTask(candidate.ID)
-			replacement, err := d.CreateTaskWithOptions("clean membership", "goal", TaskCreateOptions{ShareGlobalAssets: shared})
-			if err != nil {
-				t.Fatal(err)
-			}
-			*candidate = *replacement
-		}
 	}
 	if !source.ShareGlobalAssets || task.ShareGlobalAssets {
 		t.Fatal("incorrect creation defaults")
@@ -1047,8 +1018,7 @@ func TestQueryDSLInScopeMembership(t *testing.T) {
 	insert := func(typ, domain, url string, owner int64) int64 {
 		t.Helper()
 		var id int64
-		err := d.QueryRow(`INSERT INTO assets(type,domain,root_domain,url,ip,company_id,task_ids,last_seen)
-   VALUES($1,$2,$3,NULLIF($4,''),'198.51.100.9',$5,ARRAY[$6]::bigint[],now()) RETURNING id`, typ, domain, root, url, companyID, owner).Scan(&id)
+		err := d.QueryRow(`WITH asset AS (INSERT INTO assets(type,domain,root_domain,url,ip,company_id,last_seen) VALUES($1,$2,$3,NULLIF($4,''),'198.51.100.9',$5,now()) RETURNING id), linked AS (INSERT INTO task_asset_links(task_id,asset_id) SELECT task.id,asset.id FROM asset JOIN tasks task ON task.id=$6) SELECT id FROM asset`, typ, domain, root, url, companyID, owner).Scan(&id)
 		if err != nil {
 			t.Fatal(err)
 		}

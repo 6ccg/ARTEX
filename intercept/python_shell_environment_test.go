@@ -3,6 +3,7 @@ package intercept
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -24,7 +25,12 @@ func TestPythonPrecedingShellEffectsWithoutExecution(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(lib, "one.py"), []byte("KNOWN=1\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink(python, filepath.Join(bin, "python3")); err != nil {
+	entry := "python3"
+	if runtime.GOOS == "windows" {
+		entry += ".exe"
+		t.Setenv("PATHEXT", ".EXE")
+	}
+	if err := os.Symlink(python, filepath.Join(bin, entry)); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", bin)

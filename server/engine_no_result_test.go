@@ -55,12 +55,12 @@ func TestNoResultCoordinatorTerminalExitAllowsRevival(t *testing.T) {
 			case <-ctx.Done():
 				t.Fatal("terminal coordinator did not exit")
 			}
-			if _, exists := e.coordStarted.Load(task.ID); exists {
+			if run := e.lookupTaskRun(task.ID); run != nil && run.coordinator.Load() != nil {
 				t.Fatal("terminal exit retained coordinator marker")
 			}
 			task.updateLifecycle(func(s *taskLifecycleState) { s.Status = "running" })
 			e.startDeadlineCoordinator(ctx, task)
-			if _, exists := e.coordStarted.Load(task.ID); !exists {
+			if run := e.lookupTaskRun(task.ID); run == nil || run.coordinator.Load() == nil {
 				t.Fatal("revival failed to start coordinator")
 			}
 			cancel()
@@ -74,7 +74,7 @@ func TestNoResultCheckpointAndRevival(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer m.Close()
+	t.Cleanup(func() { _ = m.Close() })
 	for _, tc := range []struct {
 		name, severity string
 		wantStop       bool
@@ -132,7 +132,7 @@ func TestNoResultCheckpointAndRevival(t *testing.T) {
 				t.Fatal(err)
 			}
 			provider := &scriptedLLMProvider{err: errors.New("test final planner unavailable")}
-			planner := agent.NewPlanner(provider, "test", t.TempDir(), nil, 0, 1)
+			planner := agent.NewPlanner(nil, provider, "test", t.TempDir(), nil, 0, 1)
 			e.SetAuthoritativeAgentResolver(func(*Task) (*agent.Planner, *agent.Worker) { return planner, &agent.Worker{} })
 			e.settleTask(t.Context(), task, db.StopReasonNoResult)
 			state := task.lifecycleSnapshot()
@@ -164,7 +164,7 @@ func TestNoResultCoordinatorStopsAndReleasesMarker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer m.Close()
+	t.Cleanup(func() { _ = m.Close() })
 	task, err := m.CreateTaskWithOptions("coordinator stop", "goal", db.TaskCreateOptions{NoResultSeconds: 60})
 	if err != nil {
 		t.Fatal(err)
@@ -195,7 +195,7 @@ func TestNoResultCoordinatorStopsAndReleasesMarker(t *testing.T) {
 	m.mu.Unlock()
 	e = NewEngine(m)
 	provider := &scriptedLLMProvider{err: errors.New("test final planner unavailable")}
-	planner := agent.NewPlanner(provider, "test", t.TempDir(), nil, 0, 1)
+	planner := agent.NewPlanner(nil, provider, "test", t.TempDir(), nil, 0, 1)
 	e.SetAuthoritativeAgentResolver(func(*Task) (*agent.Planner, *agent.Worker) { return planner, &agent.Worker{} })
 	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
 	defer cancel()
@@ -213,13 +213,13 @@ func TestNoResultCoordinatorStopsAndReleasesMarker(t *testing.T) {
 	if m.TaskStatus(task.ID) != "timeout" || task.lifecycleSnapshot().StopReason != db.StopReasonNoResult {
 		t.Fatal("coordinator did not stop task")
 	}
-	if _, exists := e.coordStarted.Load(task.ID); exists {
+	if run := e.lookupTaskRun(task.ID); run != nil && run.coordinator.Load() != nil {
 		t.Fatal("coordinator marker survived exit")
 	}
 }
 
 func TestCreateTaskRejectsInvalidNoResultSeverity(t *testing.T) {
-	s := &Server{}
+	s := &Server{Runtime: &Runtime{}}
 	w := httptest.NewRecorder()
 	s.createTask(w, httptest.NewRequest("POST", "/api/tasks", strings.NewReader(`{"description":"test","goal":"test","no_result_min_severity":"urgent"}`)))
 	if w.Code != 400 {

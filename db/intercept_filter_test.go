@@ -146,6 +146,9 @@ func TestInterceptApprovalFilters(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	if _, err := d.Exec(`UPDATE intercept_pending SET created_at='2099-01-01 12:00:00+00' WHERE id=$1`, searchID); err != nil {
+		t.Fatal(err)
+	}
 	rows, total, err = d.ListTaskInterceptsPage(scope, 1, 20, InterceptApprovalFilter{Search: "example.test"})
 	if err != nil || total != 1 || len(rows) != 1 || rows[0].ID != searchID {
 		t.Fatalf("snapshot search total=%d rows=%d err=%v", total, len(rows), err)
@@ -163,5 +166,18 @@ func TestInterceptApprovalFilters(t *testing.T) {
 	})
 	if err != nil || total != 1 || len(rows) != 1 || rows[0].ID != searchID {
 		t.Fatalf("date search total=%d rows=%d err=%v", total, len(rows), err)
+	}
+	d.SetMaxOpenConns(1)
+	if _, err := d.Exec(`SET TIME ZONE 'Pacific/Honolulu'`); err != nil {
+		t.Fatal(err)
+	}
+	for _, stamp := range []string{"2099-01-01 00:30:00+00", "2099-01-01 23:30:00+00"} {
+		if _, err := d.Exec(`UPDATE intercept_pending SET created_at=$1 WHERE id=$2`, stamp, searchID); err != nil {
+			t.Fatal(err)
+		}
+		rows, total, err = d.ListTaskInterceptsPage(scope, 1, 20, InterceptApprovalFilter{Search: "example.test", CreatedFrom: "2099-01-01", CreatedTo: "2099-01-01"})
+		if err != nil || total != 1 || len(rows) != 1 || rows[0].ID != searchID {
+			t.Fatalf("UTC day boundary %s: total=%d err=%v", stamp, total, err)
+		}
 	}
 }

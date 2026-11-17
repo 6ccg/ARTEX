@@ -51,7 +51,7 @@ func TestProxyPoolEmptyResponseUsesArrays(t *testing.T) {
 		{name: "member without switches", pool: &proxyPoolState{entries: []proxyPoolEntry{{ProxyPoolEntry: ProxyPoolEntry{ID: "a"}, RawURL: "http://a"}}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			s := &Server{m: &Manager{proxyPool: tc.pool}}
+			s := &Server{Runtime: &Runtime{m: &Manager{proxyPool: tc.pool}}}
 			w := httptest.NewRecorder()
 			s.getProxyPool(w, httptest.NewRequest(http.MethodGet, "/api/settings/proxy-pool", nil))
 			if w.Code != http.StatusOK {
@@ -129,7 +129,7 @@ func TestProxyPoolHealthThresholdCooldownAndRecovery(t *testing.T) {
 }
 
 func TestProxyPoolUncheckedMemberDoesNotPauseBeforeFailureThreshold(t *testing.T) {
-	m := proxyTestManager(t)
+	m := newTestManager(t)
 	task, err := m.CreateTask("unchecked proxy", "goal", nil, 0, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -139,7 +139,7 @@ func TestProxyPoolUncheckedMemberDoesNotPauseBeforeFailureThreshold(t *testing.T
 	m.proxyPool = &proxyPoolState{active: "a", entries: []proxyPoolEntry{{
 		ProxyPoolEntry: ProxyPoolEntry{ID: "a", Enabled: true, Health: "unknown"}, RawURL: "http://a",
 	}}}
-	s := &Server{m: m, ctx: context.Background(), proxyPoolProbeSem: make(chan struct{}, proxyPoolMaxProbeConcurrency)}
+	s := &Server{Runtime: &Runtime{m: m, ctx: context.Background(), proxyPoolProbeSem: make(chan struct{}, proxyPoolMaxProbeConcurrency)}}
 	s.proxyProbe = func(context.Context, string, string, []string, time.Duration) egressProbeResult {
 		return egressProbeResult{Error: "proxy down"}
 	}
@@ -153,12 +153,12 @@ func TestProxyPoolUncheckedMemberDoesNotPauseBeforeFailureThreshold(t *testing.T
 }
 
 func TestProxyPoolCoolingWindowSkipsProbeUntilExpiry(t *testing.T) {
-	m := proxyTestManager(t)
+	m := newTestManager(t)
 	m.globalProxy = "http://a"
 	m.proxyPool = &proxyPoolState{active: "a", entries: []proxyPoolEntry{{
 		ProxyPoolEntry: ProxyPoolEntry{ID: "a", Enabled: true, Health: "unhealthy-cooling", ConsecutiveFailures: 3, LastCheckedAt: time.Now()}, RawURL: "http://a",
 	}}}
-	s := &Server{m: m, ctx: context.Background(), proxyPoolProbeSem: make(chan struct{}, proxyPoolMaxProbeConcurrency)}
+	s := &Server{Runtime: &Runtime{m: m, ctx: context.Background(), proxyPoolProbeSem: make(chan struct{}, proxyPoolMaxProbeConcurrency)}}
 	calls := 0
 	s.proxyProbe = func(context.Context, string, string, []string, time.Duration) egressProbeResult {
 		calls++
@@ -176,7 +176,7 @@ func TestProxyPoolCoolingWindowSkipsProbeUntilExpiry(t *testing.T) {
 }
 
 func TestProxyPoolTimedRotationUsesAvailableMembersAndRecoversTasks(t *testing.T) {
-	m := proxyTestManager(t)
+	m := newTestManager(t)
 	if err := m.SetProxyPoolSettings(true, minProxyRotateInterval, true, "sequential", 3, 60, 30); err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +186,7 @@ func TestProxyPoolTimedRotationUsesAvailableMembersAndRecoversTasks(t *testing.T
 		{ProxyPoolEntry: ProxyPoolEntry{ID: "b", Enabled: true, Health: "healthy"}, RawURL: "http://b"},
 		{ProxyPoolEntry: ProxyPoolEntry{ID: "c", Enabled: true, Health: "unhealthy-cooling"}, RawURL: "http://c"},
 	}}
-	s := &Server{m: m, ctx: context.Background()}
+	s := &Server{Runtime: &Runtime{m: m, ctx: context.Background()}}
 	s.proxyPoolTickLocked(false)
 	if got := m.GlobalProxy(); got != "http://b" {
 		t.Fatalf("timed rotation selected %q", got)
@@ -197,7 +197,7 @@ func TestProxyPoolTimedRotationUsesAvailableMembersAndRecoversTasks(t *testing.T
 }
 
 func TestProxyPoolFailureSwitchRecoversOnlyEligibleTasks(t *testing.T) {
-	m := proxyTestManager(t)
+	m := newTestManager(t)
 	if err := m.SetProxyPoolSettings(false, minProxyRotateInterval, true, "sequential", 3, 60, 30); err != nil {
 		t.Fatal(err)
 	}
@@ -226,7 +226,7 @@ func TestProxyPoolFailureSwitchRecoversOnlyEligibleTasks(t *testing.T) {
 	}
 	exhausted.updateLifecycle(func(v *taskLifecycleState) { v.ReconnectAttempt, v.ReconnectExhausted = 3, true })
 	s := newAdmissionTestServer(m, nil)
-	m.SetTaskControlMutex(&s.concMu)
+
 	s.proxyPoolWake = make(chan struct{}, 1)
 	s.proxyPoolProbeSem = make(chan struct{}, proxyPoolMaxProbeConcurrency)
 	s.proxyProbe = func(context.Context, string, string, []string, time.Duration) egressProbeResult {
@@ -249,7 +249,7 @@ func TestProxyPoolFailureSwitchRecoversOnlyEligibleTasks(t *testing.T) {
 }
 
 func TestProxyPoolReconnectKeepsAttemptsAndDoesNotAutoResumeExhausted(t *testing.T) {
-	m := proxyTestManager(t)
+	m := newTestManager(t)
 	if err := m.pg.SetSetting(settingProxyReconnectMax, "2"); err != nil {
 		t.Fatal(err)
 	}
@@ -269,7 +269,7 @@ func TestProxyPoolReconnectKeepsAttemptsAndDoesNotAutoResumeExhausted(t *testing
 		t.Fatal(err)
 	}
 	task.updateLifecycle(func(v *taskLifecycleState) { v.ReconnectGeneration = 3 })
-	s := &Server{m: m, ctx: context.Background(), proxyPoolProbeSem: make(chan struct{}, proxyPoolMaxProbeConcurrency)}
+	s := &Server{Runtime: &Runtime{m: m, ctx: context.Background(), proxyPoolProbeSem: make(chan struct{}, proxyPoolMaxProbeConcurrency)}}
 	s.proxyProbe = func(context.Context, string, string, []string, time.Duration) egressProbeResult {
 		return egressProbeResult{Error: "proxy down"}
 	}
@@ -299,7 +299,7 @@ func TestProxyPoolReconnectKeepsAttemptsAndDoesNotAutoResumeExhausted(t *testing
 func TestProxyPoolDisableOrClearActiveRoutesAway(t *testing.T) {
 	newServer := func(entries []proxyPoolEntry) (*Server, *Manager) {
 		m := &Manager{globalProxy: "http://a", proxyPool: &proxyPoolState{active: "a", entries: entries}}
-		return &Server{m: m}, m
+		return &Server{Runtime: &Runtime{m: m}}, m
 	}
 	t.Run("disable switches to healthy member", func(t *testing.T) {
 		s, m := newServer([]proxyPoolEntry{
@@ -330,7 +330,7 @@ func TestProxyPoolDisableOrClearActiveRoutesAway(t *testing.T) {
 
 func TestProxyPoolClearOrDeleteLastMemberRecoversOnlyEligibleProxyPauses(t *testing.T) {
 	run := func(t *testing.T, deleteLast bool) {
-		m := proxyTestManager(t)
+		m := newTestManager(t)
 		m.globalProxy = "http://a"
 		m.proxyPool = &proxyPoolState{active: "a", entries: []proxyPoolEntry{{
 			ProxyPoolEntry: ProxyPoolEntry{ID: "a", Enabled: true, Health: "healthy"}, RawURL: "http://a",
@@ -418,7 +418,7 @@ func TestProxyPoolClearedRuntimeForwarderFallsBackToDirect(t *testing.T) {
 		_, _ = io.WriteString(w, "direct-ok")
 	}))
 	defer target.Close()
-	m := proxyTestManager(t)
+	m := newTestManager(t)
 	// A configured pool can remain persisted after its last usable member is
 	// disabled or cleared. The runtime route is still direct in that state.
 	m.mu.Lock()
@@ -444,7 +444,7 @@ func TestProxyPoolClearedRuntimeForwarderFallsBackToDirect(t *testing.T) {
 func TestProxyReconnectGuardsGateExhaustedAutomaticResume(t *testing.T) {
 	task := &Task{ID: "exhausted", PauseReason: "paused_by_proxy", ReconnectGeneration: 4, ReconnectAttempt: 3, ReconnectExhausted: true}
 	m := &Manager{tasks: map[string]*Task{task.ID: task}}
-	s := &Server{m: m}
+	s := &Server{Runtime: &Runtime{m: m}}
 	if got := s.snapshotProxyReconnectGuards(false); len(got) != 0 {
 		t.Fatalf("automatic guards included exhausted task: %+v", got)
 	}
@@ -461,7 +461,7 @@ func TestProxyPoolSettingsRejectTooShortInterval(t *testing.T) {
 }
 
 func TestProxyPoolRandomSelectionStillExcludesDisabledAndCooling(t *testing.T) {
-	m := proxyTestManager(t)
+	m := newTestManager(t)
 	if err := m.pg.SetSetting(settingProxyRotateStrategy, "random"); err != nil {
 		t.Fatal(err)
 	}
@@ -479,13 +479,13 @@ func TestProxyPoolRandomSelectionStillExcludesDisabledAndCooling(t *testing.T) {
 }
 
 func TestProxyPoolProbeSkipsEnabledEmptyURL(t *testing.T) {
-	m := proxyTestManager(t)
+	m := newTestManager(t)
 	m.globalProxy = "http://good"
 	m.proxyPool = &proxyPoolState{active: "good", entries: []proxyPoolEntry{
 		{ProxyPoolEntry: ProxyPoolEntry{ID: "empty", Enabled: true, Health: "healthy"}},
 		{ProxyPoolEntry: ProxyPoolEntry{ID: "good", Enabled: true, Health: "healthy"}, RawURL: "http://good"},
 	}}
-	s := &Server{m: m, ctx: context.Background(), proxyPoolProbeSem: make(chan struct{}, proxyPoolMaxProbeConcurrency)}
+	s := &Server{Runtime: &Runtime{m: m, ctx: context.Background(), proxyPoolProbeSem: make(chan struct{}, proxyPoolMaxProbeConcurrency)}}
 	calls := 0
 	s.proxyProbe = func(context.Context, string, string, []string, time.Duration) egressProbeResult {
 		calls++
@@ -502,7 +502,7 @@ func TestProxyPoolFailureMarksOriginalMemberAfterConcurrentSwitch(t *testing.T) 
 		{ProxyPoolEntry: ProxyPoolEntry{ID: "a", Enabled: true, Health: "healthy"}, RawURL: "http://a"},
 		{ProxyPoolEntry: ProxyPoolEntry{ID: "b", Enabled: true, Health: "healthy"}, RawURL: "http://b"},
 	}}}
-	s := &Server{m: m, ctx: context.Background(), proxyPoolWake: make(chan struct{}, 1)}
+	s := &Server{Runtime: &Runtime{m: m, ctx: context.Background(), proxyPoolWake: make(chan struct{}, 1)}}
 	s.proxyProbe = func(context.Context, string, string, []string, time.Duration) egressProbeResult {
 		m.mu.Lock()
 		m.globalProxy = "http://b"
@@ -522,7 +522,7 @@ func TestProxyPoolAllMembersUnhealthyKeepsProxyConfigured(t *testing.T) {
 		{ProxyPoolEntry: ProxyPoolEntry{ID: "a", Enabled: true, Health: "unhealthy-cooling", ConsecutiveFailures: defaultProxyHealthThreshold, LastCheckedAt: time.Now().Add(-2 * time.Minute)}, RawURL: "http://a"},
 		{ProxyPoolEntry: ProxyPoolEntry{ID: "b", Enabled: true, Health: "unhealthy-cooling", ConsecutiveFailures: defaultProxyHealthThreshold, LastCheckedAt: time.Now().Add(-2 * time.Minute)}, RawURL: "http://b"},
 	}}}
-	s := &Server{m: m, ctx: context.Background(), proxyPoolProbeSem: make(chan struct{}, proxyPoolMaxProbeConcurrency)}
+	s := &Server{Runtime: &Runtime{m: m, ctx: context.Background(), proxyPoolProbeSem: make(chan struct{}, proxyPoolMaxProbeConcurrency)}}
 	s.proxyProbe = func(context.Context, string, string, []string, time.Duration) egressProbeResult {
 		return egressProbeResult{Error: "proxy down"}
 	}
@@ -540,7 +540,7 @@ func TestProxyPoolMaskedEditHotCutsCoolingActiveMember(t *testing.T) {
 		ProxyPoolEntry: ProxyPoolEntry{ID: "a", Enabled: true, Health: "unhealthy-cooling", ConsecutiveFailures: 3},
 		RawURL:         "http://old:secret@old.example:8080",
 	}}}}
-	s := &Server{m: m}
+	s := &Server{Runtime: &Runtime{m: m}}
 	r := httptest.NewRequest(http.MethodPatch, "/api/settings/proxy-pool/a", strings.NewReader(`{"url":"http://***@new.example:9090"}`))
 	r.SetPathValue("id", "a")
 	w := httptest.NewRecorder()
@@ -561,7 +561,7 @@ func TestProxyPoolDeleteNeverRetainsDeletedRuntimeURL(t *testing.T) {
 		{ProxyPoolEntry: ProxyPoolEntry{ID: "a", Enabled: true, Health: "healthy"}, RawURL: "http://a"},
 		{ProxyPoolEntry: ProxyPoolEntry{ID: "b", Enabled: true, Health: "healthy"}, RawURL: "http://b"},
 	}}}
-	s := &Server{m: m}
+	s := &Server{Runtime: &Runtime{m: m}}
 	deleteEntry := func(id string) {
 		r := httptest.NewRequest(http.MethodDelete, "/api/settings/proxy-pool/"+id, nil)
 		r.SetPathValue("id", id)
@@ -607,7 +607,7 @@ func TestProxyPoolEmptyPersistenceDoesNotResurrectLegacyProxy(t *testing.T) {
 		_ = m.Close()
 		t.Fatal(err)
 	}
-	s := &Server{m: m}
+	s := &Server{Runtime: &Runtime{m: m}}
 	r := httptest.NewRequest(http.MethodDelete, "/api/settings/proxy-pool/a", nil)
 	r.SetPathValue("id", "a")
 	w := httptest.NewRecorder()

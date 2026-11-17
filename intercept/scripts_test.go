@@ -33,6 +33,7 @@ func TestInlineShellCaptureCombinations(t *testing.T) {
 		{"unrelated_default_parameter", `for p in 80 443; do echo "${TOKEN:-unset}"; bash -c "echo $p"; done`, "not_applicable"},
 		{"nested_loops", `for p in 80 443; do for q in one two; do bash -c "echo $p $q"; done; done`, "not_applicable"},
 		{"repeated_parameter", `for p in one two; do bash -c "echo $p $p"; done`, "not_applicable"},
+		{"case_sensitive_parameters", `for p in one; do for P in two; do bash -c "echo $p $P"; done; done`, "not_applicable"},
 		{"finite_script_paths", `for p in one two; do bash -c "python3 ./$p.py"; done`, "complete"},
 		{"finite_injected_code", `for p in 'ok; python3 ./check.py'; do bash -c "echo $p"; done`, "complete"},
 		{"nested_inline_script", `bash -c "sh -c 'python3 ./check.py'"`, "complete"},

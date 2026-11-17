@@ -13,7 +13,7 @@ import (
 // temp skill dir (no DB needed — these tools only touch the filesystem).
 func TestSkillTools(t *testing.T) {
 	dir := t.TempDir()
-	s := &Server{skillDir: dir}
+	s := &Server{Runtime: &Runtime{skillDir: dir}}
 
 	// create_skill writes a spec-compliant SKILL.md.
 	in, _ := json.Marshal(map[string]any{

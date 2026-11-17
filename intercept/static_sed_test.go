@@ -9,6 +9,7 @@ import (
 )
 
 func TestStaticSedSnapshotsMatchNativeSed(t *testing.T) {
+	requireStaticSedForTest(t)
 	dir := t.TempDir()
 	source := "probe2_results.txt probe2_results.txt\nbodies2/a\naXb a.b\n"
 	path := filepath.Join(dir, "old.sh")
@@ -80,7 +81,21 @@ func TestStaticSedRejectsOpaqueOrUnsafeLayouts(t *testing.T) {
 		}
 	}
 }
-func TestStaticSedGeneratedInputAndBounds(t *testing.T) {
+func requireStaticSedForTest(t *testing.T) {
+	t.Helper()
+	for _, name := range []string{"cat", "sed"} {
+		path, err := exec.LookPath(name)
+		if err == nil {
+			path, err = filepath.EvalSymlinks(path)
+		}
+		if err != nil || (path != "/bin/"+name && path != "/usr/bin/"+name) || !nativeInterpreterFile(path) {
+			t.Skipf("static snapshot requires a native POSIX %s in /bin or /usr/bin", name)
+		}
+	}
+}
+
+func TestStaticSedGeneratedInput(t *testing.T) {
+	requireStaticSedForTest(t)
 	dir := t.TempDir()
 	in := reviewCommandForTest(t, dir, "cat > old.sh <<'SH'\necho old\nSH\nsed 's/old/new/' old.sh > new.sh; bash new.sh")
 	if in.ScriptCaptureStatus != "complete" || in.Scripts[0].Content != "echo new\n" {
@@ -90,6 +105,9 @@ func TestStaticSedGeneratedInputAndBounds(t *testing.T) {
 	if in.ScriptCaptureStatus != "complete" || in.Scripts[0].Content != "echo final\n" {
 		t.Fatalf("known transform chain lost: %+v", in)
 	}
+}
+
+func TestStaticSedBounds(t *testing.T) {
 	subs, ok := parseStaticSed("s/a/" + strings.Repeat("b", 4096) + "/g")
 	if !ok {
 		t.Fatal("fixture rejected")

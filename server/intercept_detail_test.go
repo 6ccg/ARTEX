@@ -25,7 +25,7 @@ func TestInterceptDetailHTTP(t *testing.T) {
 	// Exercise the authenticated HTTP surface without starting unrelated task
 	// schedulers or mutating the process-global tool assembly used by other tests.
 	m := &Manager{pg: d, interceptor: intercept.New(d)}
-	s := &Server{m: m, jwtKey: []byte("approval-http-test-signing-key")}
+	s := &Server{Runtime: &Runtime{m: m}, jwtKey: []byte("approval-http-test-signing-key")}
 	h := s.Handler()
 	token, err := signJWT(s.jwtKey)
 	if err != nil {

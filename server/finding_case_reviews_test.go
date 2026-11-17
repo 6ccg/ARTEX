@@ -35,7 +35,7 @@ func TestFindingCaseReviewTaskMessagePolicy(t *testing.T) {
 	if strings.Contains(message, "不确定提交建议") {
 		t.Fatal("task message suggests solely because of uncertainty")
 	}
-	schema, err := json.Marshal((&Server{}).toolCompleteFindingCaseReview().InputSchema())
+	schema, err := json.Marshal((&Server{Runtime: &Runtime{}}).toolCompleteFindingCaseReview().InputSchema())
 	if err != nil {
 		t.Fatal(err)
 	}

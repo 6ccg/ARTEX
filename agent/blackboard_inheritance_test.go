@@ -25,9 +25,8 @@ func callReadJSON(t *testing.T, tool actool.CoreTool, input string) any {
 	return out
 }
 
-func TestGraphOverviewExpandsAssociatedCompanyScope(t *testing.T) {
+func TestGraphOverviewUsesAssociatedCompanyAssets(t *testing.T) {
 	d := testDB(t)
-	defer d.Close()
 
 	companies := d.Companies()
 	companyID, _, err := companies.UpsertCompany(fmt.Sprintf("overview-scope-%d", time.Now().UnixNano()), "")
@@ -37,16 +36,8 @@ func TestGraphOverviewExpandsAssociatedCompanyScope(t *testing.T) {
 	t.Cleanup(func() { _ = companies.DeleteCompany(companyID) })
 
 	domain := fmt.Sprintf("overview-scope-%d.invalid", companyID)
-	ip := fmt.Sprintf("2001:db8:%x::42", companyID%0xffff)
-	cidr := fmt.Sprintf("2001:db8:%x:1::/64", companyID%0xffff)
-	icp := fmt.Sprintf("京 ICP 备 %d 号", companyID)
-	keyword := fmt.Sprintf("Scope Company %d", companyID)
 	inputs := []db.ScopeInput{
 		{Kind: "domain", Value: domain},
-		{Kind: "ip", Value: ip},
-		{Kind: "cidr", Value: cidr},
-		{Kind: "icp", Value: icp},
-		{Kind: "keyword", Value: keyword},
 	}
 	added, skipped, invalid, scopeErrors := companies.AddScopeInputs(companyID, inputs, "task context test")
 	if added != len(inputs) || skipped != 0 || invalid != 0 || len(scopeErrors) != 0 {
@@ -67,7 +58,7 @@ func TestGraphOverviewExpandsAssociatedCompanyScope(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = d.DeleteTask(task.ID) })
 
-	tools := NewToolSet(d.Exploration(task.ExplorationID), "planner")
+	tools := NewToolSet(nil, d.Exploration(task.ExplorationID), "planner")
 	tools.SetTaskID(task.ID)
 	tools.SetAssetStore(assets, companies)
 	linkedAssets, err := assets.QueryByTask(task.ID, "root_domain", 10, 0)
@@ -82,26 +73,8 @@ func TestGraphOverviewExpandsAssociatedCompanyScope(t *testing.T) {
 	if !ok {
 		t.Fatalf("coverage missing: %#v", overview["coverage"])
 	}
-	scopeRows, ok := coverage["scope"].([]map[string]any)
-	if !ok || len(scopeRows) != 1 {
-		t.Fatalf("task scope missing: %#v", coverage["scope"])
-	}
-	companyScope, ok := scopeRows[0]["company_scope"].([]map[string]any)
-	if !ok || len(companyScope) != len(inputs) {
-		t.Fatalf("company scope not expanded: %#v", scopeRows[0])
-	}
-	kinds := make(map[string]string, len(companyScope))
-	for _, rule := range companyScope {
-		kinds[fmt.Sprint(rule["kind"])] = fmt.Sprint(rule["value"])
-	}
-	for _, input := range inputs {
-		if kinds[input.Kind] != input.Value {
-			t.Errorf("scope %s=%q want %q", input.Kind, kinds[input.Kind], input.Value)
-		}
-	}
-	keywords, ok := scopeRows[0]["company_keywords"].([]string)
-	if !ok || len(keywords) != 1 || keywords[0] != keyword {
-		t.Fatalf("company keywords missing: %#v", scopeRows[0]["company_keywords"])
+	if _, exists := coverage["scope"]; exists {
+		t.Fatal("compact overview unexpectedly embeds the full company scope")
 	}
 	if hc, _ := coverage["host_count"].(int); hc < 1 {
 		t.Fatalf("company asset host not counted in agent context: %#v", coverage["host_count"])
@@ -143,7 +116,7 @@ func TestGraphOverviewExpandsAssociatedCompanyScope(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = d.DeleteTask(disabledTask.ID) })
-	disabledTools := NewToolSet(d.Exploration(disabledTask.ExplorationID), "planner")
+	disabledTools := NewToolSet(nil, d.Exploration(disabledTask.ExplorationID), "planner")
 	disabledTools.SetTaskID(disabledTask.ID)
 	disabledTools.SetCoverageEnabled(false)
 	disabledTools.SetAssetStore(assets, companies)
@@ -185,7 +158,6 @@ func companiesName(t *testing.T, companies *db.CompanyStore, companyID int64) st
 
 func TestBlackboardToolsReadDirectSources(t *testing.T) {
 	d := testDB(t)
-	defer d.Close()
 
 	grand, err := d.CreateTask("grand", "grand goal", nil, 0, 0)
 	if err != nil {
@@ -255,7 +227,7 @@ func TestBlackboardToolsReadDirectSources(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	tools := NewToolSet(currentStore, "worker")
+	tools := NewToolSet(nil, currentStore, "worker")
 	tools.SetTaskID(current.ID)
 	tools.SetAssetStore(assets, assets.Companies())
 	parentID, _ := json.Marshal(sourceFact)
@@ -369,7 +341,6 @@ func TestBlackboardToolsReadDirectSources(t *testing.T) {
 // model which ids it deferred, after de-duplicating and dropping invalid ids.
 func TestGetWorkerTraceStepIDsDegradeGracefully(t *testing.T) {
 	d := testDB(t)
-	defer d.Close()
 
 	task, err := d.CreateTask("trace-cap", "goal", nil, 0, 0)
 	if err != nil {
@@ -394,7 +365,7 @@ func TestGetWorkerTraceStepIDsDegradeGracefully(t *testing.T) {
 		stepIDs = append(stepIDs, sid)
 	}
 
-	tools := NewToolSet(store, "worker")
+	tools := NewToolSet(nil, store, "worker")
 	tools.SetAssetStore(d.Assets(), d.Companies())
 
 	// Request 7 ids: a duplicate of the first, an invalid 0, then all 6 real ids.

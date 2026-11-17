@@ -131,6 +131,8 @@ func NewSSE(ctx context.Context, server, sseURL string, headers map[string]strin
 		hc.Transport = &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
 	}
 	streamCtx, cancel := context.WithCancel(context.Background())
+	stopStartupCancel := context.AfterFunc(ctx, cancel)
+	defer stopStartupCancel()
 	req, err := http.NewRequestWithContext(streamCtx, http.MethodGet, sseURL, nil)
 	if err != nil {
 		cancel()
@@ -175,6 +177,10 @@ func NewSSE(ctx context.Context, server, sseURL string, headers map[string]strin
 	if err := c.initialize(ctx); err != nil {
 		_ = c.Close()
 		return nil, err
+	}
+	if !stopStartupCancel() || ctx.Err() != nil {
+		_ = c.Close()
+		return nil, ctx.Err()
 	}
 	return c, nil
 }
@@ -374,7 +380,9 @@ func (c *Client) Close() error {
 	if sid == "" {
 		return nil
 	}
-	req, err := http.NewRequest(http.MethodDelete, c.url, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.url, nil)
 	if err != nil {
 		return nil
 	}

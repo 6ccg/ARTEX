@@ -15,7 +15,7 @@ import (
 // 平台操作工具(给内置 Auto agent 用):建/改 skill、自定义工具、MCP。都是 host 工具,
 // seed 进 tools 表、默认绑定 auto,经 hostTools 注入。复用现有 db/文件系统逻辑。
 
-func (s *Server) platformTools() []actool.CoreTool {
+func (s *Runtime) platformTools() []actool.CoreTool {
 	return []actool.CoreTool{
 		s.toolCreateSkill(),
 		s.toolUpdateSkillFile(),
@@ -39,7 +39,7 @@ var platformToolKeys = []string{
 
 // toolDeleteAssetsByHost hard-deletes every asset tied to one host (exact match).
 // Platform-level (not a per-task tool): operates on the global, cross-task asset库.
-func (s *Server) toolDeleteAssetsByHost() actool.CoreTool {
+func (s *Runtime) toolDeleteAssetsByHost() actool.CoreTool {
 	return wrTool("delete_assets_by_host",
 		"按 host 精确删除资产：删掉该 host 的域名/子域名，以及其下的服务(service)、接口(endpoint)。\n"+
 			"host 完全匹配(小写、去空格)，不是模糊/通配。\n"+
@@ -78,7 +78,7 @@ func (s *Server) toolDeleteAssetsByHost() actool.CoreTool {
 
 // ---- skills ----
 
-func (s *Server) toolCreateSkill() actool.CoreTool {
+func (s *Runtime) toolCreateSkill() actool.CoreTool {
 	return wrTool("create_skill",
 		"创建一个新 skill(写 SKILL.md，agentskills.io 规范)。name 小写字母/数字/连字符。",
 		objSchema(map[string]any{
@@ -120,7 +120,7 @@ func (s *Server) toolCreateSkill() actool.CoreTool {
 		})
 }
 
-func (s *Server) toolUpdateSkillFile() actool.CoreTool {
+func (s *Runtime) toolUpdateSkillFile() actool.CoreTool {
 	return wrTool("update_skill_file",
 		"写/覆盖某个 skill 内的一个文件(默认 SKILL.md)。用于修改技能内容或加脚本/引用。",
 		objSchema(map[string]any{
@@ -194,7 +194,7 @@ func toDBTool(a customToolToolInput) *db.Tool {
 	}
 }
 
-func (s *Server) toolCreateCustomTool() actool.CoreTool {
+func (s *Runtime) toolCreateCustomTool() actool.CoreTool {
 	return wrTool("create_custom_tool", "【重要】当安装一些平台没有的工具时，调用该工具将安装的工具放入平台中，让平台可以调用！创建一个自定义工具(shell/command/script/http)。shell=bash 环境声明，只需 key+description+agents，无需 exec/schema。",
 		customToolSchema("工具 key(小写字母开头，字母/数字/下划线)"),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
@@ -220,7 +220,7 @@ func (s *Server) toolCreateCustomTool() actool.CoreTool {
 		})
 }
 
-func (s *Server) toolUpdateCustomTool() actool.CoreTool {
+func (s *Runtime) toolUpdateCustomTool() actool.CoreTool {
 	return wrTool("update_custom_tool", "修改一个已有的自定义工具(按 key)。",
 		customToolSchema("要修改的自定义工具 key"),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
@@ -291,7 +291,7 @@ func (a mcpToolInput) toDB() *db.MCPServer {
 	}
 }
 
-func (s *Server) toolCreateMCP() actool.CoreTool {
+func (s *Runtime) toolCreateMCP() actool.CoreTool {
 	return wrTool("create_mcp", "创建一个 MCP 服务器(stdio/http/sse)。创建后其工具需按 agent 可见性授权。",
 		mcpSchema(false),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {
@@ -309,7 +309,7 @@ func (s *Server) toolCreateMCP() actool.CoreTool {
 		})
 }
 
-func (s *Server) toolUpdateMCP() actool.CoreTool {
+func (s *Runtime) toolUpdateMCP() actool.CoreTool {
 	return wrTool("update_mcp", "修改一个已有的 MCP 服务器(按 id)。",
 		mcpSchema(true),
 		func(_ context.Context, in json.RawMessage) (actool.Result, error) {

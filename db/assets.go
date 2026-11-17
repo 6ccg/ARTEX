@@ -281,8 +281,8 @@ func (s *AssetStore) UpsertRootDomain(req UpsertRootDomainReq) (int64, error) {
 
 	var id int64
 	err = s.tx.QueryRow(`
-INSERT INTO assets(type, domain, root_domain, icp, company_id, company_source, task_ids)
-VALUES ('root_domain', $1, $1, $2, $3, 'scope', $4::bigint[])
+WITH changed AS (INSERT INTO assets(type, domain, root_domain, icp, company_id, company_source)
+VALUES ('root_domain', $1, $1, $2, $3, 'scope')
 ON CONFLICT (domain) WHERE type = 'root_domain' DO UPDATE SET
     icp        = COALESCE(EXCLUDED.icp, assets.icp),
     company_id = CASE
@@ -294,10 +294,13 @@ ON CONFLICT (domain) WHERE type = 'root_domain' DO UPDATE SET
         WHEN EXCLUDED.company_id IS NOT NULL THEN 'scope'
         ELSE assets.company_source
     END,
-    task_ids   = (SELECT ARRAY(SELECT DISTINCT unnest(assets.task_ids || EXCLUDED.task_ids))),
     extra      = assets.extra || EXCLUDED.extra,
     last_seen  = now()
-RETURNING id`, domain, icpVal, companyID, taskIDs).Scan(&id)
+RETURNING id), linked AS (
+ INSERT INTO task_asset_links(task_id,asset_id,source_summary)
+ SELECT task.id,changed.id,'任务执行期间自动关联' FROM changed JOIN tasks task ON task.id=ANY($4::bigint[]) AND task.deleted_at IS NULL
+ ON CONFLICT(task_id,asset_id) DO NOTHING
+) SELECT id FROM changed`, domain, icpVal, companyID, taskIDs).Scan(&id)
 	return id, err
 }
 
@@ -373,8 +376,8 @@ func (s *AssetStore) UpsertIP(req UpsertIPReq) (int64, error) {
 
 	var id int64
 	err = s.tx.QueryRow(`
-INSERT INTO assets(type, ip, c_segment, bound_domains, open_ports, company_id, company_source, task_ids)
-VALUES ('ip', $1, $2::cidr, $3::text[], $4::jsonb[], $5, 'scope', $6::bigint[])
+WITH changed AS (INSERT INTO assets(type, ip, c_segment, bound_domains, open_ports, company_id, company_source)
+VALUES ('ip', $1, $2::cidr, $3::text[], $4::jsonb[], $5, 'scope')
 ON CONFLICT (ip) WHERE type = 'ip' DO UPDATE SET
     bound_domains = (SELECT ARRAY(SELECT DISTINCT unnest(assets.bound_domains || EXCLUDED.bound_domains))),
     open_ports    = (
@@ -395,9 +398,12 @@ ON CONFLICT (ip) WHERE type = 'ip' DO UPDATE SET
         WHEN EXCLUDED.company_id IS NOT NULL THEN 'scope'
         ELSE assets.company_source
     END,
-    task_ids   = (SELECT ARRAY(SELECT DISTINCT unnest(assets.task_ids || EXCLUDED.task_ids))),
     last_seen  = now()
-RETURNING id`, req.IP, csegVal, boundDomains, openPortsJSON, companyID, taskIDs).Scan(&id)
+RETURNING id), linked AS (
+ INSERT INTO task_asset_links(task_id,asset_id,source_summary)
+ SELECT task.id,changed.id,'任务执行期间自动关联' FROM changed JOIN tasks task ON task.id=ANY($6::bigint[]) AND task.deleted_at IS NULL
+ ON CONFLICT(task_id,asset_id) DO NOTHING
+) SELECT id FROM changed`, req.IP, csegVal, boundDomains, openPortsJSON, companyID, taskIDs).Scan(&id)
 	return id, err
 }
 
@@ -526,8 +532,8 @@ func (s *AssetStore) UpsertSubdomain(req UpsertSubdomainReq) (id int64, err erro
 	recordValueArr := marshalStringArray(req.RecordValue)
 
 	err = s.tx.QueryRow(`
-INSERT INTO assets(type, domain, root_domain, record_type, record_value, ip, c_segment, icp, company_id, company_source, task_ids)
-VALUES ('subdomain', $1, $2, $3, $4::text[], $5, $6::cidr, $7, $8, 'scope', $9::bigint[])
+WITH changed AS (INSERT INTO assets(type, domain, root_domain, record_type, record_value, ip, c_segment, icp, company_id, company_source)
+VALUES ('subdomain', $1, $2, $3, $4::text[], $5, $6::cidr, $7, $8, 'scope')
 ON CONFLICT (domain, COALESCE(record_type,'')) WHERE type = 'subdomain' DO UPDATE SET
     ip           = COALESCE(EXCLUDED.ip, assets.ip),
     c_segment    = COALESCE(EXCLUDED.c_segment, assets.c_segment),
@@ -541,11 +547,14 @@ ON CONFLICT (domain, COALESCE(record_type,'')) WHERE type = 'subdomain' DO UPDAT
         WHEN EXCLUDED.company_id IS NOT NULL THEN 'scope'
         ELSE assets.company_source
     END,
-    task_ids     = (SELECT ARRAY(SELECT DISTINCT unnest(assets.task_ids || EXCLUDED.task_ids))),
     record_value = (SELECT ARRAY(SELECT DISTINCT unnest(assets.record_value || EXCLUDED.record_value))),
     extra        = assets.extra || EXCLUDED.extra,
     last_seen    = now()
-RETURNING id`, domain, rootDomain, recordType, recordValueArr, ipVal, csegVal, icpVal, companyID, taskIDs).Scan(&id)
+RETURNING id), linked AS (
+ INSERT INTO task_asset_links(task_id,asset_id,source_summary)
+ SELECT task.id,changed.id,'任务执行期间自动关联' FROM changed JOIN tasks task ON task.id=ANY($9::bigint[]) AND task.deleted_at IS NULL
+ ON CONFLICT(task_id,asset_id) DO NOTHING
+) SELECT id FROM changed`, domain, rootDomain, recordType, recordValueArr, ipVal, csegVal, icpVal, companyID, taskIDs).Scan(&id)
 	return id, err
 }
 
@@ -614,8 +623,8 @@ func (s *AssetStore) UpsertApp(req UpsertAppReq) (int64, error) {
 
 	if req.BundleID != "" {
 		err = s.tx.QueryRow(`
-INSERT INTO assets(type, bundle_id, app_name, category, app_description, app_icp, company_id, company_source, task_ids)
-VALUES ('app', $1, $2, $3, $4, $5, $6, $7, $8::bigint[])
+WITH changed AS (INSERT INTO assets(type, bundle_id, app_name, category, app_description, app_icp, company_id, company_source)
+VALUES ('app', $1, $2, $3, $4, $5, $6, $7)
 ON CONFLICT (bundle_id) WHERE type = 'app' AND bundle_id IS NOT NULL DO UPDATE SET
     app_name        = COALESCE(EXCLUDED.app_name, assets.app_name),
     category        = COALESCE(EXCLUDED.category, assets.category),
@@ -632,13 +641,16 @@ ON CONFLICT (bundle_id) WHERE type = 'app' AND bundle_id IS NOT NULL DO UPDATE S
         WHEN EXCLUDED.company_id IS NOT NULL THEN 'scope'
         ELSE assets.company_source
     END,
-    task_ids        = (SELECT ARRAY(SELECT DISTINCT unnest(assets.task_ids || EXCLUDED.task_ids))),
     last_seen       = now()
-RETURNING id`, bundleVal, req.Name, catVal, descVal, icpVal, companyIDVal, companySource, taskIDs).Scan(&id)
+RETURNING id), linked AS (
+ INSERT INTO task_asset_links(task_id,asset_id,source_summary)
+ SELECT task.id,changed.id,'任务执行期间自动关联' FROM changed JOIN tasks task ON task.id=ANY($8::bigint[]) AND task.deleted_at IS NULL
+ ON CONFLICT(task_id,asset_id) DO NOTHING
+) SELECT id FROM changed`, bundleVal, req.Name, catVal, descVal, icpVal, companyIDVal, companySource, taskIDs).Scan(&id)
 	} else {
 		err = s.tx.QueryRow(`
-INSERT INTO assets(type, bundle_id, app_name, category, app_description, app_icp, company_id, company_source, task_ids)
-VALUES ('app', NULL, $1, $2, $3, $4, $5, $6, $7::bigint[])
+WITH changed AS (INSERT INTO assets(type, bundle_id, app_name, category, app_description, app_icp, company_id, company_source)
+VALUES ('app', NULL, $1, $2, $3, $4, $5, $6)
 ON CONFLICT (app_name) WHERE type = 'app' AND bundle_id IS NULL DO UPDATE SET
     category        = COALESCE(EXCLUDED.category, assets.category),
     app_description = COALESCE(EXCLUDED.app_description, assets.app_description),
@@ -654,9 +666,12 @@ ON CONFLICT (app_name) WHERE type = 'app' AND bundle_id IS NULL DO UPDATE SET
         WHEN EXCLUDED.company_id IS NOT NULL THEN 'scope'
         ELSE assets.company_source
     END,
-    task_ids        = (SELECT ARRAY(SELECT DISTINCT unnest(assets.task_ids || EXCLUDED.task_ids))),
     last_seen       = now()
-RETURNING id`, req.Name, catVal, descVal, icpVal, companyIDVal, companySource, taskIDs).Scan(&id)
+RETURNING id), linked AS (
+ INSERT INTO task_asset_links(task_id,asset_id,source_summary)
+ SELECT task.id,changed.id,'任务执行期间自动关联' FROM changed JOIN tasks task ON task.id=ANY($7::bigint[]) AND task.deleted_at IS NULL
+ ON CONFLICT(task_id,asset_id) DO NOTHING
+) SELECT id FROM changed`, req.Name, catVal, descVal, icpVal, companyIDVal, companySource, taskIDs).Scan(&id)
 	}
 	return id, err
 }
@@ -737,15 +752,15 @@ func (s *AssetStore) UpsertHTTPService(req UpsertHTTPServiceReq) (int64, error) 
 
 	var id int64
 	err = s.tx.QueryRow(`
-INSERT INTO assets(
+WITH changed AS (INSERT INTO assets(
     type, url, service_type, service_name, domain, ip, port, root_domain,
     c_segment, favicon_mmh3, technologies, status_code, content_length, page_title,
-    auth, company_id, company_source, task_ids
+    auth, company_id, company_source
 )
 VALUES (
     'service', $1, 'http', $2, $3, $4, $5, $6,
     $7::cidr, $8, $9::text[], $10, $11, $12,
-    $13::jsonb[], $14, 'scope', $15::bigint[]
+    $13::jsonb[], $14, 'scope'
 )
 ON CONFLICT (url) WHERE type = 'service' AND service_type = 'http' DO UPDATE SET
     status_code    = COALESCE(EXCLUDED.status_code,    assets.status_code),
@@ -761,7 +776,6 @@ ON CONFLICT (url) WHERE type = 'service' AND service_type = 'http' DO UPDATE SET
             FROM unnest(assets.auth || EXCLUDED.auth) AS elem
         )
     ),
-    task_ids       = (SELECT ARRAY(SELECT DISTINCT unnest(assets.task_ids || EXCLUDED.task_ids))),
     company_id     = CASE
         WHEN assets.company_source = 'explicit' AND assets.company_id IS NOT NULL THEN assets.company_id
         ELSE COALESCE(EXCLUDED.company_id, assets.company_id)
@@ -772,7 +786,11 @@ ON CONFLICT (url) WHERE type = 'service' AND service_type = 'http' DO UPDATE SET
         ELSE assets.company_source
     END,
     last_seen      = now()
-RETURNING id`,
+RETURNING id), linked AS (
+ INSERT INTO task_asset_links(task_id,asset_id,source_summary)
+ SELECT task.id,changed.id,'任务执行期间自动关联' FROM changed JOIN tasks task ON task.id=ANY($15::bigint[]) AND task.deleted_at IS NULL
+ ON CONFLICT(task_id,asset_id) DO NOTHING
+) SELECT id FROM changed`,
 		normURL, serviceName, domainVal, ipVal, nullableInt(port), rootDomain,
 		csegVal, faviconVal, techsArr, req.StatusCode, req.ContentLength, titleVal,
 		authJSON, companyID, taskIDs,
@@ -882,11 +900,11 @@ func (s *AssetStore) UpsertOtherService(req UpsertOtherServiceReq) (int64, error
 
 	var id int64
 	err = s.tx.QueryRow(`
-INSERT INTO assets(
+WITH changed AS (INSERT INTO assets(
     type, service_type, service_name, domain, ip, port, root_domain,
-    c_segment, auth, company_id, company_source, task_ids
+    c_segment, auth, company_id, company_source
 )
-VALUES ('service', 'other', $1, $2, $3, $4, $5, $6::cidr, $7::jsonb[], $8, 'scope', $9::bigint[])
+VALUES ('service', 'other', $1, $2, $3, $4, $5, $6::cidr, $7::jsonb[], $8, 'scope')
 ON CONFLICT (COALESCE(domain,''), COALESCE(ip,''), port, service_name) WHERE type = 'service' AND service_type = 'other' DO UPDATE SET
     domain     = COALESCE(EXCLUDED.domain,     assets.domain),
     ip         = COALESCE(EXCLUDED.ip,         assets.ip),
@@ -897,7 +915,6 @@ ON CONFLICT (COALESCE(domain,''), COALESCE(ip,''), port, service_name) WHERE typ
             FROM unnest(assets.auth || EXCLUDED.auth) AS elem
         )
     ),
-    task_ids   = (SELECT ARRAY(SELECT DISTINCT unnest(assets.task_ids || EXCLUDED.task_ids))),
     company_id = CASE
         WHEN assets.company_source = 'explicit' AND assets.company_id IS NOT NULL THEN assets.company_id
         ELSE COALESCE(EXCLUDED.company_id, assets.company_id)
@@ -908,7 +925,11 @@ ON CONFLICT (COALESCE(domain,''), COALESCE(ip,''), port, service_name) WHERE typ
         ELSE assets.company_source
     END,
     last_seen  = now()
-RETURNING id`,
+RETURNING id), linked AS (
+ INSERT INTO task_asset_links(task_id,asset_id,source_summary)
+ SELECT task.id,changed.id,'任务执行期间自动关联' FROM changed JOIN tasks task ON task.id=ANY($9::bigint[]) AND task.deleted_at IS NULL
+ ON CONFLICT(task_id,asset_id) DO NOTHING
+) SELECT id FROM changed`,
 		serviceName, domainVal, ipVal, req.Port, rootDomainVal,
 		csegVal, authJSON, companyID, taskIDs,
 	).Scan(&id)
@@ -1017,11 +1038,11 @@ func (s *AssetStore) UpsertEndpoint(req UpsertEndpointReq) (int64, error) {
 
 	var id int64
 	err = s.tx.QueryRow(`
-INSERT INTO assets(
+WITH changed AS (INSERT INTO assets(
     type, url, method, domain, ip, port, root_domain,
-    params, company_id, company_source, task_ids, c_segment
+    params, company_id, company_source, c_segment
 )
-VALUES ('endpoint', $1, $2, $3, $4, $5, $6, $7::jsonb[], $8, 'scope', $9::bigint[], $10::cidr)
+VALUES ('endpoint', $1, $2, $3, $4, $5, $6, $7::jsonb[], $8, 'scope', $10::cidr)
 ON CONFLICT (url, method) WHERE type = 'endpoint' DO UPDATE SET
     params     = (
         SELECT ARRAY(
@@ -1032,7 +1053,6 @@ ON CONFLICT (url, method) WHERE type = 'endpoint' DO UPDATE SET
     ),
     ip         = COALESCE(EXCLUDED.ip,        assets.ip),
     c_segment  = COALESCE(EXCLUDED.c_segment, assets.c_segment),
-    task_ids   = (SELECT ARRAY(SELECT DISTINCT unnest(assets.task_ids || EXCLUDED.task_ids))),
     company_id = CASE
         WHEN assets.company_source = 'explicit' AND assets.company_id IS NOT NULL THEN assets.company_id
         ELSE COALESCE(EXCLUDED.company_id, assets.company_id)
@@ -1043,7 +1063,11 @@ ON CONFLICT (url, method) WHERE type = 'endpoint' DO UPDATE SET
         ELSE assets.company_source
     END,
     last_seen  = now()
-RETURNING id`,
+RETURNING id), linked AS (
+ INSERT INTO task_asset_links(task_id,asset_id,source_summary)
+ SELECT task.id,changed.id,'任务执行期间自动关联' FROM changed JOIN tasks task ON task.id=ANY($9::bigint[]) AND task.deleted_at IS NULL
+ ON CONFLICT(task_id,asset_id) DO NOTHING
+) SELECT id FROM changed`,
 		normURL, method, domainVal, ipVal, nullableInt(port), rootDomainVal,
 		paramsJSON, companyID, taskIDs, csegVal,
 	).Scan(&id)
@@ -1072,7 +1096,7 @@ func (s *AssetStore) QueryByType(typ string, limit, offset int) ([]*Asset, error
 		offset = 0
 	}
 	rows, err := s.db.Query(`
-SELECT id, type, company_id, array_to_json(task_ids)::text,
+SELECT id, type, company_id, (SELECT COALESCE(json_agg(link.task_id ORDER BY link.task_id),'[]'::json)::text FROM task_asset_links link WHERE link.asset_id=assets.id),
        COALESCE(domain,''), COALESCE(root_domain,''), COALESCE(ip,''),
        COALESCE(c_segment::text,''), port,
        COALESCE(icp,''), array_to_json(bound_domains)::text, array_to_json(open_ports)::text, COALESCE(record_type,''),
@@ -1103,7 +1127,7 @@ func (s *AssetStore) CountByType(typ string) (int, error) {
 // QueryByCompany returns assets for a company, optionally filtered by type.
 // limit <= 0 means no limit.
 func (s *AssetStore) QueryByCompany(companyID int64, typ string, limit, offset int) ([]*Asset, error) {
-	q := `SELECT id, type, company_id, array_to_json(task_ids)::text,
+	q := `SELECT id, type, company_id, (SELECT COALESCE(json_agg(link.task_id ORDER BY link.task_id),'[]'::json)::text FROM task_asset_links link WHERE link.asset_id=assets.id),
        COALESCE(domain,''), COALESCE(root_domain,''), COALESCE(ip,''),
        COALESCE(c_segment::text,''), port,
        COALESCE(icp,''), array_to_json(bound_domains)::text, array_to_json(open_ports)::text, COALESCE(record_type,''),
@@ -1153,9 +1177,9 @@ func pageClause(args *[]any, limit, offset int) string {
 	return q
 }
 
-// QueryByTask returns assets rows that have a given task_id in task_ids.
+// QueryByTask returns assets linked to the given task.
 func (s *AssetStore) QueryByTask(taskID int64, typ string, limit, offset int) ([]*Asset, error) {
-	q := `SELECT id, type, company_id, array_to_json(task_ids)::text,
+	q := `SELECT id, type, company_id, (SELECT COALESCE(json_agg(link.task_id ORDER BY link.task_id),'[]'::json)::text FROM task_asset_links link WHERE link.asset_id=assets.id),
        COALESCE(domain,''), COALESCE(root_domain,''), COALESCE(ip,''),
        COALESCE(c_segment::text,''), port,
        COALESCE(icp,''), array_to_json(bound_domains)::text, array_to_json(open_ports)::text, COALESCE(record_type,''),
@@ -1165,7 +1189,7 @@ func (s *AssetStore) QueryByTask(taskID int64, typ string, limit, offset int) ([
        COALESCE(favicon_mmh3,''), status_code, content_length,
        COALESCE(page_title,''), array_to_json(technologies)::text, array_to_json(auth)::text,
        COALESCE(method,''), array_to_json(params)::text, extra, last_seen::text
-FROM assets WHERE $1 = ANY(task_ids)`
+FROM assets WHERE EXISTS (SELECT 1 FROM task_asset_links membership WHERE membership.asset_id=assets.id AND membership.task_id=$1)`
 	args := []any{taskID}
 	if typ != "" {
 		args = append(args, typ)
@@ -1188,7 +1212,7 @@ FROM assets WHERE $1 = ANY(task_ids)`
 }
 
 func (s *AssetStore) CountByTask(taskID int64, typ string) (int, error) {
-	q := `SELECT count(*) FROM assets WHERE $1 = ANY(task_ids)`
+	q := `SELECT count(*) FROM assets WHERE EXISTS (SELECT 1 FROM task_asset_links membership WHERE membership.asset_id=assets.id AND membership.task_id=$1)`
 	args := []any{taskID}
 	if typ != "" {
 		args = append(args, typ)
@@ -1200,7 +1224,7 @@ func (s *AssetStore) CountByTask(taskID int64, typ string) (int, error) {
 }
 
 func (s *AssetStore) CountsByTypeForTask(taskID int64) (map[string]int, error) {
-	rows, err := s.db.Query(`SELECT type, COUNT(*) FROM assets WHERE $1 = ANY(task_ids) GROUP BY type`, taskID)
+	rows, err := s.db.Query(`SELECT type, COUNT(*) FROM assets WHERE EXISTS (SELECT 1 FROM task_asset_links membership WHERE membership.asset_id=assets.id AND membership.task_id=$1) GROUP BY type`, taskID)
 	if err != nil {
 		return nil, err
 	}
@@ -1213,15 +1237,26 @@ func (s *AssetStore) CountsByTypeForTask(taskID int64) (map[string]int, error) {
 // transaction in DeleteTaskCascadePrepared; this method remains for callers
 // that explicitly manage only asset associations.
 func (s *AssetStore) DeleteByTaskID(taskID int64) (int64, error) {
-	res, err := s.db.Exec(`DELETE FROM assets WHERE task_ids = ARRAY[$1]::bigint[]`, taskID)
+	tx, err := s.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback() //nolint:errcheck
+	if _, err := tx.Exec(`LOCK TABLE assets, task_asset_links IN SHARE ROW EXCLUSIVE MODE`); err != nil {
+		return 0, err
+	}
+	res, err := tx.Exec(`DELETE FROM assets WHERE id IN (
+ SELECT own.asset_id FROM task_asset_links own WHERE own.task_id=$1
+ AND NOT EXISTS (SELECT 1 FROM task_asset_links other WHERE other.asset_id=own.asset_id AND other.task_id<>$1)
+)`, taskID)
 	if err != nil {
 		return 0, err
 	}
 	deleted, _ := res.RowsAffected()
-	if _, err := s.db.Exec(`UPDATE assets SET task_ids = array_remove(task_ids, $1) WHERE $1 = ANY(task_ids)`, taskID); err != nil {
+	if _, err := tx.Exec(`DELETE FROM task_asset_links WHERE task_id=$1`, taskID); err != nil {
 		return deleted, err
 	}
-	return deleted, nil
+	return deleted, tx.Commit()
 }
 
 // HostsByTask returns the exact HTTP host candidates attached to a task's
@@ -1230,7 +1265,7 @@ func (s *AssetStore) DeleteByTaskID(taskID int64) (int64, error) {
 func (s *AssetStore) HostsByTask(taskID int64) ([]string, error) {
 	rows, err := s.db.Query(`
 SELECT COALESCE(domain,''), COALESCE(ip,''), COALESCE(url,'')
-FROM assets WHERE $1 = ANY(task_ids)`, taskID)
+FROM assets WHERE EXISTS (SELECT 1 FROM task_asset_links membership WHERE membership.asset_id=assets.id AND membership.task_id=$1)`, taskID)
 	if err != nil {
 		return nil, err
 	}
@@ -1267,7 +1302,7 @@ FROM assets WHERE $1 = ANY(task_ids)`, taskID)
 
 // HostsForTaskDeletion returns hosts that belong to the task being deleted and
 // are not referenced by any other live task. Current-task candidates include
-// both task_ids ownership and exploration anchors so legacy seeded assets (which
+// both task asset links and exploration anchors so graph-only assets (which
 // were anchor-only) are covered. Protection is host-wide: if another live task
 // references any asset for a candidate host, that host's global traffic remains.
 func (s *AssetStore) HostsForTaskDeletion(taskID, explorationID int64) ([]string, error) {
@@ -1285,7 +1320,7 @@ type rowsQuerier interface {
 func hostsForTaskDeletion(q rowsQuerier, taskID, explorationID int64) ([]string, error) {
 	rows, err := q.Query(`
 WITH current_assets AS (
-  SELECT id FROM assets WHERE $1 = ANY(task_ids)
+  SELECT id FROM assets WHERE EXISTS (SELECT 1 FROM task_asset_links membership WHERE membership.asset_id=assets.id AND membership.task_id=$1)
   UNION
   SELECT ea.asset_id
   FROM exploration_anchors ea
@@ -1297,7 +1332,7 @@ other_assets AS (
   FROM assets a
   WHERE EXISTS (
     SELECT 1 FROM tasks t
-    WHERE t.id<>$1 AND t.deleted_at IS NULL AND t.id=ANY(a.task_ids)
+    WHERE t.id<>$1 AND t.deleted_at IS NULL AND EXISTS (SELECT 1 FROM task_asset_links membership WHERE membership.asset_id=a.id AND membership.task_id=t.id)
   ) OR EXISTS (
     SELECT 1
     FROM exploration_anchors ea
@@ -1353,7 +1388,7 @@ FROM assets a JOIN other_assets o ON o.id=a.id`, taskID, explorationID)
 	return out, nil
 }
 
-const assetSelectCols = `SELECT id, type, company_id, array_to_json(task_ids)::text,
+const assetSelectCols = `SELECT id, type, company_id, (SELECT COALESCE(json_agg(link.task_id ORDER BY link.task_id),'[]'::json)::text FROM task_asset_links link WHERE link.asset_id=assets.id),
        COALESCE(domain,''), COALESCE(root_domain,''), COALESCE(ip,''),
        COALESCE(c_segment::text,''), port,
        COALESCE(icp,''), array_to_json(bound_domains)::text, array_to_json(open_ports)::text, COALESCE(record_type,''),

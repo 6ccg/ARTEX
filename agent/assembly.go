@@ -26,29 +26,19 @@ type DeferredInfo struct {
 	UnlockSkill     func(skillName string)
 }
 
-// ToolAugment, if set, returns the EXTRA tools an agent should see beyond its
-// built-in base set — the agent's visible skills (packed into one Skill meta-tool)
-// and visible MCP servers (expanded to mcp__server__tool). It also returns the
-// DeferredInfo describing how those MCP tools are deferred/gated. The server wires
-// it to the PG agent_visibility table. cleanup releases any spawned MCP clients.
-//
-// When nil, agents run with only their built-in tools — behavior is unchanged
-// until a user assigns a skill/MCP to the agent in the UI.
-var ToolAugment func(ctx context.Context, agentKey string) (extra []actool.CoreTool, def DeferredInfo, cleanup func())
-
 // AugmentTools returns base plus the agent's visible skill/MCP tools, the
 // DeferredInfo, and a cleanup func the caller must defer (closes MCP clients).
 // Built-in base tools are kept as-is — never filtered (内置工具留代码层，不做可见性过滤).
-func AugmentTools(ctx context.Context, agentKey string, base []actool.CoreTool) ([]actool.CoreTool, DeferredInfo, func()) {
+func (host *Host) AugmentTools(ctx context.Context, agentKey string, base []actool.CoreTool) ([]actool.CoreTool, DeferredInfo, func()) {
 	var (
 		def     DeferredInfo
 		cleanup = func() {}
 		out     = base
 	)
-	if ToolAugment != nil {
+	if host != nil && host.ToolAugment != nil {
 		var extra []actool.CoreTool
 		var cl func()
-		extra, def, cl = ToolAugment(ctx, agentKey)
+		extra, def, cl = host.ToolAugment(ctx, agentKey)
 		if cl != nil {
 			cleanup = cl
 		}
@@ -60,15 +50,15 @@ func AugmentTools(ctx context.Context, agentKey string, base []actool.CoreTool) 
 	// agent isn't bound to (or that are disabled) and swap in overridden
 	// descriptions/schemas + default injection. MCP/skill/host tools have no row
 	// and pass through untouched, so deferred/unlock wiring stays consistent.
-	if ToolResolve != nil {
-		out = ToolResolve(ctx, agentKey, out)
+	if host != nil && host.ToolResolve != nil {
+		out = host.ToolResolve(ctx, agentKey, out)
 	}
 	if agentKey == "reporter" && isFindingCaseReview(ctx) {
 		out = historicalFindingCaseTools(out)
 	}
-	out, def.FindingGuidance = findingWorkflowTools(agentKey, out)
+	out, def.FindingGuidance = host.findingWorkflowTools(agentKey, out)
 	out, def.CaseGuidance = findingCaseWorkflow(agentKey, out)
-	out, def.IntelligenceGuidance = intelligenceWorkflow(ctx, out)
+	out, def.IntelligenceGuidance = host.intelligenceWorkflow(ctx, out)
 	if agentKey == "reporter" && isFindingCaseReview(ctx) {
 		def.FindingGuidance = ""
 		def.CaseGuidance += historicalFindingReviewGuidance

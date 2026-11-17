@@ -20,13 +20,31 @@ import (
 	"github.com/Autumn-27/artex/traffic"
 )
 
-func trafficEvidenceServer(t *testing.T) (*Server, *db.RecordedFinding, func(string, string, string) *httptest.ResponseRecorder) {
-	t.Helper()
-	m, err := NewManager(t.TempDir(), "")
+func TestExportPreservesDistinctScreenshotsWithSameName(t *testing.T) {
+	dir := t.TempDir()
+	paths := []string{filepath.Join(dir, "a", "shot.png"), filepath.Join(dir, "b", "shot.png")}
+	for _, path := range paths {
+		if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("image"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	markdown := fmt.Sprintf("![one](%s)\n![two](%s)\n![repeat](%s)", filepath.ToSlash(paths[0]), filepath.ToSlash(paths[1]), filepath.ToSlash(paths[0]))
+	out, images, err := prepareFindingExportReport(markdown, 1, dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { m.Close() })
+	if len(images) != 2 || images[0].ArchivePath == images[1].ArchivePath || strings.Count(out, images[0].ArchivePath) != 2 || strings.Count(out, images[1].ArchivePath) != 1 {
+		t.Fatalf("images=%+v markdown=%s", images, out)
+	}
+}
+
+func trafficEvidenceServer(t *testing.T) (*Server, *db.RecordedFinding, func(string, string, string) *httptest.ResponseRecorder) {
+	t.Helper()
+	m := newTestManager(t)
+	var err error
 	m.traffic, err = traffic.Open(filepath.Join(m.dir, "traffic"), ":0")
 	if err != nil {
 		t.Fatal(err)
@@ -37,26 +55,8 @@ func trafficEvidenceServer(t *testing.T) (*Server, *db.RecordedFinding, func(str
 	}
 	tid, _ := strconv.ParseInt(task.ID, 10, 64)
 	t.Cleanup(func() { m.pg.Exec(`DELETE FROM task_archives WHERE task_id=$1`, tid); m.pg.DeleteTask(tid) })
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	s := New(ctx, m, t.TempDir(), t.TempDir(), t.TempDir())
-	s.archiveWG.Wait()
-	// The archive test below replaces the cancelled service context. Wait for
-	// the side-question snapshot writer too before reusing this fixture.
-	<-s.side.done
-	token, err := signJWT(s.jwtKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	request := func(method, path, body string) *httptest.ResponseRecorder {
-		t.Helper()
-		r := httptest.NewRequest(method, path, strings.NewReader(body))
-		r.Header.Set("Authorization", "Bearer "+token)
-		r.Header.Set("Content-Type", "application/json")
-		w := httptest.NewRecorder()
-		s.Handler().ServeHTTP(w, r)
-		return w
-	}
+	s := newIdleAPIServer(t, m)
+	request := authenticatedRequest(t, s)
 	input := db.RecordFindingInput{TaskID: tid, ExplorationID: task.ExpID, Worker: "test", VulnClass: "TEST", Summary: "bound evidence", Name: "Evidence API", Severity: "low"}
 	f, err := s.evidenceStore().Record(context.Background(), input, nil)
 	if err != nil {
@@ -249,7 +249,6 @@ func TestFindingTrafficAPIAndExport(t *testing.T) {
 func TestFindingTrafficArchiveV3RoundTripAndRetry(t *testing.T) {
 	s, f, _ := trafficEvidenceServer(t)
 	ctx := context.Background()
-	s.ctx = ctx
 	body := []byte("evidence without original traffic\x00\xff")
 	seedServerEvidenceFlow(t, s, "original", body)
 	list, err := s.evidenceStore().Bind(ctx, f.FindingID, []db.TrafficRef{{TrafficID: "original", Role: "proof", Note: "keep note"}})

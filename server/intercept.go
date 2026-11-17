@@ -28,7 +28,7 @@ const judgeWorkerLane = "judge"
 
 // chatGuard returns a guard wired with the manager's interceptor, used for chat
 // conversations. Called once per applyLLM so a new LLM config always gets a fresh guard.
-func (s *Server) chatGuard() *guard.Guard {
+func (s *Runtime) chatGuard() *guard.Guard {
 	return guard.NewWithInterceptor(s.m.interceptor)
 }
 
@@ -36,7 +36,7 @@ func (s *Server) chatGuard() *guard.Guard {
 // judge runs only on tool calls that matched no rule (see intercept.Judge). It
 // resolves the configured judge profile (0 → active/default), builds a provider,
 // runs a one-shot JSON classification with an explanation for every verdict.
-func (s *Server) wireInterceptReviewer() {
+func (s *Runtime) wireInterceptReviewer() {
 	s.m.interceptor.SetReviewer(func(ctx context.Context, profileID int64, prompt string, input intercept.ReviewInput) (intercept.Decision, error) {
 		if profileID == 0 {
 			if p, err := s.m.pg.ActiveProfile(); err == nil && p != nil {
@@ -81,7 +81,7 @@ func (s *Server) wireInterceptReviewer() {
 	})
 }
 
-func (s *Server) recordJevJudgeUsage(ctx context.Context, profile *db.LLMProfile, usage jev.Usage, started time.Time, callErr error) {
+func (s *Runtime) recordJevJudgeUsage(ctx context.Context, profile *db.LLMProfile, usage jev.Usage, started time.Time, callErr error) {
 	if s == nil || s.m == nil || s.m.PG() == nil || profile == nil {
 		return
 	}

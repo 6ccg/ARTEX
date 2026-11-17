@@ -17,14 +17,15 @@ func TestTaskMetadataPatchReturnsRenameAndPin(t *testing.T) {
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) — skipping", err)
 	}
-	defer m.Close()
+	t.Cleanup(func() { _ = m.Close() })
 	task, err := m.CreateTask("metadata patch", "goal", nil, 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	taskID, _ := strconv.ParseInt(task.ID, 10, 64)
 	defer func() { _ = m.pg.DeleteTask(taskID) }()
-	s := New(context.Background(), m, t.TempDir(), t.TempDir(), t.TempDir())
+	s := newStartedServer(t, context.Background(), m, t.TempDir(), t.TempDir(), t.TempDir())
+	defer s.Close()
 	token, err := signJWT(s.jwtKey)
 	if err != nil {
 		t.Fatal(err)
@@ -65,7 +66,7 @@ func TestTaskMetadataPatchGlobalAssetSharing(t *testing.T) {
 	if err != nil {
 		t.Skipf("postgres unavailable: %v", err)
 	}
-	defer m.Close()
+	t.Cleanup(func() { _ = m.Close() })
 	task, err := m.CreateTask("sharing patch", "goal", nil, 0, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -73,7 +74,8 @@ func TestTaskMetadataPatchGlobalAssetSharing(t *testing.T) {
 	id, _ := strconv.ParseInt(task.ID, 10, 64)
 	defer m.pg.DeleteTask(id)
 	ctx, cancel := context.WithCancel(context.Background())
-	s := New(ctx, m, t.TempDir(), t.TempDir(), t.TempDir())
+	s := newStartedServer(t, ctx, m, t.TempDir(), t.TempDir(), t.TempDir())
+	defer s.Close()
 	defer func() { cancel(); s.Close() }()
 	token, err := signJWT(s.jwtKey)
 	if err != nil {
@@ -113,8 +115,9 @@ func TestConversationBatchDeleteReportsMissing(t *testing.T) {
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) — skipping", err)
 	}
-	defer m.Close()
-	s := New(context.Background(), m, t.TempDir(), t.TempDir(), t.TempDir())
+	t.Cleanup(func() { _ = m.Close() })
+	s := newStartedServer(t, context.Background(), m, t.TempDir(), t.TempDir(), t.TempDir())
+	defer s.Close()
 	first, err := m.pg.CreateConversation("mainagent", "batch-http-first", nil)
 	if err != nil {
 		t.Fatal(err)

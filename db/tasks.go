@@ -30,8 +30,8 @@ type Task struct {
 	QueuedAt      *time.Time `json:"queued_at,omitempty"`
 	QueueMode     string     `json:"queue_mode,omitempty"`
 	LLMProfileID  *int64     `json:"llm_profile_id,omitempty"`
-	// Task-level ordered LLM chain. LLMProfileID remains the compatibility alias
-	// for ActiveLLMProfileID while older API clients still send one profile id.
+	// Task-level ordered LLM chain. LLMProfileID is the API projection of the
+	// active cursor; only ActiveLLMProfileID is stored on the task row.
 	LLMProfileIDs      []int64    `json:"llm_profile_ids,omitempty"`
 	ActiveLLMProfileID *int64     `json:"active_llm_profile_id,omitempty"`
 	LLMChainRevision   int64      `json:"-"`
@@ -288,8 +288,8 @@ VALUES ($1, 'fact', $2, 0, 'origin', 'system')`, expID, string(originPayload)); 
 		CoverageEnabled: coverageEnabled, ShareGlobalAssets: opts.ShareGlobalAssets, WorkerCount: opts.WorkerCount, Remark: opts.Remark,
 	}
 	if err := tx.QueryRow(`
-INSERT INTO tasks(name, remark, category_id, description, goal, exploration_id, llm_profile_id, active_llm_profile_id, timeout_seconds, plan_heartbeat_seconds, coverage_enabled, worker_count, share_global_assets, no_result_seconds, no_result_min_findings, no_result_min_severity)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$7,$8,$9,$10,$11,$12,$13,$14,$15)
+INSERT INTO tasks(name, remark, category_id, description, goal, exploration_id, active_llm_profile_id, timeout_seconds, plan_heartbeat_seconds, coverage_enabled, worker_count, share_global_assets, no_result_seconds, no_result_min_findings, no_result_min_severity)
+VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
 RETURNING id, status, paused, created_at`, opts.Name, opts.Remark, opts.CategoryID, description, goal, expID, active, opts.TimeoutSeconds, opts.PlanHeartbeatSeconds, coverageEnabled, opts.WorkerCount, opts.ShareGlobalAssets, opts.NoResultSeconds, opts.NoResultMinFindings, opts.NoResultMinSeverity).Scan(&t.ID, &t.Status, &t.Paused, &t.CreatedAt); err != nil {
 		return nil, err
 	}
@@ -360,25 +360,12 @@ SELECT count(*) FROM inserted`, taskID, companyIDs).Scan(&inserted)
 		return fmt.Errorf("%w: one or more companies do not exist", ErrTaskCompanyNotFound)
 	}
 
-	// Updating task_ids fires sync_task_asset_links, which first creates generic
-	// source rows. The provenance upsert must therefore run afterwards so the
-	// company name and creation-time reason remain visible to operators.
-	if _, err := tx.Exec(`
-UPDATE assets
-SET task_ids=CASE
-    WHEN $1=ANY(task_ids) THEN task_ids
-    ELSE array_append(task_ids, $1)
-END
-WHERE company_id=ANY($2::bigint[])`, taskID, companyIDs); err != nil {
-		return err
-	}
 	if _, err := tx.Exec(`
 INSERT INTO task_asset_links(task_id, asset_id, source, source_summary)
 SELECT $1, asset.id, $3, '任务创建时关联企业：' || company.name
 FROM assets asset
 JOIN companies company ON company.id=asset.company_id
 WHERE asset.company_id=ANY($2::bigint[])
-  AND $1=ANY(asset.task_ids)
 ON CONFLICT (task_id, asset_id) DO UPDATE
 SET source=EXCLUDED.source,
     source_summary=EXCLUDED.source_summary,
@@ -427,13 +414,14 @@ func insertTaskLLMProfiles(tx *sql.Tx, taskID int64, profileIDs []int64) error {
 
 const taskCols = `id, COALESCE(name,''), remark, category_id,
 COALESCE((SELECT category.name FROM task_categories category WHERE category.id=tasks.category_id),''),
-description, goal, exploration_id, status, paused, COALESCE(pause_reason,''), queued, queued_at, COALESCE(queue_mode,''), llm_profile_id, active_llm_profile_id, COALESCE(parent_ref,''), pinned_at, created_at, completed_at, COALESCE(timeout_seconds,0), COALESCE(plan_heartbeat_seconds,300), COALESCE(coverage_enabled,true), share_global_assets, COALESCE(worker_count,0), first_run_at, deadline_at, COALESCE(active_run_seconds,0), run_segment_started_at, no_result_seconds, no_result_min_findings, no_result_min_severity, no_result_base_seconds, no_result_checked_at, stop_reason`
+description, goal, exploration_id, status, paused, COALESCE(pause_reason,''), queued, queued_at, COALESCE(queue_mode,''), active_llm_profile_id, COALESCE(parent_ref,''), pinned_at, created_at, completed_at, COALESCE(timeout_seconds,0), COALESCE(plan_heartbeat_seconds,300), COALESCE(coverage_enabled,true), share_global_assets, COALESCE(worker_count,0), first_run_at, deadline_at, COALESCE(active_run_seconds,0), run_segment_started_at, no_result_seconds, no_result_min_findings, no_result_min_severity, no_result_base_seconds, no_result_checked_at, stop_reason`
 
 func scanTask(sc interface{ Scan(...any) error }) (*Task, error) {
 	var t Task
-	if err := sc.Scan(&t.ID, &t.Name, &t.Remark, &t.CategoryID, &t.CategoryName, &t.Description, &t.Goal, &t.ExplorationID, &t.Status, &t.Paused, &t.PauseReason, &t.Queued, &t.QueuedAt, &t.QueueMode, &t.LLMProfileID, &t.ActiveLLMProfileID, &t.ParentRef, &t.PinnedAt, &t.CreatedAt, &t.CompletedAt, &t.TimeoutSeconds, &t.PlanHeartbeatSeconds, &t.CoverageEnabled, &t.ShareGlobalAssets, &t.WorkerCount, &t.FirstRunAt, &t.DeadlineAt, &t.ActiveRunSeconds, &t.RunSegmentStartedAt, &t.NoResultSeconds, &t.NoResultMinFindings, &t.NoResultMinSeverity, &t.NoResultBaseSeconds, &t.NoResultCheckedAt, &t.StopReason); err != nil {
+	if err := sc.Scan(&t.ID, &t.Name, &t.Remark, &t.CategoryID, &t.CategoryName, &t.Description, &t.Goal, &t.ExplorationID, &t.Status, &t.Paused, &t.PauseReason, &t.Queued, &t.QueuedAt, &t.QueueMode, &t.ActiveLLMProfileID, &t.ParentRef, &t.PinnedAt, &t.CreatedAt, &t.CompletedAt, &t.TimeoutSeconds, &t.PlanHeartbeatSeconds, &t.CoverageEnabled, &t.ShareGlobalAssets, &t.WorkerCount, &t.FirstRunAt, &t.DeadlineAt, &t.ActiveRunSeconds, &t.RunSegmentStartedAt, &t.NoResultSeconds, &t.NoResultMinFindings, &t.NoResultMinSeverity, &t.NoResultBaseSeconds, &t.NoResultCheckedAt, &t.StopReason); err != nil {
 		return nil, err
 	}
+	t.LLMProfileID = t.ActiveLLMProfileID
 	t.Pinned = t.PinnedAt != nil
 	return &t, nil
 }
@@ -760,7 +748,9 @@ func (d *DB) DeleteTaskCascadePrepared(
 	}
 	defer tx.Rollback()
 	var expID int64
-	if err := tx.QueryRow(`SELECT exploration_id FROM tasks WHERE id=$1 FOR UPDATE`, id).Scan(&expID); err != nil {
+	// Allow in-flight FK checks to finish before the ownership table locks below.
+	// FOR UPDATE would block their KEY SHARE locks while waiting for their writes.
+	if err := tx.QueryRow(`SELECT exploration_id FROM tasks WHERE id=$1 FOR NO KEY UPDATE`, id).Scan(&expID); err != nil {
 		if err == sql.ErrNoRows {
 			return result, nil // already gone
 		}
@@ -768,11 +758,11 @@ func (d *DB) DeleteTaskCascadePrepared(
 	}
 
 	// SHARE ROW EXCLUSIVE conflicts with every INSERT/UPDATE/DELETE on these
-	// tables and with another coordinated deletion. Taking both in one fixed order
+	// tables and with another coordinated deletion. Taking them in one fixed order
 	// prevents phantoms (a distinct asset row for the same host) as well as new
 	// ownership/anchor references until the deletion transaction commits.
 	if deleteAssets || prepare != nil {
-		if _, err := tx.Exec(`LOCK TABLE assets, exploration_anchors IN SHARE ROW EXCLUSIVE MODE`); err != nil {
+		if _, err := tx.Exec(`LOCK TABLE assets, task_asset_links, exploration_anchors IN SHARE ROW EXCLUSIVE MODE`); err != nil {
 			return result, err
 		}
 	}
@@ -789,13 +779,13 @@ func (d *DB) DeleteTaskCascadePrepared(
 		}
 	}
 	if deleteAssets {
-		// Ownership is the union of explicit task_ids and this exploration's anchors.
+		// Ownership is the union of task asset links and this exploration's anchors.
 		// An asset is deletable only when no other live task references it through
 		// either mechanism. This covers legacy anchor-only seeds without destroying
 		// evidence anchored by another task.
 		res, err := tx.Exec(`
 WITH candidate_assets AS (
-  SELECT id FROM assets WHERE $1 = ANY(task_ids)
+  SELECT id FROM assets WHERE EXISTS (SELECT 1 FROM task_asset_links membership WHERE membership.asset_id=assets.id AND membership.task_id=$1)
   UNION
   SELECT ea.asset_id
   FROM exploration_anchors ea
@@ -808,7 +798,7 @@ deletable AS (
   JOIN candidate_assets c ON c.id=a.id
   WHERE NOT EXISTS (
     SELECT 1 FROM tasks t
-    WHERE t.id<>$1 AND t.deleted_at IS NULL AND t.id=ANY(a.task_ids)
+    WHERE t.id<>$1 AND t.deleted_at IS NULL AND EXISTS (SELECT 1 FROM task_asset_links membership WHERE membership.asset_id=a.id AND membership.task_id=t.id)
   ) AND NOT EXISTS (
     SELECT 1
     FROM exploration_anchors ea
@@ -823,7 +813,7 @@ DELETE FROM assets a USING deletable d WHERE a.id=d.id`, id, expID)
 		}
 		result.AssetsDeleted, _ = res.RowsAffected()
 
-		res, err = tx.Exec(`UPDATE assets SET task_ids = array_remove(task_ids, $1) WHERE $1 = ANY(task_ids)`, id)
+		res, err = tx.Exec(`DELETE FROM task_asset_links WHERE task_id=$1`, id)
 		if err != nil {
 			return result, err
 		}

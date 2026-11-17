@@ -55,7 +55,7 @@ func TestInterceptFilterHTTP(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = d.Close() })
 	m := &Manager{pg: d, interceptor: intercept.New(d)}
-	s := &Server{m: m, jwtKey: []byte("approval-filter-test-key")}
+	s := &Server{Runtime: &Runtime{m: m}, jwtKey: []byte("approval-filter-test-key")}
 	h := s.Handler()
 	token, err := signJWT(s.jwtKey)
 	if err != nil {

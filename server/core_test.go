@@ -22,9 +22,14 @@ func TestCoreTaskLifecyclePG(t *testing.T) {
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) — skipping", err)
 	}
-	defer m.Close()
+	t.Cleanup(func() { _ = m.Close() })
+	defer restoreConcurrencySetting(t, m)()
+	if err := m.SetConcurrency(false, defaultConcurrencyLimit); err != nil {
+		t.Fatal(err)
+	}
 	td := t.TempDir()
-	s := New(context.Background(), m, td, td, td)
+	s := newStartedServer(t, context.Background(), m, td, td, td)
+	defer s.Close()
 	h := s.Handler()
 	tok, err := signJWT(s.jwtKey)
 	if err != nil {
@@ -128,9 +133,6 @@ func TestCoreTaskLifecyclePG(t *testing.T) {
 	nid, _ := strconv.ParseInt(id, 10, 64)
 	findingID, err := m.pg.AddFinding(nid, 0, "__core_task_delete__", "", db.SeverityHigh, "summary", "evidence", "tester", nil)
 	if err != nil {
-		t.Fatal(err)
-	}
-	if err := m.pg.EnsureLLMRecordsTable(); err != nil {
 		t.Fatal(err)
 	}
 	if err := m.pg.InsertLLMRecord(&db.LLMRecord{TaskID: id, SessionID: "delete-test", Status: "ok", RequestBody: "secret"}); err != nil {

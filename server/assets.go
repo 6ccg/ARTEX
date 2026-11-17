@@ -55,7 +55,7 @@ func (items *companyScopeInputs) UnmarshalJSON(data []byte) error {
 }
 
 // assetStore returns the asset store.
-func (s *Server) assetStore() *db.AssetStore {
+func (s *Runtime) assetStore() *db.AssetStore {
 	if s.m.pg == nil {
 		return nil
 	}
@@ -63,7 +63,7 @@ func (s *Server) assetStore() *db.AssetStore {
 }
 
 // companyStore returns the company store.
-func (s *Server) companyStore() *db.CompanyStore {
+func (s *Runtime) companyStore() *db.CompanyStore {
 	if s.m.pg == nil {
 		return nil
 	}

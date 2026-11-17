@@ -526,8 +526,7 @@ func rawRowCount(raw json.RawMessage) int64 {
 }
 
 func archiveAssetIDsQuery() string {
-	return `SELECT id FROM assets WHERE $1=ANY(task_ids)
-UNION SELECT link.asset_id FROM task_asset_links link WHERE link.task_id=$1
+	return `SELECT link.asset_id AS id FROM task_asset_links link WHERE link.task_id=$1
 UNION SELECT anchor.asset_id FROM exploration_anchors anchor
       JOIN exploration_nodes node ON node.id=anchor.node_id WHERE node.exploration_id=$2
 UNION SELECT value::bigint FROM findings finding
@@ -686,7 +685,7 @@ func archiveAssetMetadata(tx *sql.Tx, taskID, expID int64, assetRows json.RawMes
 	rowsID, err := tx.Query(`WITH candidate AS (`+archiveAssetIDsQuery()+`)
 SELECT asset.id FROM assets asset JOIN candidate ON candidate.id=asset.id
 WHERE asset.company_id IS NULL
-AND NOT EXISTS (SELECT 1 FROM tasks task WHERE task.id<>$1 AND task.deleted_at IS NULL AND task.id=ANY(asset.task_ids))
+AND NOT EXISTS (SELECT 1 FROM tasks task WHERE task.id<>$1 AND task.deleted_at IS NULL AND EXISTS (SELECT 1 FROM task_asset_links membership WHERE membership.asset_id=asset.id AND membership.task_id=task.id))
 AND NOT EXISTS (
  SELECT 1 FROM exploration_anchors anchor JOIN exploration_nodes node ON node.id=anchor.node_id
  JOIN tasks task ON task.exploration_id=node.exploration_id

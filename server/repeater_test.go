@@ -37,7 +37,7 @@ func repeaterTestSend(t *testing.T, s *Server, payload any) (int, repeaterSendRe
 
 func TestRepeaterRejectsInvalidInput(t *testing.T) {
 	t.Setenv(repeaterAllowLocalEnv, "")
-	s := &Server{}
+	s := &Server{Runtime: &Runtime{}}
 	for _, tc := range []struct {
 		name string
 		body string
@@ -76,7 +76,7 @@ func TestRepeaterBlockedIPs(t *testing.T) {
 		t.Fatal("loopback handler should not be reached")
 	}))
 	defer srv.Close()
-	code, _, body := repeaterTestSend(t, &Server{}, map[string]any{"url": srv.URL, "use_recording_proxy": false})
+	code, _, body := repeaterTestSend(t, &Server{Runtime: &Runtime{}}, map[string]any{"url": srv.URL, "use_recording_proxy": false})
 	if code != http.StatusBadRequest || !strings.Contains(body, "拒绝") {
 		t.Fatalf("loopback status=%d body=%s", code, body)
 	}
@@ -106,7 +106,7 @@ func TestRepeaterRejectsLegacyNumericHostsIncludingProxyPath(t *testing.T) {
 		t.Error("proxy received a blocked numeric target")
 	}))
 	defer proxy.Close()
-	s := &Server{m: &Manager{globalProxy: proxy.URL}}
+	s := &Server{Runtime: &Runtime{m: &Manager{globalProxy: proxy.URL}}}
 	code, _, body := repeaterTestSend(t, s, map[string]any{"url": "http://2130706433/"})
 	if code != http.StatusBadRequest || !strings.Contains(body, "拒绝") {
 		t.Fatalf("proxied legacy host status=%d body=%s", code, body)
@@ -124,7 +124,7 @@ func TestRepeaterBlockSensitiveDial(t *testing.T) {
 
 func TestRepeaterTransportBlocksSensitiveDial(t *testing.T) {
 	t.Setenv(repeaterAllowLocalEnv, "")
-	tr := (&Server{}).repeaterTransport(false, false).(*http.Transport)
+	tr := (&Server{Runtime: &Runtime{}}).repeaterTransport(false, false).(*http.Transport)
 	defer tr.CloseIdleConnections()
 	if tr.DialContext == nil {
 		t.Fatal("direct transport has no guarded DialContext")
@@ -153,7 +153,7 @@ func TestRepeaterDirectHTTP2(t *testing.T) {
 	srv.StartTLS()
 	defer srv.Close()
 
-	code, out, raw := repeaterTestSend(t, &Server{}, map[string]any{
+	code, out, raw := repeaterTestSend(t, &Server{Runtime: &Runtime{}}, map[string]any{
 		"url": srv.URL, "use_recording_proxy": false, "insecure_skip_verify": true,
 	})
 	if code != http.StatusOK || out.Error != "" || out.Status != http.StatusOK || out.Proto != "HTTP/2.0" || out.Body != "h2 response" {
@@ -182,7 +182,7 @@ func TestRepeaterTLSHandshakeUsesRequestTimeout(t *testing.T) {
 	srv.StartTLS()
 	defer srv.Close()
 
-	code, out, raw := repeaterTestSend(t, &Server{}, map[string]any{
+	code, out, raw := repeaterTestSend(t, &Server{Runtime: &Runtime{}}, map[string]any{
 		"url": srv.URL, "use_recording_proxy": false, "insecure_skip_verify": true, "timeout_ms": 1000,
 	})
 	if code != http.StatusOK || out.Error != "" || out.Status != http.StatusOK || out.Body != "handshake completed" {
@@ -211,7 +211,7 @@ func TestRepeaterClosesIdleConnections(t *testing.T) {
 			}
 			defer srv.Close()
 
-			s := &Server{}
+			s := &Server{Runtime: &Runtime{}}
 			payload := map[string]any{"url": srv.URL, "use_recording_proxy": false, "insecure_skip_verify": true}
 			if mode == "global proxy" || mode == "recording proxy fallback" {
 				s.m = &Manager{globalProxy: srv.URL}
@@ -247,7 +247,7 @@ func TestRepeaterRoundTripHeadersAndBody(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	code, out, body := repeaterTestSend(t, &Server{}, map[string]any{
+	code, out, body := repeaterTestSend(t, &Server{Runtime: &Runtime{}}, map[string]any{
 		"method": "POST", "url": srv.URL, "headers": map[string]string{
 			"X-Test": "yes", "Host": "custom.example", "Connection": "keep-alive",
 			"Keep-Alive": "timeout=5", "Transfer-Encoding": "chunked", "Content-Length": "99",
@@ -283,11 +283,11 @@ func TestRepeaterTruncatesAndHonoursHEAD(t *testing.T) {
 		_, _ = io.WriteString(w, large)
 	}))
 	defer srv.Close()
-	_, out, _ := repeaterTestSend(t, &Server{}, map[string]any{"url": srv.URL, "use_recording_proxy": false})
+	_, out, _ := repeaterTestSend(t, &Server{Runtime: &Runtime{}}, map[string]any{"url": srv.URL, "use_recording_proxy": false})
 	if !out.BodyTruncated || out.BodyBytes != repeaterMaxBody || len(out.Body) != repeaterMaxBody {
 		t.Fatalf("truncation=%+v", out)
 	}
-	_, head, _ := repeaterTestSend(t, &Server{}, map[string]any{"method": "HEAD", "url": srv.URL, "use_recording_proxy": false})
+	_, head, _ := repeaterTestSend(t, &Server{Runtime: &Runtime{}}, map[string]any{"method": "HEAD", "url": srv.URL, "use_recording_proxy": false})
 	if head.Body != "" || head.BodyBytes != 0 {
 		t.Fatalf("HEAD body=%q bytes=%d", head.Body, head.BodyBytes)
 	}
@@ -307,14 +307,14 @@ func TestRepeaterRejectsCrossHostRedirect(t *testing.T) {
 		http.Redirect(w, r, target.URL, http.StatusFound)
 	}))
 	defer redirect.Close()
-	_, out, _ := repeaterTestSend(t, &Server{}, map[string]any{"url": redirect.URL, "use_recording_proxy": false})
+	_, out, _ := repeaterTestSend(t, &Server{Runtime: &Runtime{}}, map[string]any{"url": redirect.URL, "use_recording_proxy": false})
 	if out.Status != 0 || !strings.Contains(out.Error, "跨主机") {
 		t.Fatalf("redirect response=%+v", out)
 	}
 }
 
 func TestRepeaterProxyTransportConstruction(t *testing.T) {
-	s := &Server{m: &Manager{}}
+	s := &Server{Runtime: &Runtime{m: &Manager{}}}
 	for _, scheme := range []string{"http", "https", "socks5", "socks5h"} {
 		tr := s.httpProxyTransport(httpExec{Proxy: scheme + "://user:pass@127.0.0.1:1080"})
 		if tr == nil || tr.Proxy == nil {
@@ -413,7 +413,7 @@ func TestRepeaterHonorsExplicitHTTPVersion(t *testing.T) {
 	defer srv.Close()
 	for _, version := range []string{"HTTP/1.1", "HTTP/2.0"} {
 		t.Run(version, func(t *testing.T) {
-			code, out, raw := repeaterTestSend(t, &Server{}, map[string]any{
+			code, out, raw := repeaterTestSend(t, &Server{Runtime: &Runtime{}}, map[string]any{
 				"method": "GET", "url": srv.URL, "http_version": version,
 				"insecure_skip_verify": true, "use_recording_proxy": false,
 			})
@@ -422,7 +422,7 @@ func TestRepeaterHonorsExplicitHTTPVersion(t *testing.T) {
 			}
 		})
 	}
-	code, _, _ := repeaterTestSend(t, &Server{}, map[string]any{"method": "GET", "url": srv.URL, "http_version": "HTTP/1.0"})
+	code, _, _ := repeaterTestSend(t, &Server{Runtime: &Runtime{}}, map[string]any{"method": "GET", "url": srv.URL, "http_version": "HTTP/1.0"})
 	if code != http.StatusBadRequest {
 		t.Fatalf("unsupported version status=%d", code)
 	}
@@ -435,7 +435,7 @@ func TestRepeaterExplicitHTTP2Cleartext(t *testing.T) {
 	srv.Config.Protocols.SetUnencryptedHTTP2(true)
 	srv.Start()
 	defer srv.Close()
-	code, out, raw := repeaterTestSend(t, &Server{}, map[string]any{"method": "GET", "url": srv.URL, "http_version": "HTTP/2.0", "use_recording_proxy": false})
+	code, out, raw := repeaterTestSend(t, &Server{Runtime: &Runtime{}}, map[string]any{"method": "GET", "url": srv.URL, "http_version": "HTTP/2.0", "use_recording_proxy": false})
 	if code != http.StatusOK || out.Error != "" || out.Body != "HTTP/2.0" {
 		t.Fatalf("status=%d response=%s", code, raw)
 	}

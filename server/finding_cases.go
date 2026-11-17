@@ -52,7 +52,7 @@ func decodeCaseRequest(w http.ResponseWriter, r *http.Request, a any) bool {
 	}
 	return true
 }
-func (s *Server) caseFindingDTO(f *db.DBFinding) FindingDTO {
+func (s *Runtime) caseFindingDTO(f *db.DBFinding) FindingDTO {
 	return findingFromDB(f, s.resolveAssetIDs(f.AssetIDs))
 }
 func (s *Server) listFindingCases(w http.ResponseWriter, r *http.Request) {
@@ -65,10 +65,19 @@ func (s *Server) listFindingCases(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	caseIDs := []int64{}
+	findingIDs := []int64{}
 	for _, row := range rows {
 		if row.Case != nil {
 			caseIDs = append(caseIDs, row.Case.ID)
 		}
+		if row.FindingID > 0 {
+			findingIDs = append(findingIDs, row.FindingID)
+		}
+	}
+	findings, err := s.m.pg.FindingCaseSummaries(findingIDs, q.Get("original_rows") == "1")
+	if err != nil {
+		caseHTTPError(w, err)
+		return
 	}
 	contexts, err := s.m.pg.FindingCaseListContexts(caseIDs)
 	if err != nil {
@@ -78,6 +87,9 @@ func (s *Server) listFindingCases(w http.ResponseWriter, r *http.Request) {
 	assetIDs := []int64{}
 	for _, c := range contexts {
 		assetIDs = append(assetIDs, c.AssetIDs...)
+	}
+	for _, finding := range findings {
+		assetIDs = append(assetIDs, finding.AssetIDs...)
 	}
 	assets := s.resolveAssetIDs(assetIDs)
 	items := []map[string]any{}
@@ -89,16 +101,12 @@ func (s *Server) listFindingCases(w http.ResponseWriter, r *http.Request) {
 			v["assets"] = append([]FindingAssetDTO{}, findingFromDB(&db.DBFinding{AssetIDs: c.AssetIDs}, assets).Assets...)
 		}
 		if row.FindingID > 0 {
-			f, err := s.m.pg.FindingCaseSummary(row.FindingID, q.Get("original_rows") == "1")
-			if err != nil {
-				caseHTTPError(w, err)
-				return
-			}
+			f := findings[row.FindingID]
 			if f == nil {
 				continue
 			}
 			f.Report = ""
-			v["finding"] = s.caseFindingDTO(f)
+			v["finding"] = findingFromDB(f, assets)
 		}
 		items = append(items, v)
 	}
@@ -259,7 +267,7 @@ func (s *Server) updateCaseReport(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]bool{"ok": true})
 }
 
-func (s *Server) findingCaseTools() []actool.CoreTool {
+func (s *Runtime) findingCaseTools() []actool.CoreTool {
 	props := map[string]any{"finding_id": idParam("独立 findings 记录 ID，不是探索节点 ID"), "finding_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}, "description": "独立漏洞记录 ID 列表"}, "task_id": idParam("同一来源任务 ID"), "case_id": idParam("归并组 ID"), "version": idParam("get_finding_case 实际读取的 version"), "page": idParam("分页，从1开始，每页20条"), "title": strParam("同一实际缺陷的名称"), "reason": strParam("具体证据与归并理由，不能仅类型相同"), "report": strParam("全部成员证据的完整统一 Markdown 报告"), "severity": strParam("critical|high|medium|low"), "severity_reason": strParam("基于已验证影响的评级依据，不直接取最高等级")}
 	specs := []struct {
 		name, desc string
@@ -304,7 +312,7 @@ func (s *Server) findingCaseTools() []actool.CoreTool {
 	out = append(out, s.toolCompleteFindingCaseReview())
 	return out
 }
-func (s *Server) performFindingCaseTool(ctx context.Context, name string, a findingCaseRequest) (any, error) {
+func (s *Runtime) performFindingCaseTool(ctx context.Context, name string, a findingCaseRequest) (any, error) {
 	if err := s.checkCaseReviewScope(ctx, name, a); err != nil {
 		return nil, err
 	}
@@ -385,7 +393,7 @@ func (s *Server) performFindingCaseTool(ctx context.Context, name string, a find
 func idParam(desc string) map[string]any {
 	return map[string]any{"type": "integer", "description": desc}
 }
-func (s *Server) seedFindingCaseTools() {
+func (s *Runtime) seedFindingCaseTools() {
 	_, _ = s.m.pg.Exec(`UPDATE finding_case_review_runs SET state='failed',error='服务重启中断，请重新提交整理' WHERE state IN ('queued','running')`)
 	a, err := s.m.pg.GetAgentByKey("reporter")
 	if err != nil || a == nil {
@@ -458,7 +466,7 @@ func (s *Server) reviewFindingCases(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	reporter, err := s.m.pg.GetAgentByKey("reporter")
-	if err != nil || reporter == nil || !reporter.Enabled || s.chatAgentRef() == nil {
+	if err != nil || reporter == nil || !reporter.Enabled || s.resolveChatAgent(&db.Conversation{AgentKey: "reporter"}) == nil {
 		writeErr(w, 409, "报告 Agent 未启用或模型不可用")
 		return
 	}
@@ -530,7 +538,7 @@ func (s *Server) caseReviewRuns(w http.ResponseWriter, r *http.Request) {
 }
 
 // Manual reviews cannot mutate a finding outside the explicit selection.
-func (s *Server) checkCaseReviewScope(ctx context.Context, name string, a findingCaseRequest) error {
+func (s *Runtime) checkCaseReviewScope(ctx context.Context, name string, a findingCaseRequest) error {
 	conv := intercept.ConvIDFromContext(ctx)
 	if conv == 0 {
 		return nil

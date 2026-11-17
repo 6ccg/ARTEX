@@ -10,16 +10,6 @@ import (
 	"github.com/Autumn-27/artex/agent"
 )
 
-func proxyTestManager(t *testing.T) *Manager {
-	t.Helper()
-	m, err := NewManager(t.TempDir(), "")
-	if err != nil {
-		t.Skipf("postgres unavailable (%v) - skipping", err)
-	}
-	t.Cleanup(func() { _ = m.Close() })
-	return m
-}
-
 func TestProxyFailureClassification(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -76,7 +66,7 @@ func TestProxyReconnectReasonGate(t *testing.T) {
 }
 
 func TestProxyAdmissionRechecksReasonAfterSnapshot(t *testing.T) {
-	m := proxyTestManager(t)
+	m := newTestManager(t)
 	task, err := m.CreateTask("proxy gate", "goal", nil, 0, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -102,7 +92,7 @@ func TestProxyAdmissionRechecksReasonAfterSnapshot(t *testing.T) {
 }
 
 func TestProxyQueuedAdmissionDoesNotResumeEngine(t *testing.T) {
-	m := proxyTestManager(t)
+	m := newTestManager(t)
 	if err := m.SetConcurrency(true, 1); err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +112,7 @@ func TestProxyQueuedAdmissionDoesNotResumeEngine(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := newAdmissionTestServer(m, nil)
-	s.engine.started.Store(holder.ID, true)
+	s.engine.taskRun(holder.ID).started.Store(true)
 	s.engine.Pause(proxyTask.ID, agent.AbortPausedByProxy)
 	queued, err := s.admitTaskWhenScheduledWithReason(proxyTask, "resume", true, false, "paused_by_proxy", true)
 	if err != nil {
@@ -137,7 +127,7 @@ func TestProxyQueuedAdmissionDoesNotResumeEngine(t *testing.T) {
 }
 
 func TestTerminalStatusClearsProxyReconnectState(t *testing.T) {
-	m := proxyTestManager(t)
+	m := newTestManager(t)
 	task, err := m.CreateTask("terminal proxy", "goal", nil, 0, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -167,7 +157,7 @@ func TestTerminalStatusClearsProxyReconnectState(t *testing.T) {
 }
 
 func TestProxyAdmissionPreservesCalendarOverride(t *testing.T) {
-	m := proxyTestManager(t)
+	m := newTestManager(t)
 	task, err := m.CreateTask("calendar proxy", "goal", nil, 0, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -195,14 +185,14 @@ func TestProxyAdmissionPreservesCalendarOverride(t *testing.T) {
 }
 
 func TestProxyReconnectSuccessKeepsCompetingUserPauseBarrier(t *testing.T) {
-	m := proxyTestManager(t)
+	m := newTestManager(t)
 	task, err := m.CreateTask("proxy success race", "goal", nil, 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _, _ = m.DeleteTask(task.ID, DeleteTaskOptions{}) }()
 	s := newAdmissionTestServer(m, nil)
-	m.SetTaskControlMutex(&s.concMu)
+
 	m.globalProxy = "http://proxy.invalid"
 	if _, err := m.ApplyProxyPauseWithCallback(task.ID, func() { s.engine.Pause(task.ID, agent.AbortPausedByProxy) }); err != nil {
 		t.Fatal(err)
@@ -225,14 +215,14 @@ func TestProxyReconnectSuccessKeepsCompetingUserPauseBarrier(t *testing.T) {
 }
 
 func TestProxyPauseBarrierInstalledBeforeControlUnlock(t *testing.T) {
-	m := proxyTestManager(t)
+	m := newTestManager(t)
 	task, err := m.CreateTask("proxy barrier", "goal", nil, 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _, _ = m.DeleteTask(task.ID, DeleteTaskOptions{}) }()
 	s := newAdmissionTestServer(m, nil)
-	m.SetTaskControlMutex(&s.concMu)
+
 	m.globalProxy = "http://proxy.invalid"
 
 	userDone := make(chan error, 1)
@@ -266,7 +256,7 @@ func TestProxyPauseBarrierInstalledBeforeControlUnlock(t *testing.T) {
 }
 
 func TestProxyPauseDoesNotReviveExhaustedOrNonProxyTasks(t *testing.T) {
-	m := proxyTestManager(t)
+	m := newTestManager(t)
 	exhausted, err := m.CreateTask("exhausted proxy", "goal", nil, 0, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -285,7 +275,7 @@ func TestProxyPauseDoesNotReviveExhaustedOrNonProxyTasks(t *testing.T) {
 		_, _ = m.DeleteTask(other.ID, DeleteTaskOptions{})
 	}()
 	s := newAdmissionTestServer(m, nil)
-	m.SetTaskControlMutex(&s.concMu)
+
 	m.globalProxy = "http://proxy.invalid"
 	if err := m.ApplyProxyPause(exhausted.ID); err != nil {
 		t.Fatal(err)
@@ -326,14 +316,14 @@ func TestProxyPauseDoesNotReviveExhaustedOrNonProxyTasks(t *testing.T) {
 }
 
 func TestProxyReconnectRoundResetsAfterManualResume(t *testing.T) {
-	m := proxyTestManager(t)
+	m := newTestManager(t)
 	task, err := m.CreateTask("proxy retry round", "goal", nil, 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _, _ = m.DeleteTask(task.ID, DeleteTaskOptions{}) }()
 	s := newAdmissionTestServer(m, nil)
-	m.SetTaskControlMutex(&s.concMu)
+
 	m.globalProxy = "http://proxy.invalid"
 	if err := m.ApplyProxyPause(task.ID); err != nil {
 		t.Fatal(err)
@@ -361,14 +351,14 @@ func TestProxyReconnectRoundResetsAfterManualResume(t *testing.T) {
 }
 
 func TestProxyReconnectDropsStaleProbeFailureAfterNewRound(t *testing.T) {
-	m := proxyTestManager(t)
+	m := newTestManager(t)
 	task, err := m.CreateTask("proxy stale probe", "goal", nil, 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _, _ = m.DeleteTask(task.ID, DeleteTaskOptions{}) }()
 	s := newAdmissionTestServer(m, nil)
-	m.SetTaskControlMutex(&s.concMu)
+
 	m.globalProxy = "http://proxy.invalid"
 	// Keep the canceled test server from starting its supervisor. The test owns
 	// the reconnect tick and injects a blocking probe below.
@@ -434,14 +424,14 @@ func TestProxyReconnectDropsStaleProbeFailureAfterNewRound(t *testing.T) {
 }
 
 func TestProxyReconnectManualSuccessDoesNotAdmitNewRound(t *testing.T) {
-	m := proxyTestManager(t)
+	m := newTestManager(t)
 	task, err := m.CreateTask("proxy stale manual success", "goal", nil, 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _, _ = m.DeleteTask(task.ID, DeleteTaskOptions{}) }()
 	s := newAdmissionTestServer(m, nil)
-	m.SetTaskControlMutex(&s.concMu)
+
 	m.globalProxy = "http://proxy.invalid"
 	if err := m.ApplyProxyPause(task.ID); err != nil {
 		t.Fatal(err)
@@ -465,14 +455,14 @@ func TestProxyReconnectManualSuccessDoesNotAdmitNewRound(t *testing.T) {
 }
 
 func TestProxyReconnectSettingsSuccessGuardsGenerationZero(t *testing.T) {
-	m := proxyTestManager(t)
+	m := newTestManager(t)
 	task, err := m.CreateTask("proxy generation zero", "goal", nil, 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer func() { _, _ = m.DeleteTask(task.ID, DeleteTaskOptions{}) }()
 	s := newAdmissionTestServer(m, nil)
-	m.SetTaskControlMutex(&s.concMu)
+
 	m.globalProxy = "http://proxy.invalid"
 	if err := m.ApplyProxyPause(task.ID); err != nil {
 		t.Fatal(err)

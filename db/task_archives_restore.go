@@ -44,7 +44,7 @@ func (d *DB) CompleteTaskArchive(
 	var state string
 	if err := tx.QueryRow(`SELECT archive.task_id,task.exploration_id,archive.state
 FROM task_archives archive JOIN tasks task ON task.id=archive.task_id
-WHERE archive.id=$1 FOR UPDATE OF archive,task`, archiveID).Scan(&taskID, &expID, &state); err != nil {
+WHERE archive.id=$1 FOR NO KEY UPDATE OF archive,task`, archiveID).Scan(&taskID, &expID, &state); err != nil {
 		return err
 	}
 	if state != Archiving || taskID != snapshot.TaskID || expID != snapshot.ExplorationID {
@@ -61,7 +61,7 @@ WHERE relation.source_task_id=$1 LIMIT 1`, taskID).Scan(&dependent)
 		return err
 	}
 	// Prevent task/asset ownership from changing while exclusivity is rechecked.
-	if _, err := tx.Exec(`LOCK TABLE assets, exploration_anchors IN SHARE ROW EXCLUSIVE MODE`); err != nil {
+	if _, err := tx.Exec(`LOCK TABLE assets, task_asset_links, exploration_anchors IN SHARE ROW EXCLUSIVE MODE`); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(`DELETE FROM intercept_pending WHERE COALESCE(task_id,'')=$1`, strconv.FormatInt(taskID, 10)); err != nil {
@@ -101,13 +101,10 @@ WHERE relation.source_task_id=$1 LIMIT 1`, taskID).Scan(&dependent)
 			return err
 		}
 	}
-	if _, err := tx.Exec(`UPDATE assets SET task_ids=array_remove(task_ids,$1) WHERE $1=ANY(task_ids)`, taskID); err != nil {
-		return err
-	}
 	if len(snapshot.ExclusiveAssetIDs) > 0 {
 		if _, err := tx.Exec(`DELETE FROM assets asset
 WHERE asset.id=ANY($2::bigint[]) AND asset.company_id IS NULL
-AND NOT EXISTS (SELECT 1 FROM tasks task WHERE task.id<>$1 AND task.deleted_at IS NULL AND task.id=ANY(asset.task_ids))
+AND NOT EXISTS (SELECT 1 FROM tasks task WHERE task.id<>$1 AND task.deleted_at IS NULL AND EXISTS (SELECT 1 FROM task_asset_links membership WHERE membership.asset_id=asset.id AND membership.task_id=task.id))
 AND NOT EXISTS (
  SELECT 1 FROM exploration_anchors anchor JOIN exploration_nodes node ON node.id=anchor.node_id
  JOIN tasks task ON task.exploration_id=node.exploration_id
@@ -121,7 +118,7 @@ AND NOT EXISTS (
 	}
 	if _, err := tx.Exec(`UPDATE tasks SET
  name='',remark='',category_id=NULL,description='',goal='',paused=true,queued=false,queued_at=NULL,queue_mode='',
- llm_profile_id=NULL,active_llm_profile_id=NULL,llm_chain_revision=llm_chain_revision+1,
+ active_llm_profile_id=NULL,llm_chain_revision=llm_chain_revision+1,
  company_id=NULL,parent_ref=NULL,timeout_seconds=0,coverage_enabled=true,share_global_assets=false,worker_count=0,pinned_at=NULL,
  no_result_seconds=0,no_result_min_findings=1,no_result_min_severity='',no_result_base_seconds=0,no_result_checked_at=NULL,stop_reason='',
  first_run_at=NULL,deadline_at=NULL,archived_at=now(),deleted_at=now()
@@ -320,7 +317,7 @@ func restoreTaskStub(tx *sql.Tx, row map[string]any, taskID, remaining int64) er
 	_, err = tx.Exec(`UPDATE tasks current SET
  name=archived.name,remark=COALESCE(archived.remark,''),category_id=archived.category_id,description=archived.description,goal=archived.goal,
  status=archived.status,paused=archived.paused,queued=false,queued_at=NULL,queue_mode='',
- llm_profile_id=archived.llm_profile_id,active_llm_profile_id=archived.active_llm_profile_id,
+ active_llm_profile_id=archived.active_llm_profile_id,
  llm_chain_revision=archived.llm_chain_revision,company_id=archived.company_id,parent_ref=archived.parent_ref,
  timeout_seconds=archived.timeout_seconds,plan_heartbeat_seconds=archived.plan_heartbeat_seconds,
  no_result_seconds=COALESCE(archived.no_result_seconds,0),
@@ -403,7 +400,11 @@ func insertArchiveRows(tx *sql.Tx, table string, raw json.RawMessage) error {
 	if rawRowCount(raw) == 0 {
 		return nil
 	}
-	_, err := tx.Exec(`INSERT INTO `+table+` SELECT * FROM json_populate_recordset(NULL::`+table+`,$1::json)`, string(raw))
+	conflict := ""
+	if table == "task_asset_links" {
+		conflict = " ON CONFLICT(task_id,asset_id) DO UPDATE SET source=EXCLUDED.source,source_summary=EXCLUDED.source_summary,source_node_id=EXCLUDED.source_node_id,created_at=EXCLUDED.created_at"
+	}
+	_, err := tx.Exec(`INSERT INTO `+table+` SELECT * FROM json_populate_recordset(NULL::`+table+`,$1::json)`+conflict, string(raw))
 	return err
 }
 
@@ -458,7 +459,7 @@ func restoreArchiveAssets(tx *sql.Tx, taskID int64, raw json.RawMessage) (map[in
 			return nil, nil, err
 		} else if found {
 			mapping[oldID] = existing
-			if _, err := tx.Exec(`UPDATE assets SET task_ids=CASE WHEN $1=ANY(task_ids) THEN task_ids ELSE array_append(task_ids,$1) END WHERE id=$2`, taskID, existing); err != nil {
+			if _, err := tx.Exec(`INSERT INTO task_asset_links(task_id,asset_id) VALUES($1,$2) ON CONFLICT DO NOTHING`, taskID, existing); err != nil {
 				return nil, nil, err
 			}
 			continue
@@ -471,7 +472,7 @@ func restoreArchiveAssets(tx *sql.Tx, taskID int64, raw json.RawMessage) (map[in
 			row["id"] = candidate
 			warnings = append(warnings, fmt.Sprintf("资产 ID %d 已被占用，恢复为 %d", oldID, candidate))
 		}
-		row["task_ids"] = mergeJSONTaskID(row["task_ids"], taskID)
+		delete(row, "task_ids")
 		assetRaw, _ := json.Marshal(row)
 		res, err := tx.Exec(`INSERT INTO assets SELECT * FROM json_populate_record(NULL::assets,$1::json) ON CONFLICT DO NOTHING`, string(assetRaw))
 		if err != nil {
@@ -484,30 +485,13 @@ func restoreArchiveAssets(tx *sql.Tx, taskID int64, raw json.RawMessage) (map[in
 				return nil, nil, errors.Join(findErr, fmt.Errorf("could not restore asset %d", oldID))
 			}
 			candidate = existing
-			if _, err := tx.Exec(`UPDATE assets SET task_ids=CASE WHEN $1=ANY(task_ids) THEN task_ids ELSE array_append(task_ids,$1) END WHERE id=$2`, taskID, existing); err != nil {
-				return nil, nil, err
-			}
+		}
+		if _, err := tx.Exec(`INSERT INTO task_asset_links(task_id,asset_id) VALUES($1,$2) ON CONFLICT DO NOTHING`, taskID, candidate); err != nil {
+			return nil, nil, err
 		}
 		mapping[oldID] = candidate
 	}
 	return mapping, warnings, nil
-}
-
-func mergeJSONTaskID(value any, taskID int64) []int64 {
-	out := []int64{}
-	seen := map[int64]bool{}
-	if values, ok := value.([]any); ok {
-		for _, item := range values {
-			if id, ok := jsonInt64(item); ok && id > 0 && !seen[id] {
-				seen[id] = true
-				out = append(out, id)
-			}
-		}
-	}
-	if !seen[taskID] {
-		out = append(out, taskID)
-	}
-	return out
 }
 
 func findArchiveAssetNaturalID(tx *sql.Tx, row map[string]any) (int64, bool, error) {

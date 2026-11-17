@@ -46,7 +46,7 @@ func connectMCP(ctx context.Context, m *db.MCPServer) (mcpClient, error) {
 
 // discoverAndCacheMCP connects to one MCP, lists its tools, and persists the tool
 // names to mcp_tools_cache so the UI shows them without a live connection.
-func (s *Server) discoverAndCacheMCP(ctx context.Context, m *db.MCPServer) error {
+func (s *Runtime) discoverAndCacheMCP(ctx context.Context, m *db.MCPServer) error {
 	cl, err := connectMCP(ctx, m)
 	if err != nil {
 		return err
@@ -71,7 +71,7 @@ func (s *Server) discoverAndCacheMCP(ctx context.Context, m *db.MCPServer) error
 // yet (notably the seeded browser MCP on first run). Runs sequentially in one
 // goroutine so we never spawn many stdio servers (npx) at once, and never blocks
 // startup. Best-effort: a failure leaves the cache empty to retry next start.
-func (s *Server) discoverEmptyMCPsOnStartup() {
+func (s *Runtime) discoverEmptyMCPsOnStartup() {
 	servers, err := s.m.pg.ListMCP()
 	if err != nil {
 		log.Printf("[mcp] 启动自动发现: 读取列表失败: %v", err)

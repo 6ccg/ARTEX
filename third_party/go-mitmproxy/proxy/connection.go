@@ -82,7 +82,7 @@ type ConnContext struct {
 	FlowCount  atomic.Uint32 `json:"-"`         // Number of HTTP requests made on the same connection
 
 	proxy              *Proxy
-	closeAfterResponse bool                        // after http response, http server will close the connection
+	closeAfterResponse atomic.Bool                 // after http response, http server will close the connection
 	dialFn             func(context.Context) error // when begin request, if there no ServerConn, use this func to dial
 }
 

@@ -452,15 +452,16 @@ func TestDeliveryStateTransitions(t *testing.T) {
 		t.Fatalf("重发失败: %v", err)
 	}
 	var attempts int
-	var next time.Time
-	if err := d.QueryRow(`SELECT state, attempts, next_attempt_at FROM notification_deliveries WHERE id=$1`, id).Scan(&state, &attempts, &next); err != nil {
+	if err := d.QueryRow(`SELECT state, attempts FROM notification_deliveries WHERE id=$1`, id).Scan(&state, &attempts); err != nil {
 		t.Fatal(err)
 	}
 	if state != NotifyStatePending || attempts != 0 {
 		t.Fatalf("重发后应为 pending 且 attempts=0，得到 state=%s attempts=%d", state, attempts)
 	}
-	if next.After(time.Now().Add(time.Second)) {
-		t.Fatal("重发应立即可领")
+	// 直接验证领取行为，避免数据库与测试进程的墙钟偏差影响断言。
+	retried, err := d.ClaimRealtimeDeliveries(ctx, ch.ID, 1, time.Minute)
+	if err != nil || len(retried) != 1 || retried[0].ID != id {
+		t.Fatalf("重发应立即可领: deliveries=%v err=%v", retried, err)
 	}
 
 	// 已送达的投递不应能被重发。

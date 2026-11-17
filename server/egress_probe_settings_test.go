@@ -29,14 +29,15 @@ func preserveEgressProbeSetting(t *testing.T, m *Manager) {
 }
 
 func TestEgressProbeSettingsPersistence(t *testing.T) {
-	m := proxyTestManager(t)
+	m := newTestManager(t)
 	preserveEgressProbeSetting(t, m)
 	if _, err := m.pg.Exec("DELETE FROM settings WHERE key=$1", settingEgressProbeURL); err != nil {
 		t.Fatal(err)
 	}
 	dir := t.TempDir()
 	ctx, cancel := context.WithCancel(context.Background())
-	s := New(ctx, m, dir, dir, dir)
+	s := newStartedServer(t, ctx, m, dir, dir, dir)
+	defer s.Close()
 	defer func() {
 		cancel()
 		s.Close()
@@ -91,7 +92,7 @@ func TestEgressProbeSettingsPersistence(t *testing.T) {
 		assertResponse(http.MethodGet, "", custom)
 	}
 	// A fresh manager must read the persisted value, without sharing runtime state.
-	reloaded := proxyTestManager(t)
+	reloaded := newTestManager(t)
 	if got := reloaded.egressProbes(); !reflect.DeepEqual(got, []string{custom}) {
 		t.Fatalf("reloaded probes=%v", got)
 	}
@@ -102,13 +103,13 @@ func TestEgressProbeSettingsPersistence(t *testing.T) {
 }
 
 func TestEgressProbeSavedAndTemporaryURLs(t *testing.T) {
-	m := proxyTestManager(t)
+	m := newTestManager(t)
 	preserveEgressProbeSetting(t, m)
 	const saved = "http://10.0.0.5/ip"
 	if err := m.pg.SetSetting(settingEgressProbeURL, saved); err != nil {
 		t.Fatal(err)
 	}
-	s := &Server{m: m}
+	s := &Server{Runtime: &Runtime{m: m}}
 	for _, tc := range []struct {
 		name string
 		body string
@@ -156,7 +157,7 @@ func TestEgressProbeSavedAndTemporaryURLs(t *testing.T) {
 }
 
 func TestProxyPoolHealthUsesSavedEgressProbe(t *testing.T) {
-	m := proxyTestManager(t)
+	m := newTestManager(t)
 	preserveEgressProbeSetting(t, m)
 	const custom = "http://10.0.0.5/ip"
 	if err := m.pg.SetSetting(settingEgressProbeURL, custom); err != nil {
@@ -166,7 +167,7 @@ func TestProxyPoolHealthUsesSavedEgressProbe(t *testing.T) {
 	m.proxyPool = &proxyPoolState{active: "a", entries: []proxyPoolEntry{{
 		ProxyPoolEntry: ProxyPoolEntry{ID: "a", Enabled: true}, RawURL: m.globalProxy,
 	}}}
-	s := &Server{m: m, ctx: context.Background(), proxyPoolProbeSem: make(chan struct{}, proxyPoolMaxProbeConcurrency)}
+	s := &Server{Runtime: &Runtime{m: m, ctx: context.Background(), proxyPoolProbeSem: make(chan struct{}, proxyPoolMaxProbeConcurrency)}}
 	calls := 0
 	s.proxyProbe = func(_ context.Context, _, _ string, probes []string, _ time.Duration) egressProbeResult {
 		calls++

@@ -22,11 +22,11 @@ const (
 
 // constraintInjectPlanner / constraintInjectWorker 报告是否把操作约束注入对应 agent 的
 // 系统提示(默认开)。作为 resolver 传给 planner/worker,每轮读 → 改开关即时生效。
-func (s *Server) constraintInjectPlanner() bool {
+func (s *Runtime) constraintInjectPlanner() bool {
 	return s.m.pg.GetBool(settingConstraintsInjectPlanner, true)
 }
 
-func (s *Server) constraintInjectWorker() bool {
+func (s *Runtime) constraintInjectWorker() bool {
 	return s.m.pg.GetBool(settingConstraintsInjectWorker, true)
 }
 

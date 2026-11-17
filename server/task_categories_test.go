@@ -18,10 +18,11 @@ func TestTaskCategoryBatchRoute(t *testing.T) {
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) - skipping", err)
 	}
-	defer m.Close()
+	t.Cleanup(func() { _ = m.Close() })
 
 	td := t.TempDir()
-	s := New(context.Background(), m, td, td, td)
+	s := newStartedServer(t, context.Background(), m, td, td, td)
+	defer s.Close()
 	h := s.Handler()
 	token, err := signJWT(s.jwtKey)
 	if err != nil {

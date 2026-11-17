@@ -557,11 +557,11 @@ func TestEngineReadyForTaskOverride(t *testing.T) {
 func TestResolvedTaskStatusKeepsExhaustedStartedTaskRunning(t *testing.T) {
 	t.Parallel()
 	engine := NewEngine(nil)
-	engine.started.Store("7", true)
+	engine.taskRun("7").started.Store(true)
 	task := &Task{ID: "7", Status: "running"}
 	profileID := int64(11)
 	task.setLLMState(&profileID, nil, []int64{profileID}, 1, "chain_exhausted", "quota exhausted")
-	s := &Server{engine: engine}
+	s := &Server{Runtime: &Runtime{engine: engine}}
 	if got := s.resolvedTaskStatus(task); got != "running" {
 		t.Fatalf("exhausted started status=%q, want running", got)
 	}
@@ -577,7 +577,7 @@ func TestTaskRuntimeAvailableUnboundRoleFollowsChainThenGlobal(t *testing.T) {
 	t.Parallel()
 	// A nil pg means effectiveProfileForAgent finds no binding for any role, so
 	// every role here resolves through the chain/global levels.
-	s := &Server{m: &Manager{}}
+	s := &Server{Runtime: &Runtime{m: &Manager{}}}
 	task := &Task{ID: "7"}
 
 	if s.taskRuntimeAvailable(task, "worker") {
@@ -643,7 +643,7 @@ func TestProfileDeleteRestoresQuotaBlockedIntentWhenFallbackAvailable(t *testing
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) - skipping", err)
 	}
-	defer m.Close()
+	t.Cleanup(func() { _ = m.Close() })
 
 	profileID, err := m.pg.SaveProfile(&db.LLMProfile{
 		Name:   fmt.Sprintf("delete-quota-fallback-%d", time.Now().UnixNano()),
@@ -690,12 +690,7 @@ func TestProfileDeleteRestoresQuotaBlockedIntentWhenFallbackAvailable(t *testing
 	if err := m.pg.DeleteProfile(profileID); err != nil {
 		t.Fatal(err)
 	}
-	s := &Server{
-		m:             m,
-		llmOn:         true,
-		llmProv:       &scriptedLLMProvider{},
-		provByProfile: map[int64]*provEntry{},
-	}
+	s := &Server{Runtime: &Runtime{m: m, llmOn: true, llmProv: &scriptedLLMProvider{}, provByProfile: map[int64]*provEntry{}}}
 	s.restoreTasksAfterProfileDelete(m.pg)
 
 	node, err := task.Store.GetNode(intentID)

@@ -43,7 +43,7 @@ func TestFindingGroupsNoResultStopReason(t *testing.T) {
 	}
 	engine := NewEngine(m)
 	engine.SetAgentResolver(func(*Task) (*agent.Planner, *agent.Worker) { return &agent.Planner{}, &agent.Worker{} })
-	engine.started.Store(task.ID, true)
+	engine.taskRun(task.ID).started.Store(true)
 	for _, tc := range []struct {
 		name, dbStatus, dbReason, liveStatus, liveReason, wantStatus, wantReason string
 		live                                                                     bool
@@ -59,7 +59,7 @@ func TestFindingGroupsNoResultStopReason(t *testing.T) {
 				t.Fatal(err)
 			}
 			task.updateLifecycle(func(s *taskLifecycleState) { s.Status = tc.liveStatus; s.StopReason = tc.liveReason })
-			s := &Server{m: m}
+			s := &Server{Runtime: &Runtime{m: m}}
 			if tc.live {
 				s.engine = engine
 			}
@@ -116,7 +116,7 @@ func TestFindingGroupsReturnsTaskBucketsAndNormalizesPagination(t *testing.T) {
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) — skipping", err)
 	}
-	defer m.Close()
+	t.Cleanup(func() { _ = m.Close() })
 	marker := fmt.Sprintf("__server_finding_groups_%d__", time.Now().UnixNano())
 	createdTaskIDs := []int64{}
 	defer func() {
@@ -151,7 +151,7 @@ func TestFindingGroupsReturnsTaskBucketsAndNormalizesPagination(t *testing.T) {
 		}
 	}
 
-	s := &Server{m: m}
+	s := &Server{Runtime: &Runtime{m: m}}
 	request := httptest.NewRequest(http.MethodGet,
 		"/api/exploration/findings/groups?vulnclass="+marker+"&sort=severity&page=1&limit=1", nil)
 	recorder := httptest.NewRecorder()
@@ -226,7 +226,11 @@ func TestDeepenFindingCreatesAuditedIntentAndRevivesTask(t *testing.T) {
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) — skipping", err)
 	}
-	defer m.Close()
+	t.Cleanup(func() { _ = m.Close() })
+	defer restoreConcurrencySetting(t, m)()
+	if err := m.SetConcurrency(false, defaultConcurrencyLimit); err != nil {
+		t.Fatal(err)
+	}
 
 	task, err := m.CreateTask("deepen finding", "goal", nil, 0, 0)
 	if err != nil {
@@ -250,7 +254,7 @@ func TestDeepenFindingCreatesAuditedIntentAndRevivesTask(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // admission is exercised without starting background planner/worker work
-	s := &Server{m: m, engine: NewEngine(m), ctx: ctx}
+	s := &Server{Runtime: &Runtime{m: m, engine: NewEngine(m), ctx: ctx}}
 	live, unsubscribe := s.engine.Broadcaster().Subscribe(task.ID)
 	defer unsubscribe()
 	body := bytes.NewBufferString(`{"description":"验证完整利用链并保留可复现证据"}`)
@@ -329,7 +333,7 @@ func TestDeepenFindingCreatesAuditedIntentAndRevivesTask(t *testing.T) {
 }
 
 func TestDeepenFindingValidatesDescription(t *testing.T) {
-	s := &Server{}
+	s := &Server{Runtime: &Runtime{}}
 	tooLong, _ := json.Marshal(map[string]string{"description": strings.Repeat("x", maxFindingFollowUpRunes+1)})
 	for _, body := range []string{`{}`, `{"description":"   "}`, string(tooLong)} {
 		req := httptest.NewRequest(http.MethodPost, "/api/exploration/findings/1/deepen", bytes.NewBufferString(body))
@@ -355,7 +359,7 @@ func TestDeepenAdmissionFailureDiscardsFollowUpIntent(t *testing.T) {
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) - skipping", err)
 	}
-	defer m.Close()
+	t.Cleanup(func() { _ = m.Close() })
 	task, err := m.CreateTask("deepen rollback", "leave no orphan intent", nil, 0, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -392,7 +396,7 @@ func TestDeepenAdmissionFailureDiscardsFollowUpIntent(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	s := &Server{m: m, engine: NewEngine(m), ctx: ctx}
+	s := &Server{Runtime: &Runtime{m: m, engine: NewEngine(m), ctx: ctx}}
 	req := httptest.NewRequest(http.MethodPost, "/api/exploration/findings/1/deepen",
 		bytes.NewBufferString(`{"description":"this intent must be rolled back"}`))
 	req.SetPathValue("id", strconv.FormatInt(findingID, 10))

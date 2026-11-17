@@ -36,18 +36,14 @@ var schemaDeadlockRetryDelays = [...]time.Duration{
 	time.Second,
 }
 
-type schemaExecer interface {
-	ExecContext(context.Context, string, ...any) (sql.Result, error)
-}
-
 func isPostgresDeadlock(err error) bool {
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && pgErr.Code == "40P01"
 }
 
-func applySchemaWithRetry(ctx context.Context, execer schemaExecer, sleep func(time.Duration)) error {
+func applySchemaWithRetry(apply func() error, sleep func(time.Duration)) error {
 	for attempt := 0; ; attempt++ {
-		if _, err := execer.ExecContext(ctx, schemaSQL); err != nil {
+		if err := apply(); err != nil {
 			if !isPostgresDeadlock(err) || attempt >= len(schemaDeadlockRetryDelays) {
 				return err
 			}
@@ -140,7 +136,7 @@ func ensureDatabase(dsn string) error {
 	return nil
 }
 
-// Open connects, applies the schema (idempotent), and seeds builtin rows.
+// Open connects, upgrades the schema once when needed, and seeds builtin rows.
 func Open(dsn string) (*DB, error) {
 	if err := ensureDatabase(dsn); err != nil {
 		return nil, err
@@ -168,7 +164,7 @@ func Open(dsn string) (*DB, error) {
 	// Keep the dedicated lock connection checked out until both DDL and seeding
 	// finish so concurrent application instances cannot initialize out of order.
 	err = withSchemaMigrationLock(context.Background(), sqlDB, func(conn *sql.Conn) error {
-		if err := applySchemaWithRetry(context.Background(), conn, time.Sleep); err != nil {
+		if err := applySchemaWithRetry(func() error { return initializeSchema(context.Background(), conn) }, time.Sleep); err != nil {
 			return fmt.Errorf("apply schema: %w", err)
 		}
 		if err := d.seedBuiltins(); err != nil {

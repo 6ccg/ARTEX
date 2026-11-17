@@ -249,13 +249,14 @@ func TestCompanyICPAttribution(t *testing.T) {
 	}
 	cs := d.Companies()
 	as := d.Assets()
+	fixtureTask := assetFixtureTask(t, d)
 	companyID, _, err := cs.UpsertCompany(fmt.Sprintf("ICP Scope Co %d", suffix), "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
 		// 不吞错误：清理失败会污染后续用例，必须让它在本次运行里显形。
-		if _, err := d.Exec(`DELETE FROM assets WHERE task_ids @> ARRAY[$1]::bigint[]`, suffix); err != nil {
+		if _, err := d.Exec(`DELETE FROM assets WHERE id IN (SELECT asset_id FROM task_asset_links WHERE task_id=$1)`, fixtureTask); err != nil {
 			t.Errorf("清理测试资产失败: %v", err)
 		}
 		if _, err := d.Exec(`DELETE FROM companies WHERE id=$1`, companyID); err != nil {
@@ -273,19 +274,19 @@ func TestCompanyICPAttribution(t *testing.T) {
 	}
 
 	rootID, err := as.UpsertRootDomain(UpsertRootDomainReq{
-		Domain: fmt.Sprintf("icp-scope-%d.example", suffix), ICP: "京icp备998877号", TaskID: suffix,
+		Domain: fmt.Sprintf("icp-scope-%d.example", suffix), ICP: "京icp备998877号", TaskID: fixtureTask,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	appID, err := as.UpsertApp(UpsertAppReq{
-		Name: fmt.Sprintf("ICP Scope Keyword Only %d", suffix), TaskID: suffix,
+		Name: fmt.Sprintf("ICP Scope Keyword Only %d", suffix), TaskID: fixtureTask,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	icpAppID, err := as.UpsertApp(UpsertAppReq{
-		Name: fmt.Sprintf("ICP Matched App %d", suffix), ICP: " 京 ICP备 998877号 ", TaskID: suffix,
+		Name: fmt.Sprintf("ICP Matched App %d", suffix), ICP: " 京 ICP备 998877号 ", TaskID: fixtureTask,
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -48,7 +48,7 @@ func (d *DB) hydrateTaskContext(t *Task) error {
 	// A nil cursor on a non-empty chain is a persisted end-of-chain marker. Do not
 	// repair it from an earlier ready entry: the user may have manually selected a
 	// profile in the middle and legitimately exhausted every candidate after it.
-	legacyProfileID, activeProfileID, revision, chain, err := d.taskLLMContext(t.ID)
+	activeProfileID, revision, chain, err := d.taskLLMContext(t.ID)
 	if err != nil {
 		return err
 	}
@@ -62,17 +62,17 @@ func (d *DB) hydrateTaskContext(t *Task) error {
 		return err
 	}
 	t.CompanyIDs = companies
-	applyTaskLLMContext(t, legacyProfileID, activeProfileID, revision, chain)
+	applyTaskLLMContext(t, activeProfileID, revision, chain)
 	return nil
 }
 
 func applyTaskLLMContext(
 	t *Task,
-	legacyProfileID, activeProfileID *int64,
+	activeProfileID *int64,
 	revision int64,
 	chain []TaskLLMProfile,
 ) {
-	t.LLMProfileID = legacyProfileID
+	t.LLMProfileID = activeProfileID
 	t.ActiveLLMProfileID = activeProfileID
 	t.LLMChainRevision = revision
 	t.LLMProfileIDs = make([]int64, 0, len(chain))
@@ -104,7 +104,6 @@ func applyTaskLLMContext(
 }
 
 type taskBatchContext struct {
-	legacyProfileID *int64
 	activeProfileID *int64
 	revision        int64
 	chain           []TaskLLMProfile
@@ -136,7 +135,7 @@ func (d *DB) hydrateTasksContext(tasks []*Task) error {
 	}
 
 	rows, err := d.Query(`
-SELECT t.id, t.llm_profile_id, t.active_llm_profile_id, t.llm_chain_revision,
+SELECT t.id, t.active_llm_profile_id, t.llm_chain_revision,
        p.profile_id, p.position, p.status, COALESCE(p.last_error,''), p.exhausted_at
 FROM tasks t
 LEFT JOIN task_llm_profiles p ON p.task_id=t.id
@@ -147,11 +146,11 @@ ORDER BY t.id, p.position NULLS LAST`, ids)
 	}
 	for rows.Next() {
 		var taskID, revision int64
-		var legacy, active, profileID, position sql.NullInt64
+		var active, profileID, position sql.NullInt64
 		var status, lastError sql.NullString
 		var exhaustedAt sql.NullTime
 		if err := rows.Scan(
-			&taskID, &legacy, &active, &revision,
+			&taskID, &active, &revision,
 			&profileID, &position, &status, &lastError, &exhaustedAt,
 		); err != nil {
 			rows.Close()
@@ -162,10 +161,6 @@ ORDER BY t.id, p.position NULLS LAST`, ids)
 			continue
 		}
 		context.revision = revision
-		if legacy.Valid {
-			id := legacy.Int64
-			context.legacyProfileID = &id
-		}
 		if active.Valid {
 			id := active.Int64
 			context.activeProfileID = &id
@@ -244,7 +239,6 @@ ORDER BY task_id, id`, ids)
 		task.CompanyIDs = context.companyIDs
 		applyTaskLLMContext(
 			task,
-			context.legacyProfileID,
 			context.activeProfileID,
 			context.revision,
 			context.chain,
@@ -253,44 +247,39 @@ ORDER BY task_id, id`, ids)
 	return nil
 }
 
-// taskLLMContext reads the compatibility profile, current cursor, and ordered
+// taskLLMContext reads the current cursor and ordered
 // chain in one statement. Runtime chain edits commit atomically, and one SQL
 // statement gives hydration one matching snapshot instead of a transient mix of
 // an old task cursor and a newly replaced chain (or vice versa).
-func (d *DB) taskLLMContext(taskID int64) (*int64, *int64, int64, []TaskLLMProfile, error) {
+func (d *DB) taskLLMContext(taskID int64) (*int64, int64, []TaskLLMProfile, error) {
 	rows, err := d.Query(`
-SELECT t.llm_profile_id, t.active_llm_profile_id, t.llm_chain_revision,
+SELECT t.active_llm_profile_id, t.llm_chain_revision,
        p.profile_id, p.position, p.status, COALESCE(p.last_error,''), p.exhausted_at
 FROM tasks t
 LEFT JOIN task_llm_profiles p ON p.task_id=t.id
 WHERE t.id=$1
 ORDER BY p.position NULLS LAST`, taskID)
 	if err != nil {
-		return nil, nil, 0, nil, err
+		return nil, 0, nil, err
 	}
 	defer rows.Close()
 	var (
-		legacyProfileID *int64
 		activeProfileID *int64
 		revision        int64
 		chain           []TaskLLMProfile
 		found           bool
 	)
 	for rows.Next() {
-		var legacy, active, profileID, position sql.NullInt64
+		var active, profileID, position sql.NullInt64
 		var rowRevision int64
 		var status, lastError sql.NullString
 		var exhaustedAt sql.NullTime
-		if err := rows.Scan(&legacy, &active, &rowRevision, &profileID, &position, &status, &lastError, &exhaustedAt); err != nil {
-			return nil, nil, 0, nil, err
+		if err := rows.Scan(&active, &rowRevision, &profileID, &position, &status, &lastError, &exhaustedAt); err != nil {
+			return nil, 0, nil, err
 		}
 		if !found {
 			found = true
 			revision = rowRevision
-			if legacy.Valid {
-				id := legacy.Int64
-				legacyProfileID = &id
-			}
 			if active.Valid {
 				id := active.Int64
 				activeProfileID = &id
@@ -312,12 +301,12 @@ ORDER BY p.position NULLS LAST`, taskID)
 		chain = append(chain, entry)
 	}
 	if err := rows.Err(); err != nil {
-		return nil, nil, 0, nil, err
+		return nil, 0, nil, err
 	}
 	if !found {
-		return nil, nil, 0, nil, sql.ErrNoRows
+		return nil, 0, nil, sql.ErrNoRows
 	}
-	return legacyProfileID, activeProfileID, revision, chain, nil
+	return activeProfileID, revision, chain, nil
 }
 
 func (d *DB) TaskSourceIDs(taskID int64) ([]int64, error) {
@@ -445,7 +434,7 @@ func (d *DB) ReplaceTaskLLMProfiles(taskID int64, profileIDs []int64, activeProf
 		active = activeProfileID
 	}
 	if _, err := tx.Exec(`UPDATE tasks
-SET active_llm_profile_id=$2, llm_profile_id=$2, llm_chain_revision=llm_chain_revision+1
+SET active_llm_profile_id=$2, llm_chain_revision=llm_chain_revision+1
 WHERE id=$1`, taskID, active); err != nil {
 		return err
 	}
@@ -526,7 +515,7 @@ ORDER BY position LIMIT 1`, taskID, position).Scan(&next)
 		out.Advanced = true
 		out.NextProfileID = &next
 		if _, err := tx.Exec(`UPDATE tasks
-				SET active_llm_profile_id=$2, llm_profile_id=$2, llm_chain_revision=llm_chain_revision+1
+				SET active_llm_profile_id=$2, llm_chain_revision=llm_chain_revision+1
 				WHERE id=$1`, taskID, next); err != nil {
 			return out, err
 		}
@@ -534,7 +523,7 @@ ORDER BY position LIMIT 1`, taskID, position).Scan(&next)
 		out.Advanced = true
 		out.ChainExhausted = true
 		if _, err := tx.Exec(`UPDATE tasks
-				SET active_llm_profile_id=NULL, llm_profile_id=NULL, llm_chain_revision=llm_chain_revision+1
+				SET active_llm_profile_id=NULL, llm_chain_revision=llm_chain_revision+1
 				WHERE id=$1`, taskID); err != nil {
 			return out, err
 		}

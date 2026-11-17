@@ -352,11 +352,11 @@ func (d *DB) listInterceptsPage(taskID string, page, size int, filter InterceptA
 	add(approvalDecisionSource, filter.DecisionSource)
 	if filter.CreatedFrom != "" {
 		args = append(args, filter.CreatedFrom)
-		conditions = append(conditions, "ip.created_at >= $"+fmt.Sprint(len(args))+"::date")
+		conditions = append(conditions, "ip.created_at >= ($"+fmt.Sprint(len(args))+"::date::timestamp AT TIME ZONE 'UTC')")
 	}
 	if filter.CreatedTo != "" {
 		args = append(args, filter.CreatedTo)
-		conditions = append(conditions, "ip.created_at < ($"+fmt.Sprint(len(args))+"::date + INTERVAL '1 day')")
+		conditions = append(conditions, "ip.created_at < (($"+fmt.Sprint(len(args))+"::date + INTERVAL '1 day') AT TIME ZONE 'UTC')")
 	}
 	search := strings.TrimSpace(filter.Search)
 	if strings.HasPrefix(search, "#") {

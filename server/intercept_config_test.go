@@ -42,7 +42,7 @@ func TestJudgeConfigIncompleteScriptDefaultAndOverride(t *testing.T) {
 			}
 		})
 	}
-	s := &Server{m: &Manager{pg: pg, interceptor: intercept.New(pg)}}
+	s := &Server{Runtime: &Runtime{m: &Manager{pg: pg, interceptor: intercept.New(pg)}}}
 	for _, tc := range []struct {
 		option, want string
 		code         int
@@ -69,7 +69,7 @@ func TestJudgeConfigIncompleteScriptDefaultAndOverride(t *testing.T) {
 
 func TestJudgeConfigRejectsInvalidRetryBeforeSaving(t *testing.T) {
 	// No manager is needed: invalid input must be rejected before database writes.
-	s := &Server{}
+	s := &Server{Runtime: &Runtime{}}
 	for _, fields := range []string{
 		`"retry_count":-1`, `"retry_count":21`, `"retry_count":1.5`,
 		`"retry_interval_ms":-1`, `"retry_interval_ms":3600001`, `"retry_interval_ms":1.5`,
@@ -103,7 +103,7 @@ func TestJudgeConfigRetryRoundTrip(t *testing.T) {
 		t.Fatal(err)
 	}
 	pg := &db.DB{DB: sqldb}
-	s := &Server{m: &Manager{pg: pg, interceptor: intercept.New(pg)}}
+	s := &Server{Runtime: &Runtime{m: &Manager{pg: pg, interceptor: intercept.New(pg)}}}
 	for _, tc := range []struct{ count, interval int }{{2, 17}, {20, 3600000}, {0, 0}} {
 		cfg := s.m.interceptor.GetJudgeConfig()
 		cfg.RetryCount, cfg.RetryIntervalMS = tc.count, tc.interval
@@ -145,7 +145,7 @@ func TestJudgeConfidenceThresholdKeepsExplicitZeroAndRejectsOutOfRange(t *testin
 		t.Fatal(err)
 	}
 	pg := &db.DB{DB: sqldb}
-	s := &Server{m: &Manager{pg: pg, interceptor: intercept.New(pg)}}
+	s := &Server{Runtime: &Runtime{m: &Manager{pg: pg, interceptor: intercept.New(pg)}}}
 	cfg := s.m.interceptor.GetJudgeConfig()
 	cfg.ConfidenceThreshold = 0
 	body, _ := json.Marshal(cfg)

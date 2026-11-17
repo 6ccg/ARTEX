@@ -66,7 +66,7 @@ func TestSideActualChatCheckpointToolResultAndTranscriptIsolation(t *testing.T) 
 			p := &sideAgentProvider{path: file}
 			bound := sidequestion.Bind(p, sidequestion.Model{Model: "fixture", Streaming: streaming})
 			store := transcript.NewStore(filepath.Join(dir, "transcripts"))
-			chat := NewChatAgent(bound, "fixture", dir, store, 100000)
+			chat := NewChatAgent(nil, bound, "fixture", dir, store, 100000)
 			chat.SetNonStreaming(func() bool { return !streaming })
 			var snapshots []sidequestion.Snapshot
 			var activities []db.Activity

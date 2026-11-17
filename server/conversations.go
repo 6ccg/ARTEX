@@ -241,7 +241,7 @@ type conversationDeleteItem struct {
 	Error string `json:"error,omitempty"`
 }
 
-func (s *Server) cancelConversation(id int64) {
+func (s *Runtime) cancelConversation(id int64) {
 	busyKey := s.convBusyKey(id)
 	s.chatMu.Lock()
 	cancel := s.chatCancel[busyKey]
@@ -307,7 +307,7 @@ func (s *Server) pgDeleteConversationsBatch(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
-func (s *Server) convBusyKey(id int64) string { return "conv-" + strconv.FormatInt(id, 10) }
+func (s *Runtime) convBusyKey(id int64) string { return "conv-" + strconv.FormatInt(id, 10) }
 
 // pgConversationMessages returns steps after ?since=cursor plus whether a turn is
 // still running (so the client knows to keep polling). Same item shape as the task
@@ -474,8 +474,8 @@ func (s *Server) pgSendConversationMessage(w http.ResponseWriter, r *http.Reques
 					promptContent += "附件：" + strings.Join(names, "、")
 				}
 			}
-			go func() {
-				ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			s.backgroundWG.Go(func() {
+				ctx, cancel := context.WithTimeout(s.ctx, 20*time.Second)
 				defer cancel()
 				profileID := s.effectiveProfileForAgent(agentKey, pinnedProfile)
 				var prov llm.Provider
@@ -507,7 +507,7 @@ func (s *Server) pgSendConversationMessage(w http.ResponseWriter, r *http.Reques
 				if err := s.m.pg.RenameConversationIfTitle(conversationID, generated, title); err != nil {
 					log.Printf("[auto-title] conversation %d rename failed: %v", conversationID, err)
 				}
-			}()
+			})
 		}
 	}
 	_ = pg.TouchConversation(c.ID)
@@ -535,28 +535,28 @@ func autoTitleIsUsable(generated string) bool {
 // (each conversation is independent → parallel). Steps stream to
 // conversation_activities. Shared by the chat HTTP handler and the P3 scheduler.
 // busyKey clears when the run ends (best-effort in-flight marker).
-func (s *Server) runConversation(c *db.Conversation, msg, busyKey string, userMessage ...string) {
+func (s *Runtime) runConversation(c *db.Conversation, msg, busyKey string, userMessage ...string) {
 	ctx, cancel := s.conversationRunContext(c.ID, busyKey)
 	// Only the human-message handler supplies this field, before adding the
 	// attachment manifest. Scheduler/retest prompts must not be labelled as users.
 	if len(userMessage) == 1 {
 		ctx = intercept.WithReviewContext(ctx, "", intercept.ReviewBackground{Source: intercept.BackgroundUserMessage, Text: userMessage[0]})
 	}
-	go s.runConversationTurn(ctx, cancel, c, msg, busyKey)
+	s.backgroundWG.Go(func() { s.runConversationTurn(ctx, cancel, c, msg, busyKey) })
 }
 
 // runConversationSync runs ONE agent turn on a conversation and BLOCKS until the
 // run ends (clearing busyKey). runConversation wraps it in a goroutine for the
 // fire-and-forget chat path; the P3 trigger queue calls it directly so it can wait
 // for completion before starting the next queued fire for the same agent.
-func (s *Server) runConversationSync(c *db.Conversation, msg, busyKey string) {
+func (s *Runtime) runConversationSync(c *db.Conversation, msg, busyKey string) {
 	ctx, cancel := s.conversationRunContext(c.ID, busyKey)
 	s.runConversationTurn(ctx, cancel, c, msg, busyKey)
 }
 
 // Register cancellation before returning 202, so an immediate stop/delete cannot
 // miss a background goroutine which has not started yet.
-func (s *Server) conversationRunContext(id int64, busyKey string) (context.Context, context.CancelCauseFunc) {
+func (s *Runtime) conversationRunContext(id int64, busyKey string) (context.Context, context.CancelCauseFunc) {
 	// Per-run cancellable context so a manual stop (pgStopConversation) can abort
 	// just this session. Registered under chatMu so the stop handler can find it.
 	ctx, cancel := context.WithCancelCause(intercept.WithConvID(s.ctx, id))
@@ -566,7 +566,7 @@ func (s *Server) conversationRunContext(id int64, busyKey string) (context.Conte
 	return ctx, cancel
 }
 
-func (s *Server) runConversationTurn(ctx context.Context, cancel context.CancelCauseFunc, c *db.Conversation, msg, busyKey string) {
+func (s *Runtime) runConversationTurn(ctx context.Context, cancel context.CancelCauseFunc, c *db.Conversation, msg, busyKey string) {
 	defer func() {
 		cancel(agent.AbortChatTurnFinished)
 		s.chatMu.Lock()
@@ -684,7 +684,7 @@ type triggerBehavior struct {
 
 // readTriggerBehavior loads an agent's策略, falling back to safe defaults
 // (serial / all / 5) on any error or unknown enum value.
-func (s *Server) readTriggerBehavior(agentKey string) triggerBehavior {
+func (s *Runtime) readTriggerBehavior(agentKey string) triggerBehavior {
 	b := triggerBehavior{runMode: "serial", mergeMode: "all", maxParallel: 5}
 	if s.m.pg == nil {
 		return b
@@ -708,17 +708,17 @@ func (s *Server) readTriggerBehavior(agentKey string) triggerBehavior {
 // agent's策略 decides concurrency + merge: serial → run one at a time (optionally
 // merging by task / all / none); parallel → run each fire in its own concurrent
 // conversation up to trigger_max_parallel. Distinct agents always run concurrently.
-func (s *Server) StartTriggeredRun(agentKey, title, message string, taskID int64, mergeable bool, taskDesc, taskGoal string) {
-	s.startTriggeredRun(agentKey, title, message, taskID, mergeable, taskDesc, taskGoal, 0)
+func (s *Runtime) StartTriggeredRun(agentKey, title, message string, taskID int64, mergeable bool, taskDesc, taskGoal string) bool {
+	return s.startTriggeredRun(agentKey, title, message, taskID, mergeable, taskDesc, taskGoal, 0)
 }
 
-func (s *Server) StartTriggeredRunWithConversation(agentKey, title, message string, taskID int64, mergeable bool, taskDesc, taskGoal string, conversationID int64) {
-	s.startTriggeredRun(agentKey, title, message, taskID, mergeable, taskDesc, taskGoal, conversationID)
+func (s *Runtime) StartTriggeredRunWithConversation(agentKey, title, message string, taskID int64, mergeable bool, taskDesc, taskGoal string, conversationID int64) bool {
+	return s.startTriggeredRun(agentKey, title, message, taskID, mergeable, taskDesc, taskGoal, conversationID)
 }
 
-func (s *Server) startTriggeredRun(agentKey, title, message string, taskID int64, mergeable bool, taskDesc, taskGoal string, conversationID int64) {
-	if s.m.pg == nil || s.chatAgentRef() == nil {
-		return
+func (s *Runtime) startTriggeredRun(agentKey, title, message string, taskID int64, mergeable bool, taskDesc, taskGoal string, conversationID int64) bool {
+	if s.m.pg == nil || serverContext(s).Err() != nil || s.resolveChatAgent(&db.Conversation{AgentKey: agentKey}) == nil {
+		return false
 	}
 	// A trigger body can outlive a prompt/trigger migration when it was queued
 	// before a restart. Never let the retired structured-reproduction contract
@@ -733,6 +733,7 @@ func (s *Server) startTriggeredRun(agentKey, title, message string, taskID int64
 	s.triggerQ[agentKey] = append(s.triggerQ[agentKey], triggeredRun{conversationID: conversationID, agentKey: agentKey, title: title, message: message, taskID: taskID, taskDesc: taskDesc, taskGoal: taskGoal, mergeable: mergeable})
 	s.pumpLocked(agentKey)
 	s.queueMu.Unlock()
+	return true
 }
 
 func normalizeReporterTriggerMessage(message string) string {
@@ -747,7 +748,7 @@ func normalizeReporterTriggerMessage(message string) string {
 // returns. Serial → limit 1; parallel → limit = maxParallel (<=0 → unlimited). Each
 // launched run re-pumps on completion (runAndPump) to fill the freed slot. Caller
 // holds queueMu.
-func (s *Server) pumpLocked(agentKey string) {
+func (s *Runtime) pumpLocked(agentKey string) {
 	if s.ctx.Err() != nil {
 		return
 	}
@@ -763,13 +764,13 @@ func (s *Server) pumpLocked(agentKey string) {
 	for s.triggerActive[agentKey] < limit && len(s.triggerQ[agentKey]) > 0 {
 		item := s.nextTriggerRun(agentKey, cfg)
 		s.triggerActive[agentKey]++
-		go s.runAndPump(agentKey, item)
+		s.backgroundWG.Go(func() { s.runAndPump(agentKey, item) })
 	}
 }
 
 // runAndPump runs one fire to completion, then decrements the active counter and
 // re-pumps to fill the freed slot (cleaning up the agent's maps when fully idle).
-func (s *Server) runAndPump(agentKey string, item triggeredRun) {
+func (s *Runtime) runAndPump(agentKey string, item triggeredRun) {
 	s.runTriggeredRun(item)
 	s.queueMu.Lock()
 	s.triggerActive[agentKey]--
@@ -790,7 +791,7 @@ func (s *Server) runAndPump(agentKey string, item triggeredRun) {
 //	all             → the ENTIRE queue merged into one run (regardless of task/type)
 //
 // Caller holds queueMu.
-func (s *Server) nextTriggerRun(agentKey string, cfg triggerBehavior) triggeredRun {
+func (s *Runtime) nextTriggerRun(agentKey string, cfg triggerBehavior) triggeredRun {
 	q := s.triggerQ[agentKey]
 	if q[0].conversationID > 0 || cfg.runMode == "parallel" || cfg.mergeMode == "none" {
 		s.triggerQ[agentKey] = q[1:]
@@ -925,7 +926,7 @@ func mergeAllRuns(items []triggeredRun) triggeredRun {
 // runTriggeredRun creates the conversation for one queued fire, records the human
 // turn, and runs it synchronously (blocks until the run ends). recover keeps a
 // panic from killing the drain loop and wedging the agent's queue.
-func (s *Server) runTriggeredRun(item triggeredRun) {
+func (s *Runtime) runTriggeredRun(item triggeredRun) {
 	defer func() {
 		if r := recover(); r != nil {
 			if item.conversationID > 0 {

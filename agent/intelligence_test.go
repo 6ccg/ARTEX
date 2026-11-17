@@ -9,29 +9,25 @@ import (
 )
 
 func TestIntelligenceGateRemovesTokenOverheadAndRejectsLiveWrites(t *testing.T) {
-	oldEnabled, oldRecord := IntelligenceEnabled, IntelligenceRecord
-	oldResolve, oldAugment := ToolResolve, ToolAugment
-	defer func() {
-		IntelligenceEnabled, IntelligenceRecord = oldEnabled, oldRecord
-		ToolResolve, ToolAugment = oldResolve, oldAugment
-	}()
-	ToolResolve = nil
-	ToolAugment = nil
+	agentHost := &Host{}
+
+	agentHost.ToolResolve = nil
+	agentHost.ToolAugment = nil
 	enabled := false
 	calls := 0
-	IntelligenceEnabled = func() bool { return enabled }
-	IntelligenceRecord = func(_ context.Context, taskID, nodeID int64, worker string, in db.IntelligenceInput) (int64, error) {
+	agentHost.IntelligenceEnabled = func() bool { return enabled }
+	agentHost.IntelligenceRecord = func(_ context.Context, taskID, nodeID int64, worker string, in db.IntelligenceInput) (int64, error) {
 		calls++
 		if taskID != 42 || nodeID != 7 || worker != "qa" {
 			t.Fatalf("bad attribution: %d %d %s", taskID, nodeID, worker)
 		}
 		return 123, nil
 	}
-	ts := NewToolSet(nil, "qa")
+	ts := NewToolSet(agentHost, nil, "qa")
 	ts.SetTaskID(42)
 	ts.SetOwnerNode(7)
 	ctx := WithRunInfo(context.Background(), RunInfo{TaskID: 42, IntentID: 7})
-	tools, def, cleanup := AugmentTools(ctx, "worker", ts.WorkerTools())
+	tools, def, cleanup := agentHost.AugmentTools(ctx, "worker", ts.WorkerTools())
 	cleanup()
 	if def.IntelligenceGuidance != "" {
 		t.Fatal("disabled prompt overhead")
@@ -45,7 +41,7 @@ func TestIntelligenceGateRemovesTokenOverheadAndRejectsLiveWrites(t *testing.T) 
 		}
 	}
 	enabled = true
-	tools, def, cleanup = AugmentTools(ctx, "worker", ts.WorkerTools())
+	tools, def, cleanup = agentHost.AugmentTools(ctx, "worker", ts.WorkerTools())
 	cleanup()
 	if def.IntelligenceGuidance == "" {
 		t.Fatal("missing guidance")
@@ -71,7 +67,7 @@ func TestIntelligenceGateRemovesTokenOverheadAndRejectsLiveWrites(t *testing.T) 
 		t.Fatal("missing enabled tool")
 	}
 	enabled = true
-	tools, def, cleanup = AugmentTools(context.Background(), "worker", ts.WorkerTools())
+	tools, def, cleanup = agentHost.AugmentTools(context.Background(), "worker", ts.WorkerTools())
 	cleanup()
 	if def.IntelligenceGuidance != "" {
 		t.Fatal("taskless guidance")
@@ -84,14 +80,15 @@ func TestIntelligenceGateRemovesTokenOverheadAndRejectsLiveWrites(t *testing.T) 
 }
 func mustJSON(v any) string { b, _ := json.Marshal(v); return string(b) }
 func TestIntelligenceAssetAndFactWriteback(t *testing.T) {
+	agentHost := &Host{}
+
 	d := testDB(t)
-	defer d.Close()
 	task, err := d.CreateTask("intelligence tool integration", "local fixtures", nil, 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer d.DeleteTask(task.ID)
-	ts := NewToolSet(d.Exploration(task.ExplorationID), "qa")
+	ts := NewToolSet(agentHost, d.Exploration(task.ExplorationID), "qa")
 	ts.SetTaskID(task.ID)
 	ts.SetAssetStore(d.Assets(), d.Companies())
 	node, err := d.Exploration(task.ExplorationID).AddIntent(map[string]any{"summary": "fixture"}, 5, nil, "qa")
@@ -99,10 +96,9 @@ func TestIntelligenceAssetAndFactWriteback(t *testing.T) {
 		t.Fatal(err)
 	}
 	ts.SetOwnerNode(node)
-	oldEnabled, oldRecord := IntelligenceEnabled, IntelligenceRecord
-	defer func() { IntelligenceEnabled, IntelligenceRecord = oldEnabled, oldRecord }()
-	IntelligenceEnabled = func() bool { return true }
-	IntelligenceRecord = func(ctx context.Context, tid, nid int64, w string, in db.IntelligenceInput) (int64, error) {
+
+	agentHost.IntelligenceEnabled = func() bool { return true }
+	agentHost.IntelligenceRecord = func(ctx context.Context, tid, nid int64, w string, in db.IntelligenceInput) (int64, error) {
 		item, err := d.RecordIntelligence(ctx, tid, nid, w, in)
 		if err != nil {
 			return 0, err

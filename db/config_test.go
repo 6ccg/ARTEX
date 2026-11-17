@@ -230,11 +230,12 @@ func TestActiveProfileProxyMigratesToSystemSetting(t *testing.T) {
 	}
 	defer tx.Rollback()
 	for _, query := range []string{
+		`ALTER TABLE assets ADD COLUMN task_ids bigint[] NOT NULL DEFAULT '{}'; ALTER TABLE tasks ADD COLUMN llm_profile_id bigint`,
 		`ALTER TABLE llm_profiles ADD COLUMN proxy TEXT`,
 		`UPDATE llm_profiles SET is_default=false`,
 		`DELETE FROM settings WHERE key='llm_proxy'`,
 		`INSERT INTO llm_profiles(name,format,model,is_default,proxy) VALUES ('proxy-migration-test','openai','m',true,'http://proxy.example:8080')`,
-		schemaSQL,
+		legacySchemaSQL,
 	} {
 		if _, err := tx.Exec(query); err != nil {
 			t.Fatal(err)

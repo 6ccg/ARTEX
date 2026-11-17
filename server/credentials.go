@@ -20,7 +20,7 @@ import (
 	"github.com/Autumn-27/norma/transcript"
 )
 
-func (s *Server) seedCredentialProcessor() {
+func (s *Runtime) seedCredentialProcessor() {
 	const flag = "credential_processor_seed_v1"
 	if s.m.pg.GetBool(flag, false) {
 		return
@@ -41,7 +41,7 @@ func (s *Server) seedCredentialProcessor() {
 	}
 	_ = s.m.pg.SetBool(flag, true)
 }
-func (s *Server) runCredentialProcessor() {
+func (s *Runtime) runCredentialProcessor() {
 	// Events wake the worker immediately. The slow ticker is only a recovery
 	// scan for rows created before a notification or after a process restart.
 	ticker := time.NewTicker(30 * time.Second)
@@ -73,15 +73,17 @@ func (s *Server) runCredentialProcessor() {
 		s.processCredentialJob(s.ctx, item)
 	}
 }
-func (s *Server) processCredentialJob(parent context.Context, item *db.Intelligence) {
+func (s *Runtime) processCredentialJob(parent context.Context, item *db.Intelligence) {
 	if !s.m.pg.GetBool(db.SettingTaskIntelligence, false) || !s.m.pg.GetBool(db.SettingCredentialAgent, false) {
 		_ = s.m.pg.FinishCredentialJob(parent, item, *item.Credentials)
 		return
 	}
 	ctx, cancel := context.WithTimeout(parent, 90*time.Second)
-	defer cancel()
+	done := make(chan struct{})
+	defer func() { cancel(); <-done }()
 	// Turning the switch off cancels even an in-flight model call.
 	go func() {
+		defer close(done)
 		tick := time.NewTicker(500 * time.Millisecond)
 		defer tick.Stop()
 		for {
@@ -214,7 +216,7 @@ func intPtr(v int) *int { return &v }
 var credentialURLs = regexp.MustCompile(`https?://[^\s<>"'，；）)]+`)
 var credentialTrafficIDs = regexp.MustCompile(`\b[0-9]{8,}-[0-9]{3,}\b`)
 
-func (s *Server) credentialHosts(item *db.Intelligence) map[string]bool {
+func (s *Runtime) credentialHosts(item *db.Intelligence) map[string]bool {
 	hosts := map[string]bool{}
 	add := func(raw string, children bool) {
 		raw = strings.TrimSpace(raw)
@@ -309,7 +311,7 @@ func credentialExcerpt(raw string, accounts []db.CredentialAccount) string {
 	}
 	return string(all[start:end])
 }
-func (s *Server) matchCredentialTraffic(ctx context.Context, item *db.Intelligence, accounts []db.CredentialAccount) ([]db.CredentialTraffic, string, string) {
+func (s *Runtime) matchCredentialTraffic(ctx context.Context, item *db.Intelligence, accounts []db.CredentialAccount) ([]db.CredentialTraffic, string, string) {
 	bound := []db.CredentialTraffic{}
 	if s.m.traffic == nil {
 		return bound, "unavailable", "未启用流量采集或没有可用的流量存储"

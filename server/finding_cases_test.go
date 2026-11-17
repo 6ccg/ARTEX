@@ -40,7 +40,7 @@ func testCaseServer(t *testing.T) (*Server, int64, []int64) {
 		ids = append(ids, id)
 	}
 	t.Cleanup(func() { _, _ = pg.Exec(`DELETE FROM findings WHERE task_id=$1`, task.ID); _ = pg.DeleteTask(task.ID) })
-	return &Server{m: &Manager{pg: pg}}, task.ID, ids
+	return &Server{Runtime: &Runtime{m: &Manager{pg: pg}}}, task.ID, ids
 }
 
 func TestFindingCaseToolMigrationPreservesBindings(t *testing.T) {

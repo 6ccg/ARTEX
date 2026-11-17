@@ -141,7 +141,7 @@ func (s *Server) startFindingRetest(w http.ResponseWriter, r *http.Request) {
 
 // Both tools derive the finding from server-owned conversation context. Tool
 // arguments cannot redirect a result into a different finding or conversation.
-func (s *Server) findingRetestTools() []actool.CoreTool {
+func (s *Runtime) findingRetestTools() []actool.CoreTool {
 	return []actool.CoreTool{
 		roTool("get_finding_retest_context", "读取当前复测会话关联的漏洞证据快照、复测状态、补充说明与当前任务约束。无参数，只能读取本会话。",
 			objSchema(map[string]any{}), func(ctx context.Context, _ json.RawMessage) (actool.Result, error) {
@@ -191,7 +191,7 @@ func (s *Server) findingRetestTools() []actool.CoreTool {
 
 // Seed the editable agent atomically, without an automatic discovery trigger.
 // Once seeded, user edits/deletion survive restarts; a pre-existing key is kept.
-func (s *Server) seedFindingRetester() error {
+func (s *Runtime) seedFindingRetester() error {
 	for _, t := range s.findingRetestTools() {
 		schema, _ := json.Marshal(t.InputSchema())
 		bindings, _ := json.Marshal([]string{db.FindingRetestAgentKey})
@@ -240,7 +240,7 @@ func (s *Server) seedFindingRetester() error {
 	return tx.Commit()
 }
 
-func (s *Server) finishRetest(id int64, status, reason string) {
+func (s *Runtime) finishRetest(id int64, status, reason string) {
 	if err := s.m.pg.FinishFindingRetest(id, status, reason); err != nil {
 		// Surface failure to the conversation runner rather than inventing a result.
 		log.Printf("[retest %d] finish: %v", id, err)

@@ -13,6 +13,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -106,6 +107,11 @@ func (s *Store) writeBody(r io.Reader, expectedLength int64, expectedHash string
 	}
 	if err = os.Rename(f.Name(), path); err != nil {
 		return "", err
+	}
+	// The body was synced before rename. Windows cannot flush this read-only
+	// directory handle; keep the parent-directory sync on platforms that support it.
+	if runtime.GOOS == "windows" {
+		return hash, nil
 	}
 	d, err := os.Open(filepath.Dir(path))
 	if err != nil {

@@ -159,8 +159,9 @@ func newSideHTTPFixture(t *testing.T) *sideHTTPFixture {
 		t.Skipf("postgres unavailable (%v) — skipping", err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	s := &Server{m: m, engine: NewEngine(m), ctx: ctx, jwtKey: []byte("btw-test-signing-key-only"), chatBusy: map[string]bool{}, provByProfile: map[int64]*provEntry{}}
+	s := &Server{Runtime: &Runtime{m: m, engine: NewEngine(m), ctx: ctx, chatBusy: map[string]bool{}, provByProfile: map[int64]*provEntry{}}, jwtKey: []byte("btw-test-signing-key-only")}
 	s.initSideQuestions()
+	s.startSideQuestions()
 	p := &sideHTTPProvider{started: make(chan llm.CompletionRequest, 16), release: make(chan struct{})}
 	cfg := agent.Config{Format: llm.FormatOpenAI, BaseURL: "http://fixture.invalid", Model: "fixture", Stream: true}
 	s.cfgMu.Lock()
@@ -429,15 +430,12 @@ func TestSideTaskContextModelUnavailableIsDistinct(t *testing.T) {
 	}
 	id, _ := strconv.ParseInt(task.ID, 10, 64)
 	t.Cleanup(func() { _ = f.m.pg.DeleteTask(id) })
-	var profileID int64
-	var originalAPIKey string
-	if err := f.m.pg.QueryRow(`SELECT id, COALESCE(api_key, '') FROM llm_profiles WHERE is_default=true ORDER BY id LIMIT 1`).Scan(&profileID, &originalAPIKey); err != nil {
+	profileID, err := f.m.pg.SaveProfile(&db.LLMProfile{Name: "side-unavailable", Format: "anthropic", Model: "fixture"})
+	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() {
-		_, _ = f.m.pg.Exec(`UPDATE llm_profiles SET api_key=$1 WHERE id=$2`, originalAPIKey, profileID)
-	})
-	if _, err := f.m.pg.Exec(`UPDATE llm_profiles SET api_key='' WHERE id=$1`, profileID); err != nil {
+	t.Cleanup(func() { _ = f.m.pg.DeleteProfile(profileID) })
+	if _, err := f.m.ReplaceTaskLLMProfiles(task.ID, []int64{profileID}, profileID); err != nil {
 		t.Fatal(err)
 	}
 	f.s.cfgMu.Lock()
@@ -653,8 +651,10 @@ func TestSideCheckpointPersistsBeforeAdmissionAndRestart(t *testing.T) {
 	}
 	ctx2, cancel := context.WithCancel(t.Context())
 	defer cancel()
-	restarted := &Server{m: f.m, ctx: ctx2, llmCfg: f.s.llmCfg, llmDirect: bound, llmOn: true}
+	restarted := &Server{Runtime: &Runtime{m: f.m, ctx: ctx2, llmCfg: f.s.llmCfg, llmDirect: bound, llmOn: true}}
 	restarted.initSideQuestions()
+	restarted.startSideQuestions()
+	defer func() { cancel(); restarted.backgroundWG.Wait() }()
 	if got := waitSide(t, f.m.pg, orphan.ID, "interrupted"); got.Answer != "saved before crash" {
 		t.Fatal("restart discarded partial answer")
 	}

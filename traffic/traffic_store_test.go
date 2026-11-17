@@ -1,6 +1,9 @@
 package traffic
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -12,6 +15,65 @@ import (
 
 	mproxy "github.com/lqqyt2423/go-mitmproxy/proxy"
 )
+
+func TestOpenTrafficWithURLSpecialPath(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "capture #1 %20")
+	tr, err := Open(dir, "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tr.Close()
+	if _, err := os.Stat(filepath.Join(dir, "_index", "index.sqlite")); err != nil {
+		t.Fatal(err)
+	}
+	tr.record(newFlow("path.example", "GET", "/proof", nil, []byte("complete")))
+	if _, _, err := tr.Get(onlyExchangeID(t, tr)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestSpillFailurePreservesCompleteBody(t *testing.T) {
+	tr, dir := openTraffic(t)
+	body := bytes.Repeat([]byte("x"), maxInlineBody+1)
+	sum := sha256.Sum256(body)
+	hash := hex.EncodeToString(sum[:])
+	base := filepath.Join(dir, "_blobs", "sha256")
+	if err := os.MkdirAll(base, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	// A file in place of the bucket reproduces a real blob write failure on
+	// Windows and Unix without depending on filesystem permission behavior.
+	if err := os.WriteFile(filepath.Join(base, hash[:2]), []byte("blocked"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tr.record(newFlow("spill.example", "GET", "/proof", nil, body))
+	_, response, err := tr.Get(onlyExchangeID(t, tr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(response, string(body)) {
+		t.Fatalf("capture lost body bytes after blob write failure: response=%d bytes, body=%d bytes", len(response), len(body))
+	}
+}
+
+func TestSpillReplacesIncompleteBlob(t *testing.T) {
+	tr, dir := openTraffic(t)
+	body := bytes.Repeat([]byte("x"), maxInlineBody+1)
+	sum := sha256.Sum256(body)
+	hash := hex.EncodeToString(sum[:])
+	bucket := filepath.Join(dir, "_blobs", "sha256", hash[:2])
+	if err := os.MkdirAll(bucket, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(bucket, hash+".bin"), []byte("partial"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	tr.record(newFlow("spill.example", "GET", "/proof", nil, body))
+	data, total, err := tr.BlobRange(hash, int64(len(body)-1), 1)
+	if err != nil || total != int64(len(body)) || !bytes.Equal(data, []byte("x")) {
+		t.Fatalf("incomplete blob was reused: total=%d data=%q err=%v", total, data, err)
+	}
+}
 
 // flowOpt tweaks the synthetic flow built by newFlow.
 type flowOpt func(*mproxy.Flow)

@@ -490,7 +490,7 @@ func (m *Manager) proxyRotateConfig() (bool, time.Duration, bool, string) {
 	}()
 }
 
-func (s *Server) runProxyPoolSupervisor(ctx context.Context) {
+func (s *Runtime) runProxyPoolSupervisor(ctx context.Context) {
 	for {
 		_, rotateInterval, _, _ := s.m.proxyRotateConfig()
 		_, _, healthInterval := s.m.proxyHealthConfig()
@@ -531,7 +531,7 @@ func (s *Server) runProxyPoolSupervisor(ctx context.Context) {
 	}
 }
 
-func (s *Server) proxyPoolTick() proxyPoolTickOutcome {
+func (s *Runtime) proxyPoolTick() proxyPoolTickOutcome {
 	if s == nil {
 		return proxyPoolTickOutcome{}
 	}
@@ -540,7 +540,7 @@ func (s *Server) proxyPoolTick() proxyPoolTickOutcome {
 	return s.proxyPoolTickLocked(false)
 }
 
-func (s *Server) proxyPoolTickLocked(forceHealth bool) proxyPoolTickOutcome {
+func (s *Runtime) proxyPoolTickLocked(forceHealth bool) proxyPoolTickOutcome {
 	var outcome proxyPoolTickOutcome
 	if s.m == nil || s.m.proxyPool == nil {
 		return outcome
@@ -633,14 +633,14 @@ func (s *Server) proxyPoolTickLocked(forceHealth bool) proxyPoolTickOutcome {
 	return outcome
 }
 
-func serverContext(s *Server) context.Context {
+func serverContext(s *Runtime) context.Context {
 	if s != nil && s.ctx != nil {
 		return s.ctx
 	}
 	return context.Background()
 }
 
-func (s *Server) reconcileProxyPoolAfterProbe(activeConfirmed bool) bool {
+func (s *Runtime) reconcileProxyPoolAfterProbe(activeConfirmed bool) bool {
 	entries := s.m.proxyPoolEntries()
 	activeID := s.m.proxyPoolActiveID()
 	activeAvailable := false
@@ -699,7 +699,7 @@ func (m *Manager) activateProxyID(id, reason string) error {
 	return nil
 }
 
-func (s *Server) handleProxyPoolFailure(cause error) bool {
+func (s *Runtime) handleProxyPoolFailure(cause error) bool {
 	if s == nil || s.m == nil || s.m.proxyPool == nil || !isGlobalProxyDialFailure(cause) {
 		return false
 	}
@@ -708,6 +708,9 @@ func (s *Server) handleProxyPoolFailure(cause error) bool {
 		return false
 	}
 	res := s.runProxyProbe(serverContext(s), cur, "", s.m.egressProbes(), proxyPoolProbeTimeout)
+	if s.stopping() {
+		return true
+	}
 	if res.OK {
 		return false
 	}
@@ -746,7 +749,7 @@ func (s *Server) handleProxyPoolFailure(cause error) bool {
 	return false
 }
 
-func (s *Server) pauseAllProxyTasks(cause error) {
+func (s *Runtime) pauseAllProxyTasks(cause error) {
 	for _, t := range s.m.List() {
 		st := t.lifecycleSnapshot()
 		if isTerminalStatus(st.Status) || st.Paused || (s.engine != nil && s.engine.IsDeleting(t.ID)) {

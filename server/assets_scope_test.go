@@ -38,7 +38,7 @@ func TestCreateCompanyRejectsNormalizedDuplicateWithoutChangingScope(t *testing.
 	if err != nil {
 		t.Skipf("postgres unavailable (%v)", err)
 	}
-	defer m.Close()
+	t.Cleanup(func() { _ = m.Close() })
 
 	stamp := time.Now().UnixNano()
 	name := fmt.Sprintf("HTTP Strict Company %d", stamp)
@@ -50,7 +50,7 @@ func TestCreateCompanyRejectsNormalizedDuplicateWithoutChangingScope(t *testing.
 	}
 	defer func() { _ = m.pg.Companies().DeleteCompany(companyID) }()
 
-	s := &Server{m: m}
+	s := &Server{Runtime: &Runtime{m: m}}
 	body, err := json.Marshal(map[string]any{
 		"name":  "  " + name + "  ",
 		"scope": []map[string]string{{"kind": "domain", "value": fmt.Sprintf("new-%d.example", stamp)}},
@@ -78,7 +78,7 @@ func TestDeleteCompanyRefreshesLiveTaskCompanyIDs(t *testing.T) {
 	if err != nil {
 		t.Skipf("postgres unavailable (%v)", err)
 	}
-	defer m.Close()
+	t.Cleanup(func() { _ = m.Close() })
 
 	companyID, _, err := m.pg.Companies().UpsertCompany(
 		fmt.Sprintf("Delete Company DTO %d", time.Now().UnixNano()), "",
@@ -94,7 +94,7 @@ func TestDeleteCompanyRefreshesLiveTaskCompanyIDs(t *testing.T) {
 	}
 	defer func() { _, _ = m.DeleteTask(task.ID, DeleteTaskOptions{}) }()
 
-	s := &Server{m: m}
+	s := &Server{Runtime: &Runtime{m: m}}
 	req := httptest.NewRequest(http.MethodDelete, "/api/companies/1", bytes.NewBufferString(`{}`))
 	req.SetPathValue("id", i64s(companyID))
 	rec := httptest.NewRecorder()
@@ -119,8 +119,8 @@ func TestCompanyScopeHTTPErrorClassificationAndBounds(t *testing.T) {
 	if err != nil {
 		t.Skipf("postgres unavailable (%v)", err)
 	}
-	defer m.Close()
-	s := &Server{m: m}
+	t.Cleanup(func() { _ = m.Close() })
+	s := &Server{Runtime: &Runtime{m: m}}
 
 	t.Run("missing company is 404", func(t *testing.T) {
 		body := bytes.NewBufferString(`{"scope":[]}`)
@@ -193,8 +193,8 @@ func TestListAssetsClassifiesValidationAndDatabaseErrors(t *testing.T) {
 	if err != nil {
 		t.Skipf("postgres unavailable (%v)", err)
 	}
-	defer m.Close()
-	s := &Server{m: m}
+	t.Cleanup(func() { _ = m.Close() })
+	s := &Server{Runtime: &Runtime{m: m}}
 
 	req := httptest.NewRequest(http.MethodGet, "/api/assets?dsl=(", nil)
 	rec := httptest.NewRecorder()
@@ -219,8 +219,8 @@ func TestDeleteCompanyRejectsBadJSONAndReportsMissing(t *testing.T) {
 	if err != nil {
 		t.Skipf("postgres unavailable (%v)", err)
 	}
-	defer m.Close()
-	s := &Server{m: m}
+	t.Cleanup(func() { _ = m.Close() })
+	s := &Server{Runtime: &Runtime{m: m}}
 
 	companyID, _, err := m.pg.Companies().UpsertCompany(
 		fmt.Sprintf("Delete JSON Company %d", time.Now().UnixNano()), "",
@@ -258,8 +258,8 @@ func TestCompanyScopeSystemFailureIsHTTP500(t *testing.T) {
 	if err != nil {
 		t.Skipf("postgres unavailable (%v)", err)
 	}
-	defer m.Close()
-	s := &Server{m: m}
+	t.Cleanup(func() { _ = m.Close() })
+	s := &Server{Runtime: &Runtime{m: m}}
 	if err := m.pg.Close(); err != nil {
 		t.Fatal(err)
 	}

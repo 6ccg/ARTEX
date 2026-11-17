@@ -95,10 +95,10 @@ func canonicalTaskID(raw string) (string, bool) {
 
 // beginTaskDelete serializes the delete barrier with pause, resume, admission,
 // and FIFO reconciliation. Every lifecycle path rechecks deleting after taking
-// concMu, so none can commit a contradictory state once this returns.
-func (s *Server) beginTaskDelete(taskID string) bool {
-	s.concMu.Lock()
-	defer s.concMu.Unlock()
+// taskControlMu, so none can commit a contradictory state once this returns.
+func (s *Runtime) beginTaskDelete(taskID string) bool {
+	s.m.taskControlMu.Lock()
+	defer s.m.taskControlMu.Unlock()
 	if s.engine.IsDeleting(taskID) {
 		return false
 	}
@@ -116,9 +116,9 @@ func (s *Server) beginTaskDelete(taskID string) bool {
 // not from the in-memory state observed before deletion began. Keeping the task
 // paused on an unreadable row is conservative: a later explicit resume can
 // safely recover it without allowing work to escape an uncertain delete.
-func (s *Server) abortTaskDelete(taskID string) {
-	s.concMu.Lock()
-	defer s.concMu.Unlock()
+func (s *Runtime) abortTaskDelete(taskID string) {
+	s.m.taskControlMu.Lock()
+	defer s.m.taskControlMu.Unlock()
 	keepPaused := true
 	if id, err := strconv.ParseInt(taskID, 10, 64); err == nil && s.m != nil && s.m.pg != nil {
 		if persisted, getErr := s.m.pg.GetTask(id); getErr == nil && persisted != nil {
@@ -207,7 +207,7 @@ func writeCommittedTaskDelete(w http.ResponseWriter, result DeleteTaskResult, er
 	writeJSON(w, http.StatusOK, result)
 }
 
-func (s *Server) waitTaskQuiescent(ctx context.Context, taskID string) error {
+func (s *Runtime) waitTaskQuiescent(ctx context.Context, taskID string) error {
 	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
 	for {
@@ -1921,7 +1921,7 @@ func (s *Server) pgDeleteProfile(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, map[string]any{"deleted": id})
 }
 
-func (s *Server) restoreTasksAfterProfileDelete(pg *db.DB) {
+func (s *Runtime) restoreTasksAfterProfileDelete(pg *db.DB) {
 	for _, task := range s.m.List() {
 		if taskID, err := strconv.ParseInt(task.ID, 10, 64); err == nil {
 			if pt, err := pg.GetTask(taskID); err == nil && pt != nil {

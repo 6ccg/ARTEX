@@ -17,8 +17,7 @@ import (
 //   - 熔断状态进程级共享(s.llmHealth),重建 pool 不清空。
 
 // newLLMHealthRegistry builds the process-wide circuit-breaker registry, mirroring
-// state into PG so a cooling-off window survives a restart. Writes are async and
-// best-effort — the in-memory copy is authoritative.
+// state into PG in transition order so a cooling-off window survives a restart.
 func newLLMHealthRegistry(pg *db.DB) *llmpool.Registry {
 	if pg == nil {
 		return llmpool.NewRegistry(nil, nil)
@@ -29,14 +28,14 @@ func newLLMHealthRegistry(pg *db.DB) *llmpool.Registry {
 			t := st.OpenUntil
 			h.OpenUntil = &t
 		}
-		go func() {
-			if err := pg.SaveLLMHealth(h); err != nil {
-				log.Printf("[llmpool] 熔断状态落库失败: %v", err)
-			}
-		}()
+		if err := pg.SaveLLMHealth(h); err != nil {
+			log.Printf("[llmpool] 熔断状态落库失败: %v", err)
+		}
 	}
 	forget := func(id int64) {
-		go func() { _ = pg.ClearLLMHealth(id) }()
+		if err := pg.ClearLLMHealth(id); err != nil {
+			log.Printf("[llmpool] 清除熔断状态失败: %v", err)
+		}
 	}
 	reg := llmpool.NewRegistry(persist, forget)
 	// Restore only windows that haven't expired (LoadLLMHealth filters), so a
@@ -57,7 +56,7 @@ func newLLMHealthRegistry(pg *db.DB) *llmpool.Registry {
 // poolMember builds one chain member from a profile, reusing the per-profile
 // provider cache so every agent pointing at the same profile shares one provider
 // (hence one rate limiter). Returns nil when the profile can't be built.
-func (s *Server) poolMember(p *db.LLMProfile, rank int) *llmpool.Member {
+func (s *Runtime) poolMember(p *db.LLMProfile, rank int) *llmpool.Member {
 	prov, cfg, ok := s.providerForProfile(p.ID)
 	if !ok {
 		return nil
@@ -77,7 +76,7 @@ func (s *Server) poolMember(p *db.LLMProfile, rank int) *llmpool.Member {
 //
 // Returns nil when failover is off or the chain has fewer than two usable members
 // — callers then use the bare provider, which is byte-for-byte the old behavior.
-func (s *Server) poolChain(headID int64, headProv llm.Provider, headCfg agent.Config) *llmpool.Pool {
+func (s *Runtime) poolChain(headID int64, headProv llm.Provider, headCfg agent.Config) *llmpool.Pool {
 	if s.m == nil || s.m.pg == nil || !s.m.LLMPoolEnabled() {
 		return nil
 	}
@@ -127,7 +126,7 @@ func (s *Server) poolChain(headID int64, headProv llm.Provider, headCfg agent.Co
 
 // poolForActive wraps the globally-active provider in the failover chain. Returns
 // prov unchanged when failover is off or there's nothing to fall back to.
-func (s *Server) poolForActive(activeID int64, prov llm.Provider, cfg agent.Config) llm.Provider {
+func (s *Runtime) poolForActive(activeID int64, prov llm.Provider, cfg agent.Config) llm.Provider {
 	pool := s.poolChain(activeID, prov, cfg)
 	if pool == nil {
 		return prov
@@ -144,7 +143,7 @@ func (s *Server) poolForActive(activeID int64, prov llm.Provider, cfg agent.Conf
 // Only active when both the failover master switch and the bound-fallback switch
 // are on; otherwise a bound profile stays exclusive (fails hard), which is the
 // default and the documented precedence.
-func (s *Server) poolForBinding(id int64, prov llm.Provider, cfg agent.Config) llm.Provider {
+func (s *Runtime) poolForBinding(id int64, prov llm.Provider, cfg agent.Config) llm.Provider {
 	if s.m == nil || !s.m.LLMPoolEnabled() || !s.m.LLMPoolBindFallback() {
 		return prov
 	}
@@ -175,7 +174,7 @@ type LLMPoolMemberStatus struct {
 // llmPoolStatus reports the whole picture for the LLM page: whether failover is
 // on, the resolved chain order, and each profile's breaker state. Excluded
 // profiles are listed too (flagged), so the user can see why one isn't in line.
-func (s *Server) llmPoolStatus() map[string]any {
+func (s *Runtime) llmPoolStatus() map[string]any {
 	out := map[string]any{
 		"enabled":       false,
 		"bind_fallback": false,

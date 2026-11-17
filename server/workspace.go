@@ -25,7 +25,7 @@ const (
 // wsResolve maps a user-supplied relative path to an absolute path INSIDE the work
 // dir. It returns ok=false if the path would escape the root. filepath.Clean on a
 // rooted copy collapses any ".." so nothing can climb above the root.
-func (s *Server) wsResolve(rel string) (string, bool) {
+func (s *Runtime) wsResolve(rel string) (string, bool) {
 	base := filepath.Clean(s.m.dir)
 	rel = strings.TrimPrefix(strings.TrimSpace(rel), "/")
 	clean := filepath.Clean("/" + rel) // e.g. "/a/../../etc" → "/etc" (still rooted at "/")
@@ -37,7 +37,7 @@ func (s *Server) wsResolve(rel string) (string, bool) {
 }
 
 // wsRel renders an absolute path back as a workspace-relative path (forward slashes).
-func (s *Server) wsRel(abs string) string {
+func (s *Runtime) wsRel(abs string) string {
 	base := filepath.Clean(s.m.dir)
 	rel, err := filepath.Rel(base, abs)
 	if err != nil || rel == "." {
@@ -274,7 +274,7 @@ func reportScreenshotTimestamp(t time.Time) string {
 	return t.In(time.FixedZone("CST", 8*60*60)).Format("2006-01-02 15:04:05")
 }
 
-func (s *Server) findSessionPreview(rawPath string) (string, bool) {
+func (s *Runtime) findSessionPreview(rawPath string) (string, bool) {
 	rel := filepath.Clean(strings.TrimPrefix(strings.TrimSpace(rawPath), "/"))
 	const prefix = "findings" + string(os.PathSeparator) + "screenshots" + string(os.PathSeparator)
 	if rel == "." || !strings.HasPrefix(rel, prefix) || strings.Contains(rel, ".."+string(os.PathSeparator)) {
@@ -303,7 +303,7 @@ func (s *Server) findSessionPreview(rawPath string) (string, bool) {
 // archiveFindingScreenshots materializes report-referenced screenshots in the
 // task workspace. Browser runs use per-session working directories, while
 // reports intentionally use the portable findings/screenshots/ path.
-func (s *Server) archiveFindingScreenshots(taskID int64, markdown string) error {
+func (s *Runtime) archiveFindingScreenshots(taskID int64, markdown string) error {
 	if taskID <= 0 {
 		return nil
 	}
@@ -342,7 +342,7 @@ func (s *Server) archiveFindingScreenshots(taskID int64, markdown string) error 
 	return nil
 }
 
-func (s *Server) resolveSessionScreenshot(rel string) (string, bool) {
+func (s *Runtime) resolveSessionScreenshot(rel string) (string, bool) {
 	matches, err := filepath.Glob(filepath.Join(filepath.Clean(s.m.dir), "sessions", "*", rel))
 	if err != nil || len(matches) == 0 {
 		return "", false

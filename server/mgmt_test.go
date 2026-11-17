@@ -20,8 +20,10 @@ func TestMgmtAPI(t *testing.T) {
 	if m.pg == nil {
 		t.Skip("postgres unavailable — skipping management API test")
 	}
+	t.Cleanup(func() { _ = m.Close() })
 	td := t.TempDir()
-	s := New(context.Background(), m, td, td, td)
+	s := newStartedServer(t, context.Background(), m, td, td, td)
+	defer s.Close()
 	h := s.Handler()
 	tok, err := signJWT(s.jwtKey)
 	if err != nil {
@@ -111,7 +113,7 @@ func TestProxySettingsPartialUpdate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer m.Close()
+	t.Cleanup(func() { _ = m.Close() })
 	for _, key := range []string{settingGlobalProxy, settingLLMProxy, settingWebSearchProxy, settingWebSearchOn, settingWebSearchBackend, settingProxyPool, settingProxyPoolActive} {
 		value, exists, err := m.pg.GetSetting(key)
 		if err != nil {
@@ -128,7 +130,7 @@ func TestProxySettingsPartialUpdate(t *testing.T) {
 	if err := m.setProxyPoolEntries(nil, ""); err != nil {
 		t.Fatal(err)
 	}
-	s := &Server{m: m}
+	s := &Server{Runtime: &Runtime{m: m}}
 	expected := map[string]string{
 		settingGlobalProxy:    "http://127.0.0.1:18081",
 		settingLLMProxy:       "https://127.0.0.1:18083",

@@ -29,7 +29,7 @@ const (
 )
 
 // findMCPByName returns the MCP server row with the given name, or nil.
-func (s *Server) findMCPByName(name string) (*db.MCPServer, error) {
+func (s *Runtime) findMCPByName(name string) (*db.MCPServer, error) {
 	all, err := s.m.pg.ListMCP()
 	if err != nil {
 		return nil, err
@@ -44,7 +44,7 @@ func (s *Server) findMCPByName(name string) (*db.MCPServer, error) {
 
 // scopeSentryClient dials the configured ScopeSentry MCP (http transport). The env
 // map doubles as HTTP headers (X-API-Key). Callers must Close the client.
-func (s *Server) scopeSentryClient(ctx context.Context) (*mcphttp.Client, error) {
+func (s *Runtime) scopeSentryClient(ctx context.Context) (*mcphttp.Client, error) {
 	m, err := s.findMCPByName(scopeSentryMCPName)
 	if err != nil {
 		return nil, err
@@ -364,7 +364,7 @@ func (s *Server) syncSSRun(w http.ResponseWriter, r *http.Request) {
 
 // ssProjectMeta fetches a project's display name and its target root domains
 // (get_project.target is a newline-separated list) for company + scope creation.
-func (s *Server) ssProjectMeta(ctx context.Context, cl *mcphttp.Client, projectID string) (name string, roots []string, err error) {
+func (s *Runtime) ssProjectMeta(ctx context.Context, cl *mcphttp.Client, projectID string) (name string, roots []string, err error) {
 	text, err := cl.Call(ctx, "get_project", map[string]any{"id": projectID})
 	if err != nil {
 		return "", nil, err
@@ -387,7 +387,7 @@ func (s *Server) ssProjectMeta(ctx context.Context, cl *mcphttp.Client, projectI
 // ssPageAll pages through list_assets for one asset_type + filter until a short/empty
 // page or the protection cap. The {list:[...]} envelope has no total, so we stop when
 // a page returns fewer than pageSize items.
-func (s *Server) ssPageAll(ctx context.Context, cl *mcphttp.Client, ssType string, filter map[string]any, pageSize int) (items []json.RawMessage, truncated bool, err error) {
+func (s *Runtime) ssPageAll(ctx context.Context, cl *mcphttp.Client, ssType string, filter map[string]any, pageSize int) (items []json.RawMessage, truncated bool, err error) {
 	for page := 1; ; page++ {
 		args := map[string]any{"asset_type": ssType, "pageIndex": page, "pageSize": pageSize}
 		if len(filter) > 0 {
@@ -421,7 +421,7 @@ func (s *Server) ssPageAll(ctx context.Context, cl *mcphttp.Client, ssType strin
 
 // ssIngest maps one ScopeSentry asset JSON to the ARTEX asset store and upserts it.
 // Returns a non-empty error string on failure. synced is incremented per kind.
-func (s *Server) ssIngest(as *db.AssetStore, assetType string, raw json.RawMessage, synced map[string]int) string {
+func (s *Runtime) ssIngest(as *db.AssetStore, assetType string, raw json.RawMessage, synced map[string]int) string {
 	switch assetType {
 	case "subdomain":
 		var it struct {

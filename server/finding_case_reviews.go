@@ -23,13 +23,13 @@ type findingReviewConclusion struct {
 	Decisions []findingReviewDecision `json:"decisions"`
 }
 
-func (s *Server) isHistoricalFindingReview(conv int64) (bool, error) {
+func (s *Runtime) isHistoricalFindingReview(conv int64) (bool, error) {
 	var exists bool
 	err := s.m.pg.QueryRow(`SELECT EXISTS(SELECT 1 FROM finding_case_review_runs WHERE conversation_id=$1)`, conv).Scan(&exists)
 	return exists, err
 }
 
-func (s *Server) toolCompleteFindingCaseReview() actool.CoreTool {
+func (s *Runtime) toolCompleteFindingCaseReview() actool.CoreTool {
 	decision := objSchema(map[string]any{
 		"finding_id":          idParam("所选独立漏洞记录 ID"),
 		"verdict":             map[string]any{"type": "string", "enum": []string{"independent", "merged", "suggested"}},
@@ -48,7 +48,7 @@ func (s *Server) toolCompleteFindingCaseReview() actool.CoreTool {
 	})
 }
 
-func (s *Server) saveFindingReviewConclusion(ctx context.Context, conv int64, a findingReviewConclusion) error {
+func (s *Runtime) saveFindingReviewConclusion(ctx context.Context, conv int64, a findingReviewConclusion) error {
 	if conv <= 0 {
 		return errors.New("仅用于有上下文的历史整理会话")
 	}
@@ -135,7 +135,7 @@ func (s *Server) saveFindingReviewConclusion(ctx context.Context, conv int64, a 
 	})
 }
 
-func (s *Server) validateFindingReviewCompletion(conv int64) error {
+func (s *Runtime) validateFindingReviewCompletion(conv int64) error {
 	var raw json.RawMessage
 	if err := s.m.pg.QueryRow(`SELECT conclusion FROM finding_case_review_runs WHERE conversation_id=$1`, conv).Scan(&raw); err != nil {
 		return err
@@ -228,7 +228,7 @@ func validateUnifiedFindingReport(report string) error {
 	return nil
 }
 
-func (s *Server) historicalFindingReviewSelection(ctx context.Context) ([]int64, error) {
+func (s *Runtime) historicalFindingReviewSelection(ctx context.Context) ([]int64, error) {
 	conv := intercept.ConvIDFromContext(ctx)
 	if conv == 0 {
 		return nil, nil

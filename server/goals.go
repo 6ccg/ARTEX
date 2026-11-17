@@ -26,7 +26,7 @@ type goalSpec struct {
 //     分解完再 engine.Run —— 引擎在 goal 节点就绪后才启动,避免 planner 抢在 goal 之前跑的竞态。
 //
 // 异步(goroutine)所以调用方立即返回,两条路径行为一致:秒建任务、后台拆目标。
-func (s *Server) launchTask(t *Task, seedText string, seedFirstIntent bool) {
+func (s *Runtime) launchTask(t *Task, seedText string, seedFirstIntent bool) {
 	if !s.engine.beginTaskOperation(t.ID) {
 		return
 	}
@@ -40,7 +40,7 @@ func (s *Server) launchTask(t *Task, seedText string, seedFirstIntent bool) {
 	}
 }
 
-func (s *Server) startTaskEngine(t *Task) {
+func (s *Runtime) startTaskEngine(t *Task) {
 	ctx := s.engine.execContextFor(s.ctx, t.ID)
 	if ctx.Err() != nil || s.engine.IsDeleting(t.ID) {
 		return
@@ -66,7 +66,7 @@ func (s *Server) startTaskEngine(t *Task) {
 	s.engine.Run(s.ctx, t)
 }
 
-func (s *Server) occupiesConcurrencySlot(t *Task) bool {
+func (s *Runtime) occupiesConcurrencySlot(t *Task) bool {
 	if t == nil {
 		return false
 	}
@@ -84,7 +84,7 @@ func (s *Server) occupiesConcurrencySlot(t *Task) bool {
 	return !s.engine.IsPaused(t.ID) && (s.engine.ReadyFor(t) || s.engine.ActiveLLMCalls(t.ID) > 0)
 }
 
-func (s *Server) runningTaskCount(excludeID string) int {
+func (s *Runtime) runningTaskCount(excludeID string) int {
 	count := 0
 	for _, task := range s.m.List() {
 		if task.ID != excludeID && s.occupiesConcurrencySlot(task) {
@@ -97,47 +97,47 @@ func (s *Server) runningTaskCount(excludeID string) int {
 // admitTask is the single admission path for new, resumed, rerun and follow-up
 // work. It atomically either starts the task or appends it to the persistent FIFO
 // queue. mode is bootstrap for a freshly-created task and resume otherwise.
-func (s *Server) admitTask(t *Task, mode string) (queued bool, err error) {
+func (s *Runtime) admitTask(t *Task, mode string) (queued bool, err error) {
 	return s.admitTaskWhen(t, mode, false)
 }
 
 // admitPausedTask is the task-control resume path. The paused precondition is
 // checked under the same scheduler lock as admission so a concurrent pause,
 // dequeue or FIFO promotion cannot leave database and Engine state divergent.
-func (s *Server) admitPausedTask(t *Task) (queued bool, err error) {
+func (s *Runtime) admitPausedTask(t *Task) (queued bool, err error) {
 	return s.admitTaskWhen(t, "resume", true)
 }
 
-func (s *Server) admitTaskWhen(t *Task, mode string, requirePaused bool) (bool, error) {
+func (s *Runtime) admitTaskWhen(t *Task, mode string, requirePaused bool) (bool, error) {
 	return s.admitTaskWhenScheduled(t, mode, requirePaused, false)
 }
-func (s *Server) admitTaskWhenScheduled(t *Task, mode string, requirePaused, scheduled bool) (queued bool, err error) {
+func (s *Runtime) admitTaskWhenScheduled(t *Task, mode string, requirePaused, scheduled bool) (queued bool, err error) {
 	return s.admitTaskWhenScheduledWithReason(t, mode, requirePaused, scheduled, "", false)
 }
 
 // admitTaskWhenScheduledWithReason is the shared admission gate. A non-empty
-// requiredReason is checked after concMu is acquired, alongside the paused and
+// requiredReason is checked under taskControlMu, alongside the paused and
 // terminal checks, so proxy recovery cannot revive a task that was re-paused by
 // a user while the probe was in flight. preserveSchedule keeps calendar state
 // and never creates schedule_manual_until (used by proxy recovery).
-func (s *Server) admitTaskWhenScheduledWithReason(t *Task, mode string, requirePaused, scheduled bool, requiredReason string, preserveSchedule bool) (queued bool, err error) {
+func (s *Runtime) admitTaskWhenScheduledWithReason(t *Task, mode string, requirePaused, scheduled bool, requiredReason string, preserveSchedule bool) (queued bool, err error) {
 	return s.admitTaskWhenScheduledWithGenerationChecked(t, mode, requirePaused, scheduled, requiredReason, preserveSchedule, 0, false)
 }
 
 // admitTaskWhenScheduledWithGeneration checks the supplied reconnect round.
 // Generation zero is valid; callers that do not have a round use the explicit
 // unchecked form through admitTaskWhenScheduledWithReason.
-func (s *Server) admitTaskWhenScheduledWithGeneration(t *Task, mode string, requirePaused, scheduled bool, requiredReason string, preserveSchedule bool, requiredGeneration uint64) (queued bool, err error) {
+func (s *Runtime) admitTaskWhenScheduledWithGeneration(t *Task, mode string, requirePaused, scheduled bool, requiredReason string, preserveSchedule bool, requiredGeneration uint64) (queued bool, err error) {
 	return s.admitTaskWhenScheduledWithGenerationChecked(t, mode, requirePaused, scheduled, requiredReason, preserveSchedule, requiredGeneration, true)
 }
 
-func (s *Server) admitTaskWhenScheduledWithGenerationChecked(t *Task, mode string, requirePaused, scheduled bool, requiredReason string, preserveSchedule bool, requiredGeneration uint64, checkGeneration bool) (queued bool, err error) {
+func (s *Runtime) admitTaskWhenScheduledWithGenerationChecked(t *Task, mode string, requirePaused, scheduled bool, requiredReason string, preserveSchedule bool, requiredGeneration uint64, checkGeneration bool) (queued bool, err error) {
 	if t == nil {
 		return false, fmt.Errorf("task not found")
 	}
 	manualSchedule := requirePaused && !scheduled && !preserveSchedule
 	if manualSchedule {
-		// Match the calendar tick's lock order: scheduleMu before concMu. The
+		// Match the calendar tick's lock order: scheduleMu before taskControlMu. The
 		// override must commit before another tick can decide to pause this task.
 		s.scheduleMu.Lock()
 		defer s.scheduleMu.Unlock()
@@ -145,9 +145,9 @@ func (s *Server) admitTaskWhenScheduledWithGenerationChecked(t *Task, mode strin
 	if mode != "bootstrap" {
 		mode = "resume"
 	}
-	s.concMu.Lock()
-	defer s.concMu.Unlock()
-	// Delete installs its barrier under concMu as well. Re-resolve after acquiring
+	s.m.taskControlMu.Lock()
+	defer s.m.taskControlMu.Unlock()
+	// Delete installs its barrier under taskControlMu as well. Re-resolve after acquiring
 	// the lock so a request that captured a task pointer before successful deletion
 	// cannot revive that stale handle after StopTask clears its Engine maps.
 	current, exists := s.m.Task(t.ID)
@@ -252,7 +252,7 @@ func (s *Server) admitTaskWhenScheduledWithGenerationChecked(t *Task, mode strin
 	} else if wasTerminal {
 		// A final settle round may finish as done. Revival must release its
 		// worker/planner barrier too, while preserving its deadline/checkpoint.
-		s.engine.settling.Delete(t.ID)
+		s.engine.taskRun(t.ID).settling.Store(false)
 	}
 	if shouldQueue {
 		if !wasQueued {
@@ -271,7 +271,7 @@ func (s *Server) admitTaskWhenScheduledWithGenerationChecked(t *Task, mode strin
 	return false, nil
 }
 
-func (s *Server) hasReadyQueuedTask(excludeID string) bool {
+func (s *Runtime) hasReadyQueuedTask(excludeID string) bool {
 	for _, task := range s.m.List() {
 		lifecycle := task.lifecycleSnapshot()
 		if task.ID != excludeID && lifecycle.Queued && !lifecycle.Paused && !isTerminalStatus(lifecycle.Status) && s.engine.ReadyFor(task) {
@@ -281,7 +281,7 @@ func (s *Server) hasReadyQueuedTask(excludeID string) bool {
 	return false
 }
 
-func (s *Server) startAdmittedTask(t *Task, mode string) {
+func (s *Runtime) startAdmittedTask(t *Task, mode string) {
 	if s.engine.ReadyFor(t) {
 		if err := s.m.StartTaskRunSegment(t.ID); err != nil {
 			log.Printf("[runtime] task %s start segment failed: %v", t.ID, err)
@@ -312,9 +312,12 @@ func (s *Server) startAdmittedTask(t *Task, mode string) {
 	s.engine.startDeadlineCoordinator(s.ctx, t)
 }
 
-func (s *Server) reconcileConcurrency() {
-	s.concMu.Lock()
-	defer s.concMu.Unlock()
+func (s *Runtime) reconcileConcurrency() {
+	s.m.taskControlMu.Lock()
+	defer s.m.taskControlMu.Unlock()
+	if s.engine.isClosing() {
+		return
+	}
 	enabled, limit := s.m.ConcurrencyLimit()
 
 	// A task whose provider chain becomes unavailable cannot do useful work and
@@ -414,7 +417,7 @@ func (s *Server) reconcileConcurrency() {
 //
 // 为什么必须显式复活:planner/worker 循环的终态门(engine.go)会吞掉普通 notify——光改
 // 图 + Notify 唤不醒已判完成的任务;重启后终态任务的 goroutine 也可能已不在,故还要 Run。
-func (s *Server) reviveTask(t *Task) {
+func (s *Runtime) reviveTask(t *Task) {
 	if t == nil {
 		return
 	}
@@ -430,7 +433,7 @@ func (s *Server) reviveTask(t *Task) {
 // is used verbatim as a single goal so the task still has something to judge against.
 // Returns the seeded specs so callers can emit activity records for them.
 // emit, when non-nil, is forwarded to DecomposeGoals so LLM steps are visible in the UI.
-func (s *Server) createGoals(ctx context.Context, t *Task, emit func(db.Activity)) []goalSpec {
+func (s *Runtime) createGoals(ctx context.Context, t *Task, emit func(db.Activity)) []goalSpec {
 	if t == nil {
 		return nil
 	}
@@ -446,7 +449,7 @@ func (s *Server) createGoals(ctx context.Context, t *Task, emit func(db.Activity
 	taskID, _ := strconv.ParseInt(t.ID, 10, 64)
 	s.engine.BeginLLMCall(t.ID)
 	goalRuntime := s.agentsForTask(t).runtime
-	decomposed := agent.DecomposeGoalsWithProvider(ctx, goalRuntime, s.m.dir, t.Goal, t.Description, as, t.Store, taskID, goalRuntime.nonStreaming(), goalRuntime.maxTokens(), emit)
+	decomposed := agent.DecomposeGoalsWithProvider(s.host, ctx, goalRuntime, s.m.dir, t.Goal, t.Description, as, t.Store, taskID, goalRuntime.nonStreaming(), goalRuntime.maxTokens(), emit)
 	s.engine.EndLLMCall(t.ID)
 	for _, g := range decomposed {
 		if strings.TrimSpace(g.Text) != "" {

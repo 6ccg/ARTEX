@@ -325,12 +325,6 @@ func TestSideTaskArchiveVersions(t *testing.T) {
 				t.Fatal(err)
 			}
 			defer d.Close()
-			if err := d.EnsureLLMRecordsTable(); err != nil {
-				t.Fatal(err)
-			}
-			if err := d.EnsureLLMUsageTable(); err != nil {
-				t.Fatal(err)
-			}
 			task, err := d.CreateTask("btw archive", "restore context", nil, 0, 0)
 			if err != nil {
 				t.Fatal(err)
@@ -383,7 +377,7 @@ func TestSideTaskArchiveVersions(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if archive.FormatVersion != 3 || archive.DataCounts["side_question_sessions"] != 2 || archive.DataCounts["side_question_requests"] != 2 {
+			if archive.FormatVersion != TaskArchiveFormatVersion || archive.DataCounts["side_question_sessions"] != 2 || archive.DataCounts["side_question_requests"] != 2 {
 				t.Fatalf("missing side archive: %+v", archive.DataCounts)
 			}
 			if err = d.CompleteTaskArchive(job.ID, archive, "/tmp/side-fixture.tar.zst", "fixture", 1, 1); err != nil {

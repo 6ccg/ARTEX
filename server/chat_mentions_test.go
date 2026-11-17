@@ -121,9 +121,9 @@ func TestChatMentionWorkerReceivesServerDetails(t *testing.T) {
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) — skipping", err)
 	}
-	defer m.Close()
+	t.Cleanup(func() { _ = m.Close() })
 	ctx, cancel := context.WithCancel(context.Background())
-	s := &Server{ctx: ctx, m: m, engine: NewEngine(m)}
+	s := &Server{Runtime: &Runtime{ctx: ctx, m: m, engine: NewEngine(m)}}
 	task, err := m.CreateTask("Worker mention test", "Read referenced records", nil, 0, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -145,7 +145,7 @@ func TestChatMentionWorkerReceivesServerDetails(t *testing.T) {
 	}
 	defer m.pg.DeleteFinding(fid)
 	requests := make(chan llm.CompletionRequest, 10)
-	worker := agent.NewWorker(retestProvider{complete: func(_ context.Context, req llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {
+	worker := agent.NewWorker(nil, retestProvider{complete: func(_ context.Context, req llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {
 		requests <- req
 		return llm.Message{Role: llm.RoleAssistant, Content: []llm.ContentBlock{llm.TextBlock("已读取引用")}}, "end_turn", llm.Usage{}, nil
 	}}, "test", m.dir, nil, 10000, 1)

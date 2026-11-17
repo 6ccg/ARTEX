@@ -14,6 +14,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -26,7 +27,7 @@ func taskFilesFixture(t *testing.T) (*Server, string, func(string, string, strin
 	t.Helper()
 	base := t.TempDir()
 	m := &Manager{dir: base, tasks: map[string]*Task{"313": {ID: "313"}}}
-	s := &Server{m: m}
+	s := &Server{Runtime: &Runtime{m: m}}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/tasks/{id}/files", s.taskFilesList)
 	mux.HandleFunc("GET /api/tasks/{id}/files/all", s.taskFilesAll)
@@ -108,7 +109,9 @@ func TestTaskFilesSymlinkIsolationAndZip(t *testing.T) {
 	s, run, get := taskFilesFixture(t)
 	taskFileWrite(t, run, "nested/hello.txt", []byte("hello"))
 	taskFileWrite(t, run, ".hidden", []byte("hidden"))
-	taskFileWrite(t, run, `..\unsafe.txt`, []byte("unsafe ZIP name"))
+	if runtime.GOOS != "windows" {
+		taskFileWrite(t, run, `..\unsafe.txt`, []byte("unsafe ZIP name"))
+	}
 	outside := t.TempDir()
 	taskFileWrite(t, outside, "secret.txt", []byte("SECRET"))
 	for name, target := range map[string]string{"escape.txt": filepath.Join(outside, "secret.txt"), "escape-dir": outside, "inside": "nested/hello.txt"} {
@@ -140,7 +143,11 @@ func TestTaskFilesSymlinkIsolationAndZip(t *testing.T) {
 		t.Fatalf("internal link %d %s", r.Code, r.Body.String())
 	}
 	all := taskFileListingResult(t, get("313", "all", ""))
-	if all.Total != 3 || all.Size != 26 {
+	wantTotal, wantSize := 3, int64(26)
+	if runtime.GOOS == "windows" {
+		wantTotal, wantSize = 2, 11
+	}
+	if all.Total != wantTotal || all.Size != wantSize {
 		t.Fatalf("all: %+v", all)
 	}
 	for _, dir := range []string{"", "nested"} {
@@ -191,7 +198,7 @@ func TestTaskFilesTextAndPreview(t *testing.T) {
 		binary, large bool
 	}{
 		{"empty", nil, false, false}, {"utf8", []byte("文本\n"), false, false},
-		{"nul", []byte{'a', 0}, true, false}, {"invalid", []byte{0xff}, true, false},
+		{"with-nul.bin", []byte{'a', 0}, true, false}, {"invalid", []byte{0xff}, true, false},
 		{"boundary", bytes.Repeat([]byte{'a'}, maxWorkspaceRead), false, false},
 		{"large", bytes.Repeat([]byte{'a'}, maxWorkspaceRead+1), true, true},
 	}
@@ -204,7 +211,7 @@ func TestTaskFilesTextAndPreview(t *testing.T) {
 		}
 		rec := get("313", "read", tc.name)
 		if rec.Code != 200 {
-			t.Fatal(rec.Code)
+			t.Fatalf("%s: %d %s", tc.name, rec.Code, rec.Body.String())
 		}
 		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
 			t.Fatal(err)
@@ -321,7 +328,7 @@ func TestTaskFilesRealDirectory(t *testing.T) {
 		t.Skip("set ARTEX_TASK_FILES_TEST_DIR to read an existing task 313 directory")
 	}
 	m := &Manager{dir: base, tasks: map[string]*Task{"313": {ID: "313"}}}
-	s := &Server{m: m}
+	s := &Server{Runtime: &Runtime{m: m}}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /api/tasks/{id}/files", s.taskFilesList)
 	mux.HandleFunc("GET /api/tasks/{id}/files/all", s.taskFilesAll)
@@ -400,7 +407,7 @@ func TestTaskFilesIntentMetadata(t *testing.T) {
 	if err != nil {
 		t.Skipf("isolated PostgreSQL required: %v", err)
 	}
-	defer m.Close()
+	t.Cleanup(func() { _ = m.Close() })
 	task, err := m.CreateTask("task files metadata", "", nil, 0, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -416,7 +423,7 @@ func TestTaskFilesIntentMetadata(t *testing.T) {
 	req := httptest.NewRequest("GET", "/api/tasks/"+task.ID+"/files", nil)
 	req.SetPathValue("id", task.ID)
 	rec := httptest.NewRecorder()
-	(&Server{m: m}).taskFilesList(rec, req)
+	(&Server{Runtime: &Runtime{m: m}}).taskFilesList(rec, req)
 	listing := taskFileListingResult(t, rec)
 	if len(listing.Entries) != 1 || listing.Entries[0].IntentID != id || listing.Entries[0].IntentTitle != "Readable intent title" || listing.Entries[0].IntentState != "open" {
 		t.Fatalf("intent metadata: %+v", listing.Entries)

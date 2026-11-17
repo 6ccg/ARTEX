@@ -2,7 +2,7 @@
 # ARTEX cross-platform release builder.
 #
 # The default mode builds one target and embeds the already-exported frontend.
-# `./build.sh --release` builds and packages all supported desktop/server targets.
+# `bash build.sh --release` builds and packages all supported desktop/server targets.
 #
 # Environment variables:
 #   ARTEX_TARGET_OS=linux             One target OS in single-target mode.
@@ -30,9 +30,9 @@ die() { printf '\033[31m[x]\033[0m %s\n' "$*" >&2; exit 1; }
 usage() {
   cat <<'EOF'
 用法：
-  ./build.sh                         编译当前系统当前架构
-  ./build.sh --target linux/amd64   编译一个指定目标
-  ./build.sh --release               编译并打包全部支持的目标
+  bash build.sh                         编译当前系统当前架构
+  bash build.sh --target linux/amd64   编译一个指定目标
+  bash build.sh --release               编译并打包全部支持的目标
 
 选项：
   --release              构建 Linux、macOS、Windows 的 amd64/arm64 目标并生成 zip
@@ -42,7 +42,7 @@ usage() {
   --help                 显示帮助
 
 多目标列表可通过 ARTEX_TARGETS 覆盖，例如：
-  ARTEX_TARGETS=linux/amd64,windows/amd64 ./build.sh --release
+  ARTEX_TARGETS=linux/amd64,windows/amd64 bash build.sh --release
 EOF
 }
 
@@ -210,6 +210,7 @@ build_target() {
     output="${ARTEX_OUTPUT_DIR}/artex-${goos}-${goarch}/${binary_name}"
   fi
   mkdir -p "$(dirname "$output")"
+  output="$(cd "$(dirname "$output")" && pwd)/$(basename "$output")"
 
   info "编译 ${goos}/${goarch}，版本 ${ARTEX_BUILD_VERSION}"
   GOSUMDB="$ARTEX_GOSUMDB" \

@@ -3,6 +3,8 @@ package proxy
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -275,7 +277,9 @@ func TestProxy(t *testing.T) {
 			if err == nil {
 				t.Fatal("should have error")
 			}
-			if !strings.Contains(err.Error(), "certificate is not trusted") {
+			var certErr *tls.CertificateVerificationError
+			var unknownAuthority x509.UnknownAuthorityError
+			if !errors.As(err, &certErr) && !errors.As(err, &unknownAuthority) {
 				t.Fatal("should get not trusted error, but got", err.Error())
 			}
 		})
@@ -595,11 +599,35 @@ func TestProxyClose(t *testing.T) {
 }
 
 func TestProxyShutdown(t *testing.T) {
+	for _, protocol := range []string{"http", "https", "h2"} {
+		t.Run(protocol, func(t *testing.T) { testProxyShutdown(t, protocol) })
+	}
+}
+
+func testProxyShutdown(t *testing.T, protocol string) {
 	helper := &testProxyHelper{
 		server:    &http.Server{},
 		proxyAddr: ":29084",
 	}
 	helper.init(t)
+	if protocol == "h2" {
+		helper.server.TLSConfig.NextProtos = []string{"h2"}
+	}
+	started, release := make(chan struct{}), make(chan struct{})
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}()
+	helper.server.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/slow" {
+			close(started)
+			<-release
+		}
+		io.WriteString(w, "ok")
+	})
 	httpEndpoint := helper.httpEndpoint
 	httpsEndpoint := helper.httpsEndpoint
 	testProxy := helper.testProxy
@@ -607,7 +635,7 @@ func TestProxyShutdown(t *testing.T) {
 	defer helper.ln.Close()
 	go helper.server.Serve(helper.ln)
 	defer helper.tlsPlainLn.Close()
-	go helper.server.Serve(helper.tlsLn)
+	go helper.server.ServeTLS(helper.tlsPlainLn, "", "")
 
 	errCh := make(chan error)
 	go func() {
@@ -618,20 +646,61 @@ func TestProxyShutdown(t *testing.T) {
 	time.Sleep(time.Millisecond * 10) // wait for test proxy startup
 
 	proxyClient := getProxyClient()
+	proxyClient.Transport.(*http.Transport).ForceAttemptHTTP2 = protocol == "h2"
+	defer proxyClient.CloseIdleConnections()
 	testSendRequest(t, httpEndpoint, proxyClient, "ok")
 	testSendRequest(t, httpsEndpoint, proxyClient, "ok")
 
-	if err := testProxy.Shutdown(context.Background()); err != nil {
-		t.Fatalf("shutdown got error %v", err)
+	requestDone := make(chan error, 1)
+	go func() {
+		endpoint := httpsEndpoint
+		if protocol == "http" {
+			endpoint = httpEndpoint
+		}
+		response, err := proxyClient.Get(endpoint + "slow")
+		if err == nil {
+			_, err = io.ReadAll(response.Body)
+			response.Body.Close()
+		}
+		requestDone <- err
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("slow request did not reach upstream")
 	}
+	shutdownDone := make(chan error, 1)
+	go func() { shutdownDone <- testProxy.Shutdown(context.Background()) }()
 
 	select {
 	case err := <-errCh:
 		if err != http.ErrServerClosed {
 			t.Fatalf("expected ErrServerClosed error, but got %v", err)
 		}
-	case <-time.After(time.Millisecond * 10):
+	case <-time.After(time.Second):
 		t.Fatal("shutdown timeout")
+	}
+	select {
+	case err := <-shutdownDone:
+		t.Fatalf("shutdown returned before the HTTPS response finished: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case err := <-requestDone:
+		if err != nil {
+			t.Fatalf("shutdown interrupted an active response: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("active response did not finish")
+	}
+	select {
+	case err := <-shutdownDone:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("shutdown did not drain")
 	}
 }
 

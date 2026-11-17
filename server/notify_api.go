@@ -457,7 +457,7 @@ func notifyTestMessage(baseURL string) notify.Message {
 }
 
 // notifierBaseURL 读回链用的外部地址。
-func (s *Server) notifierBaseURL(pg *db.DB) string {
+func (s *Runtime) notifierBaseURL(pg *db.DB) string {
 	v, _, _ := pg.GetSetting(settingNotifyPublicBaseURL)
 	return trimTrailingSlash(v)
 }

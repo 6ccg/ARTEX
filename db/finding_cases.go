@@ -154,17 +154,54 @@ func (d *DB) ListFindingCases(filter FindingFilter, page, size int) ([]FindingCa
 	if err != nil {
 		return nil, 0, err
 	}
+	caseIDs := make([]int64, 0, len(groups))
+	for _, cid := range groups {
+		if cid > 0 {
+			caseIDs = append(caseIDs, cid)
+		}
+	}
+	if len(caseIDs) == 0 {
+		return out, total, nil
+	}
+	rawIDs, err := json.Marshal(caseIDs)
+	if err != nil {
+		return nil, 0, err
+	}
+	// Read the current page's folders and full member counts in one round trip.
+	// Filtered matched IDs above remain distinct from these whole-folder counts.
+	caseRows, err := d.Query(`SELECT `+strings.Replace(caseColumns, "c.report,", "''::text,", 1)+`,
+		COUNT(f.id), COUNT(f.id) FILTER(WHERE f.severity='critical'),
+		COUNT(f.id) FILTER(WHERE f.severity='high'), COUNT(f.id) FILTER(WHERE f.severity='medium'),
+		COUNT(f.id) FILTER(WHERE f.severity='low')
+		FROM finding_cases c
+		LEFT JOIN finding_case_members m ON m.case_id=c.id
+		LEFT JOIN findings f ON f.id=m.finding_id
+		WHERE c.id IN (SELECT jsonb_array_elements_text($1::jsonb)::bigint)
+		GROUP BY c.id`, string(rawIDs))
+	if err != nil {
+		return nil, 0, err
+	}
+	defer caseRows.Close()
+	cases := make(map[int64]*FindingCase, len(caseIDs))
+	for caseRows.Next() {
+		c := new(FindingCase)
+		if err := caseRows.Scan(&c.ID, &c.TaskID, &c.Title, &c.Reason, &c.Severity,
+			&c.SeverityReason, &c.Report, &c.Version, &c.ReportVersion, &c.Active, &c.CreatedAt,
+			&c.Count, &c.Critical, &c.High, &c.Medium, &c.Low); err != nil {
+			return nil, 0, err
+		}
+		cases[c.ID] = c
+	}
+	if err := caseRows.Err(); err != nil {
+		return nil, 0, err
+	}
 	for i, cid := range groups {
 		if cid > 0 {
-			c, err := scanCase(d.QueryRow(`SELECT `+strings.Replace(caseColumns, "c.report,", "''::text,", 1)+` FROM finding_cases c WHERE id=$1`, cid))
-			if err != nil {
-				return nil, 0, err
+			c := cases[cid]
+			if c == nil {
+				return nil, 0, sql.ErrNoRows
 			}
-			if err := d.QueryRow(`SELECT count(*),count(*) FILTER(WHERE severity='critical'),count(*) FILTER(WHERE severity='high'),count(*) FILTER(WHERE severity='medium'),count(*) FILTER(WHERE severity='low') FROM findings f JOIN finding_case_members m ON m.finding_id=f.id WHERE m.case_id=$1`, cid).Scan(&c.Count, &c.Critical, &c.High, &c.Medium, &c.Low); err != nil {
-				return nil, 0, err
-			}
-			out[i].Case = c
-			out[i].FindingID = 0
+			out[i].Case, out[i].FindingID = c, 0
 		}
 	}
 	return out, total, nil
@@ -914,20 +951,38 @@ func (d *DB) DistinctFindingStatsByTask() (map[string]*FindingDistinctStats, err
 // Folder rows and candidate searches omit PoC bodies. The original table can
 // request evidence for ungrouped rows without fetching report bodies.
 func (d *DB) FindingCaseSummary(id int64, originalRow ...bool) (*DBFinding, error) {
+	findings, err := d.FindingCaseSummaries([]int64{id}, len(originalRow) > 0 && originalRow[0])
+	return findings[id], err
+}
+
+// FindingCaseSummaries loads only the current page's rows, omitting report bodies.
+func (d *DB) FindingCaseSummaries(ids []int64, originalRow bool) (map[int64]*DBFinding, error) {
+	result := make(map[int64]*DBFinding, len(ids))
+	if len(ids) == 0 {
+		return result, nil
+	}
+	rawIDs, err := json.Marshal(ids)
+	if err != nil {
+		return nil, err
+	}
 	cols := strings.Replace(findingSelectCols, "f.evidence,", "''::text,", 1)
-	if len(originalRow) > 0 && originalRow[0] {
+	if originalRow {
 		cols = findingSelectCols
 	}
-	rows, err := d.Query(`SELECT `+cols+` FROM findings f LEFT JOIN tasks t ON t.id=f.task_id WHERE f.id=$1`, id)
+	rows, err := d.Query(`SELECT `+cols+` FROM findings f LEFT JOIN tasks t ON t.id=f.task_id
+		WHERE f.id IN (SELECT jsonb_array_elements_text($1::jsonb)::bigint)`, string(rawIDs))
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	fs, err := scanFindings(rows)
-	if err != nil || len(fs) == 0 {
+	if err != nil {
 		return nil, err
 	}
-	return fs[0], nil
+	for _, finding := range fs {
+		result[finding.ID] = finding
+	}
+	return result, nil
 }
 
 // FindingCaseListContext contains bounded metadata for collapsed folder rows.

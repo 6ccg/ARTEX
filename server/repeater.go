@@ -245,7 +245,7 @@ func repeaterBodyText(data []byte) string {
 	return strings.ReplaceAll(text, "\x00", "�")
 }
 
-func (s *Server) repeaterTransport(useRecordingProxy, insecure bool) http.RoundTripper {
+func (s *Runtime) repeaterTransport(useRecordingProxy, insecure bool) http.RoundTripper {
 	var transport *http.Transport
 	proxied := false
 	if useRecordingProxy && s != nil && s.m != nil {

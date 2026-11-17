@@ -14,9 +14,6 @@ func TestLLMRecordsMigrateAddsRawColumnsToOldTable(t *testing.T) {
 		t.Skipf("postgres unavailable (%v) — skipping", err)
 	}
 	defer d.Close()
-	if err := d.EnsureLLMRecordsTable(); err != nil {
-		t.Fatalf("ensure: %v", err)
-	}
 
 	tx, err := d.Begin()
 	if err != nil {
@@ -44,7 +41,7 @@ func TestLLMRecordsMigrateAddsRawColumnsToOldTable(t *testing.T) {
 		}
 	}
 
-	// Re-running must stay a no-op (the migration runs on every startup).
+	// The legacy conversion remains safe to retry after a rolled-back upgrade.
 	if _, err := tx.Exec(llmRecordsMigrate); err != nil {
 		t.Fatalf("migrate is not idempotent: %v", err)
 	}

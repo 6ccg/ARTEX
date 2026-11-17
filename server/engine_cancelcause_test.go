@@ -160,7 +160,7 @@ func TestResumeYieldsFreshContext(t *testing.T) {
 	if old.Err() == nil {
 		t.Fatal("Pause did not cancel old context")
 	}
-	e.paused.Delete("t1")
+	e.taskRun("t1").paused.Store(false)
 	if fresh := e.execContextFor(context.Background(), "t1"); fresh.Err() != nil {
 		t.Fatal("resume did not create a fresh execution context")
 	}
@@ -200,8 +200,8 @@ func TestDeleteCancellationReturnsRunningIntentToFrontier(t *testing.T) {
 func TestResumeDoesNotClearDeleteBarrier(t *testing.T) {
 	e := NewEngine(nil)
 	task := &Task{ID: "t1", notify: make(chan struct{}, 1)}
-	e.paused.Store(task.ID, true)
-	e.deleting.Store(task.ID, true)
+	e.taskRun(task.ID).paused.Store(true)
+	e.taskRun(task.ID).deleting.Store(true)
 	e.Resume(task)
 	if !e.IsPaused(task.ID) {
 		t.Fatal("resume cleared the pause barrier owned by task deletion")
@@ -213,7 +213,7 @@ func TestBootstrapAdmissionClearsQueuedPauseBarrier(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	task := &Task{ID: "t1", notify: make(chan struct{}, 1)}
-	s := &Server{engine: e, ctx: ctx}
+	s := &Server{Runtime: &Runtime{engine: e, ctx: ctx}}
 	e.Pause(task.ID, agent.AbortPausedByUser)
 
 	s.startAdmittedTask(task, "bootstrap")

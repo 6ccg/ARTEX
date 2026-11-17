@@ -8,6 +8,7 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/lqqyt2423/go-mitmproxy/cert"
 	"github.com/lqqyt2423/go-mitmproxy/internal/helper"
@@ -16,18 +17,31 @@ import (
 )
 
 type attackerListener struct {
-	connChan chan net.Conn
+	connChan  chan net.Conn
+	done      chan struct{}
+	closeOnce sync.Once
 }
 
 func (l *attackerListener) accept(conn net.Conn) {
-	l.connChan <- conn
+	select {
+	case l.connChan <- conn:
+	case <-l.done:
+		conn.Close()
+	}
 }
 
 func (l *attackerListener) Accept() (net.Conn, error) {
-	c := <-l.connChan
-	return c, nil
+	select {
+	case c := <-l.connChan:
+		return c, nil
+	case <-l.done:
+		return nil, net.ErrClosed
+	}
 }
-func (l *attackerListener) Close() error   { return nil }
+func (l *attackerListener) Close() error {
+	l.closeOnce.Do(func() { close(l.done) })
+	return nil
+}
 func (l *attackerListener) Addr() net.Addr { return nil }
 
 type attackerConn struct {
@@ -40,6 +54,7 @@ type attacker struct {
 	ca       cert.CA
 	server   *http.Server
 	h2Server *http2.Server
+	h2WG     sync.WaitGroup
 	client   *http.Client
 	listener *attackerListener
 }
@@ -70,6 +85,7 @@ func newAttacker(proxy *Proxy) (*attacker, error) {
 		},
 		listener: &attackerListener{
 			connChan: make(chan net.Conn),
+			done:     make(chan struct{}),
 		},
 	}
 
@@ -82,6 +98,9 @@ func newAttacker(proxy *Proxy) (*attacker, error) {
 
 	a.h2Server = &http2.Server{
 		MaxConcurrentStreams: 100, // todo: wait for remote server setting
+	}
+	if err := http2.ConfigureServer(a.server, a.h2Server); err != nil {
+		return nil, err
 	}
 
 	return a, nil
@@ -103,6 +122,14 @@ func (a *attacker) serveConn(clientTlsConn *tls.Conn, connCtx *ConnContext) {
 	connCtx.ClientConn.NegotiatedProtocol = clientTlsConn.ConnectionState().NegotiatedProtocol
 
 	if connCtx.ClientConn.NegotiatedProtocol == "h2" && connCtx.ServerConn != nil {
+		a.proxy.requestMu.Lock()
+		if a.proxy.closing {
+			a.proxy.requestMu.Unlock()
+			clientTlsConn.Close()
+			return
+		}
+		a.h2WG.Add(1)
+		a.proxy.requestMu.Unlock()
 		connCtx.ServerConn.client = &http.Client{
 			Transport: &http2.Transport{
 				DialTLSContext: func(ctx context.Context, network, addr string, cfg *tls.Config) (net.Conn, error) {
@@ -123,6 +150,7 @@ func (a *attacker) serveConn(clientTlsConn *tls.Conn, connCtx *ConnContext) {
 			cancel()
 		}()
 		go func() {
+			defer a.h2WG.Done()
 			a.h2Server.ServeConn(clientTlsConn, &http2.ServeConnOpts{
 				Context:    ctx,
 				Handler:    a,
@@ -218,7 +246,7 @@ func (a *attacker) initHttpDialFn(req *http.Request) {
 			addon.ServerConnected(connCtx)
 		}
 
-		return nil
+		return connCtx.ClientConn.Conn.(*wrapClientConn).attachUpstream(cw)
 	}
 }
 
@@ -312,6 +340,9 @@ func (a *attacker) httpsDial(ctx context.Context, req *http.Request) (net.Conn, 
 	connCtx.ServerConn = serverConn
 	for _, addon := range connCtx.proxy.Addons {
 		addon.ServerConnected(connCtx)
+	}
+	if err := connCtx.ClientConn.Conn.(*wrapClientConn).attachUpstream(serverConn.Conn); err != nil {
+		return nil, err
 	}
 
 	return serverConn.Conn, nil
@@ -443,6 +474,11 @@ func (a *attacker) httpsLazyAttack(ctx context.Context, cconn net.Conn, req *htt
 }
 
 func (a *attacker) attack(res http.ResponseWriter, req *http.Request) {
+	if !a.proxy.beginRequest() {
+		res.WriteHeader(http.StatusServiceUnavailable)
+		return
+	}
+	defer a.proxy.requests.Done()
 	proxy := a.proxy
 
 	log := log.WithFields(log.Fields{
@@ -623,7 +659,7 @@ func (a *attacker) attack(res http.ResponseWriter, req *http.Request) {
 	}
 
 	if proxyRes.Close {
-		f.ConnContext.closeAfterResponse = true
+		f.ConnContext.closeAfterResponse.Store(true)
 	}
 
 	defer proxyRes.Body.Close()

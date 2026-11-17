@@ -28,7 +28,7 @@ func manualScheduleTestServer(t *testing.T) (*Server, *Scheduler) {
 		t.Fatal(err)
 	}
 	s := newAdmissionTestServer(m, nil)
-	sc := &Scheduler{s: s, pg: m.pg, startedAt: calendarTestTime("2026-10-19T08:00:00+08:00")}
+	sc := &Scheduler{s: s.Runtime, pg: m.pg, startedAt: calendarTestTime("2026-10-19T08:00:00+08:00")}
 	return s, sc
 }
 
@@ -111,7 +111,7 @@ func TestCalendarManualTaskResumeSurvivesTicks(t *testing.T) {
 				}
 			}
 			// A fresh scheduler also reads the committed override.
-			sc = &Scheduler{s: s, pg: s.m.pg, startedAt: calendarTestTime("2026-10-19T17:01:00+08:00")}
+			sc = &Scheduler{s: s.Runtime, pg: s.m.pg, startedAt: calendarTestTime("2026-10-19T17:01:00+08:00")}
 			sc.fireTaskSchedulesAt(calendarTestTime("2026-10-19T17:01:05+08:00"))
 			if task.lifecycleSnapshot().Paused {
 				t.Fatal("scheduler restart lost manual resume")
@@ -135,7 +135,7 @@ func TestCalendarManualResumePreservesFIFO(t *testing.T) {
 	if err := s.m.SetConcurrency(true, 1); err != nil {
 		t.Fatal(err)
 	}
-	s.engine.started.Store(holder.ID, true)
+	s.engine.taskRun(holder.ID).started.Store(true)
 	sc.fireTaskSchedulesAt(calendarTestTime("2026-10-19T17:00:00+08:00"))
 	result, err := s.applyTaskControl(task, "resume")
 	if err != nil || !result.Queued {
@@ -214,7 +214,7 @@ func TestCalendarManualDeadlineAcrossRestart(t *testing.T) {
 	}
 	freezeManualScheduleDeadline(t, s, task)
 	// The process was down across the entire window; no active tick consumed it.
-	sc = &Scheduler{s: s, pg: s.m.pg, startedAt: calendarTestTime("2026-10-19T23:05:00+08:00")}
+	sc = &Scheduler{s: s.Runtime, pg: s.m.pg, startedAt: calendarTestTime("2026-10-19T23:05:00+08:00")}
 	sc.fireTaskSchedulesAt(calendarTestTime("2026-10-19T23:05:05+08:00"))
 	if !task.lifecycleSnapshot().Paused {
 		t.Fatal("restart across window retained expired manual override")

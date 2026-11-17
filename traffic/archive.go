@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -79,15 +80,18 @@ FROM exchanges WHERE host IN (`+strings.Join(placeholders, ",")+`) ORDER BY ts,i
 		err := t.db.QueryRow(`SELECT req_head,req_body,req_blob,resp_head,resp_body,resp_blob
 FROM exchange_bodies WHERE id=?`, item.ID).Scan(&item.ReqHead, &item.ReqBody, &reqBlob, &item.RespHead, &item.RespBody, &respBlob)
 		if errors.Is(err, sql.ErrNoRows) && strings.TrimSpace(legacyPath) != "" {
-			req, readErr := os.ReadFile(filepath.Join(t.dir, legacyPath, "request.http"))
-			if readErr != nil && !os.IsNotExist(readErr) {
-				return 0, readErr
+			if err := t.readEvidence(item.ID, func(e EvidenceExchange) error {
+				item.ReqHead, item.RespHead = e.ReqHead, e.RespHead
+				var err error
+				item.ReqBody, err = io.ReadAll(e.Request)
+				if err != nil {
+					return err
+				}
+				item.RespBody, err = io.ReadAll(e.Response)
+				return err
+			}); err != nil {
+				return 0, err
 			}
-			resp, readErr := os.ReadFile(filepath.Join(t.dir, legacyPath, "response.http"))
-			if readErr != nil && !os.IsNotExist(readErr) {
-				return 0, readErr
-			}
-			item.ReqHead, item.RespHead = string(req), string(resp)
 		} else if err != nil {
 			return 0, err
 		}
@@ -110,6 +114,10 @@ FROM exchange_bodies WHERE id=?`, item.ID).Scan(&item.ReqHead, &item.ReqBody, &r
 		data, err := os.ReadFile(source)
 		if err != nil {
 			return 0, err
+		}
+		sum := sha256.Sum256(data)
+		if hex.EncodeToString(sum[:]) != hash {
+			return 0, fmt.Errorf("traffic blob checksum mismatch: %s", hash)
 		}
 		if err := os.WriteFile(filepath.Join(dir, "blobs", hash+".bin"), data, 0o600); err != nil {
 			return 0, err
@@ -149,6 +157,7 @@ func (t *Traffic) ImportArchive(dir string) (int64, error) {
 	}
 	t.wmu.Lock()
 	defer t.wmu.Unlock()
+	verified := make(map[string]struct{}, len(snapshot.Blobs))
 	for _, hash := range snapshot.Blobs {
 		if !blobHashRe.MatchString(hash) {
 			return 0, fmt.Errorf("invalid archived traffic blob %q", hash)
@@ -161,13 +170,27 @@ func (t *Traffic) ImportArchive(dir string) (int64, error) {
 		if hex.EncodeToString(sum[:]) != hash {
 			return 0, fmt.Errorf("traffic blob checksum mismatch: %s", hash)
 		}
+		verified[hash] = struct{}{}
 		destination := filepath.Join(t.dir, "_blobs", "sha256", hash[:2], hash+".bin")
-		if _, err := os.Stat(destination); os.IsNotExist(err) {
+		existing, err := os.ReadFile(destination)
+		if err != nil && !os.IsNotExist(err) {
+			return 0, err
+		}
+		if err != nil || sha256.Sum256(existing) != sum {
 			if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
 				return 0, err
 			}
-			if err := os.WriteFile(destination, data, 0o644); err != nil {
+			if err := writeBlob(destination, data); err != nil {
 				return 0, err
+			}
+		}
+	}
+	for _, item := range snapshot.Exchanges {
+		for _, hash := range []string{item.ReqBlob, item.RespBlob} {
+			if hash != "" {
+				if _, ok := verified[hash]; !ok {
+					return 0, fmt.Errorf("exchange %s references an unverified archive blob: %s", item.ID, hash)
+				}
 			}
 		}
 	}
@@ -182,7 +205,7 @@ func (t *Traffic) ImportArchive(dir string) (int64, error) {
 VALUES(?,?,?,?,?,?,?,?,?,?,'')`, item.ID, item.TS, item.Host, item.Method, item.URLTemplate,
 			item.URL, item.Status, item.ContentType, item.ReqLen, item.RespLen)
 		if err != nil {
-			return imported, err
+			return 0, err
 		}
 		n, _ := res.RowsAffected()
 		if n == 0 {
@@ -191,31 +214,62 @@ VALUES(?,?,?,?,?,?,?,?,?,?,'')`, item.ID, item.TS, item.Host, item.Method, item.
 		if _, err := tx.Exec(`INSERT INTO exchange_bodies(id,req_head,req_body,req_blob,resp_head,resp_body,resp_blob)
 VALUES(?,?,?,?,?,?,?)`, item.ID, item.ReqHead, item.ReqBody, nullIfEmpty(item.ReqBlob),
 			item.RespHead, item.RespBody, nullIfEmpty(item.RespBlob)); err != nil {
-			return imported, err
+			return 0, err
 		}
 		for _, hash := range []string{item.ReqBlob, item.RespBlob} {
 			if hash != "" {
 				if _, err := tx.Exec(`INSERT OR IGNORE INTO blob_refs(hash,exchange_id) VALUES(?,?)`, hash, item.ID); err != nil {
-					return imported, err
+					return 0, err
 				}
 			}
 		}
 		if t.fts {
 			var rowID int64
 			if err := tx.QueryRow(`SELECT rowid FROM exchanges WHERE id=?`, item.ID).Scan(&rowID); err != nil {
-				return imported, err
+				return 0, err
 			}
-			content := strings.Join([]string{item.URL, item.ReqHead, string(item.ReqBody), item.RespHead, string(item.RespBody)}, "\n")
+			reqBody, err := t.archivedIndexBody(item.ReqBody, item.ReqBlob, "")
+			if err != nil {
+				return 0, err
+			}
+			respBody, err := t.archivedIndexBody(item.RespBody, item.RespBlob, item.ContentType)
+			if err != nil {
+				return 0, err
+			}
+			content := strings.Join([]string{item.URL, item.ReqHead, reqBody, item.RespHead, respBody}, "\n")
 			if _, err := tx.Exec(`INSERT INTO ex_fts(rowid,content) VALUES(?,?)`, rowID, content); err != nil {
-				return imported, err
+				return 0, err
 			}
 		}
 		imported++
 	}
 	if err := tx.Commit(); err != nil {
-		return imported, err
+		return 0, err
 	}
 	return imported, nil
+}
+
+func (t *Traffic) archivedIndexBody(inline []byte, hash, contentType string) (string, error) {
+	body := inline
+	if hash != "" {
+		path, err := t.blobPath(hash)
+		if err != nil {
+			return "", err
+		}
+		file, err := os.Open(path)
+		if err != nil {
+			return "", err
+		}
+		defer file.Close()
+		body, err = io.ReadAll(io.LimitReader(file, maxIndexBody))
+		if err != nil {
+			return "", err
+		}
+	}
+	if isBinaryBody(contentType, body) {
+		return "", nil
+	}
+	return string(clipBytes(body, maxIndexBody)), nil
 }
 
 func uniqueArchiveHosts(hosts []string) []string {

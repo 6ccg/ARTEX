@@ -574,9 +574,10 @@ func TestCreateTaskWithCompanyScopes(t *testing.T) {
 	domainA := fmt.Sprintf("task-company-a-%d.example.test", suffix)
 	domainB := fmt.Sprintf("task-company-b-%d.example.test", suffix)
 	if err := d.QueryRow(`
-INSERT INTO assets(type, domain, root_domain, company_id, company_source, task_ids)
-VALUES ('root_domain',$1,$1,$2,'explicit',ARRAY[$3]::bigint[])
-RETURNING id`, domainA, companyA, existingTask.ID).Scan(&companyAssetA); err != nil {
+WITH asset AS (INSERT INTO assets(type, domain, root_domain, company_id, company_source)
+VALUES ('root_domain',$1,$1,$2,'explicit') RETURNING id), linked AS (
+ INSERT INTO task_asset_links(task_id,asset_id) SELECT $3,id FROM asset
+) SELECT id FROM asset`, domainA, companyA, existingTask.ID).Scan(&companyAssetA); err != nil {
 		t.Fatal(err)
 	}
 	if err := d.QueryRow(`
@@ -636,7 +637,7 @@ RETURNING id`, domainB, companyB).Scan(&companyAssetB); err != nil {
 		}
 	}
 	var existingAssociation bool
-	if err := d.QueryRow(`SELECT $1=ANY(task_ids) FROM assets WHERE id=$2`, existingTask.ID, companyAssetA).Scan(&existingAssociation); err != nil {
+	if err := d.QueryRow(`SELECT EXISTS(SELECT 1 FROM task_asset_links WHERE task_id=$1 AND asset_id=$2)`, existingTask.ID, companyAssetA).Scan(&existingAssociation); err != nil {
 		t.Fatal(err)
 	}
 	if !existingAssociation {

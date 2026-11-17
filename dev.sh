@@ -10,8 +10,11 @@ cd "$(dirname "$0")"
 cleanup() { kill 0 2>/dev/null || true; }
 trap cleanup EXIT INT TERM
 
-# 后端（普通 go run，不内嵌前端）；并发 work agent 数在「系统设置」里配置。
-go run ./cmd/artex -addr :8787 -proxy 127.0.0.1:8788 &
+# 后端先编译到仓库根目录，运行时仍从这里读取 config/data/skills。
+binary=artex
+[ "$(go env GOOS)" != "windows" ] || binary=artex.exe
+go build -o "$PWD/$binary" ./cmd/artex
+"./$binary" -addr :8787 -proxy 127.0.0.1:8788 &
 
 # 前端热更新（Vite/Next dev server，/api 反代到 :8787）。
 ( cd web && npm run dev ) &

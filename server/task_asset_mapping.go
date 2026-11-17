@@ -19,7 +19,7 @@ func (s *Server) taskAssetMapping(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, "task not found")
 		return
 	}
-	if s.m.pg == nil || s.chatAgentRef() == nil {
+	if s.m.pg == nil || s.resolveChatAgent(&db.Conversation{AgentKey: "asset_mapper"}) == nil {
 		writeErr(w, http.StatusServiceUnavailable, s.chatUnavailableReason())
 		return
 	}
@@ -94,7 +94,7 @@ func (s *Server) taskAssetMapping(w http.ResponseWriter, r *http.Request) {
 	s.chatMu.Lock()
 	s.chatBusy[busyKey] = true
 	s.chatMu.Unlock()
-	s.runConversation(conversation, message, busyKey, message)
+	s.runConversation(conversation, message, busyKey, "")
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"status": "accepted", "agent_key": "asset_mapper", "conversation_id": conversation.ID,
 	})

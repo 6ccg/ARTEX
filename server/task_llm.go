@@ -49,7 +49,7 @@ type llmActivityMetadata struct {
 }
 
 type taskLLMRuntime struct {
-	s            *Server
+	s            *Runtime
 	taskID       string
 	agentKey     string
 	pinProfileID *int64
@@ -514,7 +514,7 @@ func (r *taskLLMRuntime) CompactionWindow() int {
 // when the role has no binding or the bound profile no longer builds, so callers
 // fall through to the task chain. A bound profile stays exclusive unless
 // llm_pool_bind_fallback is on, which is what poolForBinding encodes.
-func (s *Server) agentBindingProvider(agentKey string) (llm.Provider, agent.Config, bool) {
+func (s *Runtime) agentBindingProvider(agentKey string) (llm.Provider, agent.Config, bool) {
 	id := s.effectiveProfileForAgent(agentKey, nil)
 	if id == nil {
 		return nil, agent.Config{}, false
@@ -529,7 +529,7 @@ func (s *Server) agentBindingProvider(agentKey string) (llm.Provider, agent.Conf
 // globalProvider returns the process-wide provider (persisted active profile or
 // environment config) — the last resort once a role has neither a binding nor a
 // task chain.
-func (s *Server) globalProvider() (llm.Provider, agent.Config, bool) {
+func (s *Runtime) globalProvider() (llm.Provider, agent.Config, bool) {
 	s.cfgMu.Lock()
 	defer s.cfgMu.Unlock()
 	if !s.llmOn || s.llmProv == nil {
@@ -542,7 +542,7 @@ func (s *Server) globalProvider() (llm.Provider, agent.Config, bool) {
 // under the runtime precedence in current(): the role's own binding first, then
 // the task chain, then global. An exhausted chain is a hard stop for unbound
 // roles rather than a silent fall through to global — same as current().
-func (s *Server) taskRuntimeAvailable(t *Task, agentKeys ...string) bool {
+func (s *Runtime) taskRuntimeAvailable(t *Task, agentKeys ...string) bool {
 	if t == nil || len(agentKeys) == 0 {
 		return false
 	}
@@ -566,13 +566,13 @@ func (s *Server) taskRuntimeAvailable(t *Task, agentKeys ...string) bool {
 	return true
 }
 
-func (s *Server) invalidateTaskAgents() {
+func (s *Runtime) invalidateTaskAgents() {
 	s.taskAgentMu.Lock()
 	s.taskAgents = map[string]*taskAgentBundle{}
 	s.taskAgentMu.Unlock()
 }
 
-func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
+func (s *Runtime) agentsForTask(t *Task) *taskAgentBundle {
 	s.taskAgentMu.Lock()
 	defer s.taskAgentMu.Unlock()
 	if bundle := s.taskAgents[t.ID]; bundle != nil {
@@ -584,7 +584,7 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 	mainRuntime := &taskLLMRuntime{s: s, taskID: t.ID, agentKey: "mainagent"}
 	tx := transcript.NewStore(filepath.Join(s.m.dir, "transcripts"))
 	window := workerRuntime.CompactionWindow()
-	wk := agent.NewWorker(workerRuntime, "task-router", s.m.dir, tx, window, s.agentMaxTurns("worker"))
+	wk := agent.NewWorker(s.host, workerRuntime, "task-router", s.m.dir, tx, window, s.agentMaxTurns("worker"))
 	wk.SetFindingRecorder(s.evidenceStore())
 	wk.SetCompactionWindowResolver(workerRuntime.CompactionWindow)
 	wk.SetNonStreaming(workerRuntime.nonStreaming) // 按任务当前激活 profile 的流式开关(每轮读)
@@ -595,7 +595,7 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 	wk.SetProxyProvider(s.m.ProxyAddr)
 	wk.SetWebSearch(s.webSearchFor("worker"))
 	wk.SetConstraintInject(s.constraintInjectWorker) // 操作约束注入 worker(可配置,默认开)
-	pl := agent.NewPlanner(plannerRuntime, "task-router", s.m.dir, tx, plannerRuntime.CompactionWindow(), s.agentMaxTurns("planner"))
+	pl := agent.NewPlanner(s.host, plannerRuntime, "task-router", s.m.dir, tx, plannerRuntime.CompactionWindow(), s.agentMaxTurns("planner"))
 	pl.SetFindingRecorder(s.evidenceStore())
 	pl.SetCompactionWindowResolver(plannerRuntime.CompactionWindow)
 	pl.SetNonStreaming(plannerRuntime.nonStreaming)
@@ -610,8 +610,16 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 	// cold-digest §7: 冷节点后台压缩。引擎经权威解析器实际驱动的就是这套 per-task planner
 	// (agentsForTask),Compactor 必须接在这里。走任务路由的 planner provider(§4:与 agent
 	// 同模型,随任务 LLM 链解析),压缩用 Complete 一次性生成 body。
-	pl.SetCompactor(agent.NewCompactor(plannerRuntime, "task-router"))
-	main := agent.NewMainAgent(mainRuntime, "task-router", s.m.dir, tx, mainRuntime.CompactionWindow(), s.agentMaxTurns("mainagent"))
+	compactor := agent.NewCompactor(plannerRuntime, "task-router")
+	compactor.SetBackgroundRunner(func(job func()) bool {
+		if !s.engine.beginTaskOperation(t.ID) {
+			return false
+		}
+		go func() { defer s.engine.decInflight(t.ID); job() }()
+		return true
+	})
+	pl.SetCompactor(compactor)
+	main := agent.NewMainAgent(s.host, mainRuntime, "task-router", s.m.dir, tx, mainRuntime.CompactionWindow(), s.agentMaxTurns("mainagent"))
 	main.SetFindingRecorder(s.evidenceStore())
 	main.SetCompactionWindowResolver(mainRuntime.CompactionWindow)
 	main.SetNonStreaming(mainRuntime.nonStreaming)
@@ -629,7 +637,7 @@ func (s *Server) agentsForTask(t *Task) *taskAgentBundle {
 	return bundle
 }
 
-func (s *Server) workerForTaskSlot(t *Task, slot WorkerSlot) (*agent.Worker, error) {
+func (s *Runtime) workerForTaskSlot(t *Task, slot WorkerSlot) (*agent.Worker, error) {
 	if slot.ProfileID <= 0 {
 		return nil, errors.New("worker slot is not pinned")
 	}
@@ -657,7 +665,7 @@ func (s *Server) workerForTaskSlot(t *Task, slot WorkerSlot) (*agent.Worker, err
 	id := slot.ProfileID
 	runtime := &taskLLMRuntime{s: s, taskID: t.ID, agentKey: "worker", pinProfileID: &id}
 	tx := transcript.NewStore(filepath.Join(s.m.dir, "transcripts"))
-	worker := agent.NewWorker(runtime, cfg.Model, s.m.dir, tx, runtime.CompactionWindow(), s.agentMaxTurns("worker"))
+	worker := agent.NewWorker(s.host, runtime, cfg.Model, s.m.dir, tx, runtime.CompactionWindow(), s.agentMaxTurns("worker"))
 	worker.SetFindingRecorder(s.evidenceStore())
 	worker.SetCompactionWindowResolver(runtime.CompactionWindow)
 	worker.SetNonStreaming(runtime.nonStreaming)
@@ -672,7 +680,7 @@ func (s *Server) workerForTaskSlot(t *Task, slot WorkerSlot) (*agent.Worker, err
 	return worker, nil
 }
 
-func (s *Server) syncTaskLLMState(pt *db.Task) {
+func (s *Runtime) syncTaskLLMState(pt *db.Task) {
 	if pt == nil {
 		return
 	}
@@ -684,7 +692,7 @@ func (s *Server) syncTaskLLMState(pt *db.Task) {
 	s.m.mu.Unlock()
 }
 
-func (s *Server) emitTaskLLMTransition(t *Task, transition db.TaskLLMTransition, cause error) {
+func (s *Runtime) emitTaskLLMTransition(t *Task, transition db.TaskLLMTransition, cause error) {
 	if t == nil {
 		return
 	}
@@ -710,7 +718,7 @@ func (s *Server) emitTaskLLMTransition(t *Task, transition db.TaskLLMTransition,
 	log.Printf("[llm-failover] task %s: %s", t.ID, summary)
 }
 
-func (s *Server) llmAuditProfile(id int64) *llmAuditProfile {
+func (s *Runtime) llmAuditProfile(id int64) *llmAuditProfile {
 	if id <= 0 || s.m == nil || s.m.pg == nil {
 		return nil
 	}
@@ -749,7 +757,7 @@ func sameOptionalID(a, b *int64) bool {
 	return *a == *b
 }
 
-func (s *Server) emitManualTaskLLMSwitch(t *Task, previousID, nextID *int64) db.Activity {
+func (s *Runtime) emitManualTaskLLMSwitch(t *Task, previousID, nextID *int64) db.Activity {
 	previous := (*llmAuditProfile)(nil)
 	next := (*llmAuditProfile)(nil)
 	if previousID != nil {

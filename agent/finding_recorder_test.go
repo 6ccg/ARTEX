@@ -20,13 +20,12 @@ func (failingFindingRecorder) Record(context.Context, db.RecordFindingInput, []d
 
 func TestReportFindingOptionalTrafficWithoutCapture(t *testing.T) {
 	d := testDB(t)
-	defer d.Close()
 	task, err := d.CreateTask("TCP evidence", "fixture", nil, 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer d.DeleteTask(task.ID)
-	ts := NewToolSet(nil, "")
+	ts := NewToolSet(nil, nil, "")
 	ts.ts, ts.taskID = d.Exploration(task.ExplorationID), task.ID
 	ts.SetFindingRecorder(evidence.New(d, nil, t.TempDir()))
 	notices := 0
@@ -51,17 +50,17 @@ func TestReportFindingOptionalTrafficWithoutCapture(t *testing.T) {
 }
 
 func TestReportFindingAtomicContract(t *testing.T) {
-	old := FindingTrafficBindingEnabled
-	FindingTrafficBindingEnabled = func() bool { return true }
-	t.Cleanup(func() { FindingTrafficBindingEnabled = old })
+	agentHost := &Host{}
+
+	agentHost.FindingTrafficBindingEnabled = func() bool { return true }
+
 	d := testDB(t)
-	defer d.Close()
 	task, err := d.CreateTask("report contract", "fixture", nil, 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer d.DeleteTask(task.ID)
-	ts := NewToolSet(nil, "")
+	ts := NewToolSet(agentHost, nil, "")
 	ts.ts = d.Exploration(task.ExplorationID)
 	ts.taskID = task.ID
 	ts.worker = "fixture"

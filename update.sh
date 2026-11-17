@@ -24,8 +24,8 @@ sync_repo(){
 # ── ① Docker 更新 ───────────────────────────────
 update_docker(){
   command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1 \
-    || die "未检测到 docker / docker compose，请先用 ./install.sh 安装部署"
-  [ -f .env ] || die "未找到 .env，请先运行 ./install.sh 完成首次部署"
+    || die "未检测到 docker / docker compose，请先用 bash install.sh 安装部署"
+  [ -f .env ] || die "未找到 .env，请先运行 bash install.sh 完成首次部署"
 
   # 可选：升级到指定版本 tag（不填则沿用 .env 中的 ARTEX_TAG，缺省为 latest）
   local tag; tag="$(ask '目标镜像 tag（回车沿用 .env / latest）' '')"
@@ -53,18 +53,19 @@ update_docker(){
 # ── ② 本地编译更新 ──────────────────────────────
 update_local(){
   command -v go >/dev/null 2>&1 || die "未检测到 Go（>=1.26）：https://go.dev/dl/"
-  [ -f config.json ] || warn "未找到 config.json——若首次部署请改用 ./install.sh"
+  [ -f config.json ] || warn "未找到 config.json——若首次部署请改用 bash install.sh"
   ok "Go: $(go version)"
 
   if command -v npm >/dev/null 2>&1; then
     info "重建前端静态产物…"
     ( cd web && npm ci && npm run build:static )
+    mkdir -p server/webui
     rm -rf server/webui/dist && cp -r web/out server/webui/dist
     info "重新编译内嵌单二进制…"
-    CGO_ENABLED=0 go build -tags embedui -trimpath -o artex ./cmd/artex
+    CGO_ENABLED=0 go build -tags embedui -trimpath -o "$PWD/artex" ./cmd/artex
   else
     warn "未检测到 npm：编译**不内嵌前端**的后端（前端需另跑 npm run dev）"
-    CGO_ENABLED=0 go build -o artex ./cmd/artex
+    CGO_ENABLED=0 go build -o "$PWD/artex" ./cmd/artex
   fi
   ok "编译完成 → ./artex"
   warn "请重启正在运行的 artex 进程以生效（重启时会自动迁移 schema）"

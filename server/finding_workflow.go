@@ -14,7 +14,7 @@ import (
 	actool "github.com/Autumn-27/norma/tool"
 )
 
-func (s *Server) seedFindingWorkflowTools() {
+func (s *Runtime) seedFindingWorkflowTools() {
 	const hostSearchDescriptionFlag = "finding_workflow_tools_v3_host_search_description"
 	if value, _, _ := s.m.pg.GetSetting(hostSearchDescriptionFlag); value != "true" {
 		// Only replace the original built-in text. A user-edited description is
@@ -115,7 +115,7 @@ func objectProperty(parent map[string]any, key string) map[string]any {
 	return value
 }
 
-func (s *Server) agentFindingTrafficAccess(ctx context.Context, id int64, write bool) error {
+func (s *Runtime) agentFindingTrafficAccess(ctx context.Context, id int64, write bool) error {
 	if write {
 		if err := s.checkCaseReviewScope(ctx, "bind_finding_traffic", findingCaseRequest{}); err != nil {
 			return err
@@ -147,7 +147,7 @@ func (s *Server) agentFindingTrafficAccess(ctx context.Context, id int64, write 
 	return nil
 }
 
-func (s *Server) toolBindFindingTraffic() actool.CoreTool {
+func (s *Runtime) toolBindFindingTraffic() actool.CoreTool {
 	return wrTool("bind_finding_traffic", "为已登记漏洞补绑经核实的真实 HTTP 流量。finding_id 使用独立漏洞记录 ID；不要传探索节点 ID。同批引用全部成功或全部失败，重复引用不覆盖已有说明。补绑会使已有报告标记待更新；不要为补包重新探测或重复创建漏洞。",
 		objSchema(map[string]any{"finding_id": strParam("独立漏洞记录 ID，从 list_task_findings / get_task_node_detail 的 finding_id 字段读取"), "traffic_refs": agent.HintTrafficSchema()}, "finding_id", "traffic_refs"),
 		func(ctx context.Context, raw json.RawMessage) (actool.Result, error) {

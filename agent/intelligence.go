@@ -9,12 +9,9 @@ import (
 	actool "github.com/Autumn-27/norma/tool"
 )
 
-// Missing host/setting means off. Rechecked on every write for running sessions.
-var IntelligenceEnabled func() bool
-var IntelligenceRecord func(context.Context, int64, int64, string, db.IntelligenceInput) (int64, error)
-var CredentialRecorded func()
-
-func intelligenceEnabled() bool { return IntelligenceEnabled != nil && IntelligenceEnabled() }
+func (host *Host) intelligenceEnabled() bool {
+	return host != nil && host.IntelligenceEnabled != nil && host.IntelligenceEnabled()
+}
 func intelligenceSchema() map[string]any {
 	return obj(map[string]any{
 		"kind":       map[string]any{"type": "string", "enum": []string{"credential", "lead", "sensitive_data"}},
@@ -27,7 +24,7 @@ func intelligenceSchema() map[string]any {
 	}, "kind", "title", "content", "evidence", "confidence")
 }
 func (t *ToolSet) saveIntelligence(ctx context.Context, nodeID int64, in db.IntelligenceInput) (int64, error) {
-	if !intelligenceEnabled() || IntelligenceRecord == nil {
+	if !t.host.intelligenceEnabled() || t.host.IntelligenceRecord == nil {
 		return 0, fmt.Errorf("任务情报自动记录已关闭")
 	}
 	taskID := t.taskID
@@ -43,7 +40,7 @@ func (t *ToolSet) saveIntelligence(ctx context.Context, nodeID int64, in db.Inte
 	if nodeID <= 0 {
 		nodeID = RunInfoFrom(ctx).IntentID
 	}
-	id, err := IntelligenceRecord(ctx, taskID, nodeID, t.worker, in)
+	id, err := t.host.IntelligenceRecord(ctx, taskID, nodeID, t.worker, in)
 	if err == nil {
 		t.writes.Intelligence++
 	}
@@ -62,8 +59,8 @@ func (t *ToolSet) recordIntelligence() actool.CoreTool {
 		return actool.Text(fmt.Sprintf("intelligence recorded: %d", id)), nil
 	})
 }
-func intelligenceWorkflow(ctx context.Context, tools []actool.CoreTool) ([]actool.CoreTool, string) {
-	enabled := intelligenceEnabled() && RunInfoFrom(ctx).TaskID > 0
+func (host *Host) intelligenceWorkflow(ctx context.Context, tools []actool.CoreTool) ([]actool.CoreTool, string) {
+	enabled := host.intelligenceEnabled() && RunInfoFrom(ctx).TaskID > 0
 	out := make([]actool.CoreTool, 0, len(tools))
 	hasRecord := false
 	hasFact := false

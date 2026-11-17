@@ -17,6 +17,64 @@ func TestDeleteTaskTrafficHostsUseOneLockedTransaction(t *testing.T) {
 	}
 	defer d.Close()
 
+	for _, shareWithOtherTask := range []bool{false, true} {
+		name := "existing asset linked to deleting task"
+		if shareWithOtherTask {
+			name = "existing asset shared with another task"
+		}
+		t.Run(name, func(t *testing.T) {
+			first, second, host, rootAssetID := createTaskDeleteRaceFixture(t, d)
+			assetID, err := d.Assets().UpsertHTTPService(UpsertHTTPServiceReq{URL: "https://" + host})
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() {
+				_ = d.DeleteTask(first.ID)
+				_ = d.DeleteTask(second.ID)
+				_, _ = d.Exec(`DELETE FROM assets WHERE id=ANY($1::bigint[])`, []int64{rootAssetID, assetID})
+			})
+			owner := first.ID
+			if shareWithOtherTask {
+				owner = second.ID
+			}
+			writer, _ := openTaskDeleteTestDB(t, dsn)
+			writerTx, err := writer.Begin()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer writerTx.Rollback()
+			if _, err := writerTx.Exec(`INSERT INTO task_asset_links(task_id,asset_id) VALUES($1,$2)`, owner, assetID); err != nil {
+				t.Fatal(err)
+			}
+			deleter, pid := openTaskDeleteTestDB(t, dsn)
+			deleteDone := make(chan error, 1)
+			var hosts []string
+			go func() {
+				_, err := deleter.DeleteTaskCascadePrepared(first.ID, true, false, false, func(p TaskDeletePreparation) error {
+					hosts = p.TrafficHosts
+					return nil
+				})
+				deleteDone <- err
+			}()
+			if err := waitForTaskDeleteBlock(d, pid, deleteDone); err != nil {
+				t.Fatal(err)
+			}
+			if err := writerTx.Commit(); err != nil {
+				t.Fatal(err)
+			}
+			if err := waitForTaskDeleteResult(deleteDone); err != nil {
+				t.Fatal(err)
+			}
+			if containsDeleteHost(hosts, host) == shareWithOtherTask {
+				t.Fatalf("incorrect traffic ownership: shared=%v hosts=%v", shareWithOtherTask, hosts)
+			}
+			var exists bool
+			if err := d.QueryRow(`SELECT EXISTS(SELECT 1 FROM assets WHERE id=$1)`, assetID).Scan(&exists); err != nil || exists != shareWithOtherTask {
+				t.Fatalf("asset preserved=%v shared=%v err=%v", exists, shareWithOtherTask, err)
+			}
+		})
+	}
+
 	t.Run("sharing committed before deletion lock is observed", func(t *testing.T) {
 		first, second, host, rootAssetID := createTaskDeleteRaceFixture(t, d)
 		serviceURL := "https://" + host + "/concurrent-owner"
@@ -33,8 +91,7 @@ func TestDeleteTaskTrafficHostsUseOneLockedTransaction(t *testing.T) {
 		}
 		defer writerTx.Rollback()
 		if _, err := writerTx.Exec(`
-INSERT INTO assets(type, url, service_type, domain, task_ids)
-VALUES ('service', $1, 'http', $2, ARRAY[$3]::bigint[])`, serviceURL, host, second.ID); err != nil {
+WITH asset AS (INSERT INTO assets(type,url,service_type,domain) VALUES('service',$1,'http',$2) RETURNING id) INSERT INTO task_asset_links(task_id,asset_id) SELECT $3,id FROM asset`, serviceURL, host, second.ID); err != nil {
 			t.Fatal(err)
 		}
 
@@ -62,7 +119,7 @@ VALUES ('service', $1, 'http', $2, ARRAY[$3]::bigint[])`, serviceURL, host, seco
 			t.Fatalf("newly shared host %q was selected for traffic deletion: %v", host, preparedHosts)
 		}
 		var remaining int
-		if err := d.QueryRow(`SELECT count(*) FROM assets WHERE url=$1 AND $2=ANY(task_ids)`, serviceURL, second.ID).Scan(&remaining); err != nil {
+		if err := d.QueryRow(`SELECT count(*) FROM assets WHERE url=$1 AND EXISTS(SELECT 1 FROM task_asset_links WHERE asset_id=assets.id AND task_id=$2)`, serviceURL, second.ID).Scan(&remaining); err != nil {
 			t.Fatal(err)
 		}
 		if remaining != 1 {
@@ -111,8 +168,7 @@ VALUES ('service', $1, 'http', $2, ARRAY[$3]::bigint[])`, serviceURL, host, seco
 		writerDone := make(chan error, 1)
 		go func() {
 			_, writeErr := writer.Exec(`
-INSERT INTO assets(type, url, service_type, domain, task_ids)
-VALUES ('service', $1, 'http', $2, ARRAY[$3]::bigint[])`, serviceURL, host, second.ID)
+WITH asset AS (INSERT INTO assets(type,url,service_type,domain) VALUES('service',$1,'http',$2) RETURNING id) INSERT INTO task_asset_links(task_id,asset_id) SELECT $3,id FROM asset`, serviceURL, host, second.ID)
 			writerDone <- writeErr
 		}()
 		if err := waitForTaskDeleteBlock(d, writerPID, writerDone); err != nil {

@@ -209,7 +209,7 @@ func TestReviewInputResolvesCdAndSourceScript(t *testing.T) {
 	if err := os.WriteFile(path, []byte("TOKEN=$(curl https://example.test/login)\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	command := "cd " + dir + " && source login.sh"
+	command := "cd '" + filepath.ToSlash(dir) + "' && source login.sh"
 	args, _ := json.Marshal(map[string]string{"command": command})
 	in, err := BuildReviewInput(WithReviewWorkingDirectory(t.Context(), "/tmp/other"), "Bash", args)
 	if err != nil {

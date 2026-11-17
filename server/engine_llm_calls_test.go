@@ -1,9 +1,30 @@
 package server
 
 import (
+	"runtime"
 	"sync"
 	"testing"
 )
+
+func TestEngineLLMCallHandoffPreservesConcurrentBegin(t *testing.T) {
+	previous := runtime.GOMAXPROCS(2)
+	defer runtime.GOMAXPROCS(previous)
+	e := NewEngine(nil)
+	const taskID = "handoff"
+	e.BeginLLMCall(taskID)
+	for range 10000 {
+		start := make(chan struct{})
+		var done sync.WaitGroup
+		done.Add(2)
+		go func() { defer done.Done(); <-start; e.EndLLMCall(taskID) }()
+		go func() { defer done.Done(); <-start; e.BeginLLMCall(taskID) }()
+		close(start)
+		done.Wait()
+		if got := e.ActiveLLMCalls(taskID); got != 1 {
+			t.Fatalf("active calls after one end and one begin = %d, want 1", got)
+		}
+	}
+}
 
 func TestEngineActiveLLMCallsConcurrent(t *testing.T) {
 	e := NewEngine(nil)

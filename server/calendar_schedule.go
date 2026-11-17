@@ -157,7 +157,7 @@ func evaluateRuntimeScheduleWindow(item *db.TaskSchedule, now, startedAt time.Ti
 // taskManualScheduleEnd allows only the selected task to run until the next
 // enabled calendar's end. The normal union of windows still governs overlapping
 // plans after that boundary. Open-ended or disabled plans impose no deadline.
-func (s *Server) taskManualScheduleEnd(taskID string, now time.Time) (*time.Time, error) {
+func (s *Runtime) taskManualScheduleEnd(taskID string, now time.Time) (*time.Time, error) {
 	id, err := strconv.ParseInt(taskID, 10, 64)
 	if err != nil {
 		return nil, err
@@ -191,7 +191,7 @@ func (s *Server) taskManualScheduleEnd(taskID string, now time.Time) (*time.Time
 // proxyResumeInsideSchedule reports whether a task attached to any enabled
 // calendar is currently allowed to run. Tasks without a calendar remain
 // eligible. Manual schedule releases are honored through schedule_manual_until.
-func (s *Server) proxyResumeInsideSchedule(taskID string, now time.Time) (bool, error) {
+func (s *Runtime) proxyResumeInsideSchedule(taskID string, now time.Time) (bool, error) {
 	id, err := strconv.ParseInt(taskID, 10, 64)
 	if err != nil {
 		return false, err

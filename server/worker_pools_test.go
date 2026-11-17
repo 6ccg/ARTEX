@@ -83,7 +83,7 @@ func TestWorkerPoolSettingsRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Skipf("postgres unavailable: %v", err)
 	}
-	defer m.Close()
+	t.Cleanup(func() { _ = m.Close() })
 	pID, err := m.pg.SaveProfile(&db.LLMProfile{Name: "pool-test", Format: "openai", Model: "pool-test", APIKey: "pool-test-key"})
 	if err != nil {
 		t.Fatal(err)
@@ -122,7 +122,8 @@ func TestWorkerPoolSettingsRoundTrip(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	s := New(ctx, m, t.TempDir(), t.TempDir(), t.TempDir())
+	s := newStartedServer(t, ctx, m, t.TempDir(), t.TempDir(), t.TempDir())
+	defer s.Close()
 	if _, err := m.pg.Exec("DELETE FROM settings WHERE key=$1", settingWorkerPools); err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +187,7 @@ func TestPinnedRuntimeMissingProfileDoesNotFallback(t *testing.T) {
 	if err != nil {
 		t.Skipf("postgres unavailable: %v", err)
 	}
-	defer m.Close()
+	t.Cleanup(func() { _ = m.Close() })
 	task, err := m.CreateTask("pinned runtime test", "test", nil, 0, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -201,8 +202,8 @@ func TestPinnedRuntimeMissingProfileDoesNotFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 	missing := int64(9223372036854775807)
-	s := &Server{m: m, llmOn: true, llmProv: &scriptedLLMProvider{}}
-	runtime := &taskLLMRuntime{s: s, taskID: task.ID, agentKey: "worker", pinProfileID: &missing}
+	s := &Server{Runtime: &Runtime{m: m, llmOn: true, llmProv: &scriptedLLMProvider{}}}
+	runtime := &taskLLMRuntime{s: s.Runtime, taskID: task.ID, agentKey: "worker", pinProfileID: &missing}
 	if _, err := runtime.current(); err == nil {
 		t.Fatal("missing pinned profile silently fell back")
 	}
@@ -216,7 +217,7 @@ func TestPinnedRuntimeQuotaDoesNotAdvanceTaskFailover(t *testing.T) {
 	if err != nil {
 		t.Skipf("postgres unavailable: %v", err)
 	}
-	defer m.Close()
+	t.Cleanup(func() { _ = m.Close() })
 	task, err := m.CreateTask("pinned quota", "test", nil, 0, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -235,9 +236,9 @@ func TestPinnedRuntimeQuotaDoesNotAdvanceTaskFailover(t *testing.T) {
 		t.Fatalf("load task failover state: task=%+v err=%v", before, err)
 	}
 	provider := &scriptedLLMProvider{err: errors.New("insufficient_quota")}
-	s := &Server{m: m, provByProfile: map[int64]*provEntry{profileID: {prov: provider, cfg: agent.Config{}}}}
+	s := &Server{Runtime: &Runtime{m: m, provByProfile: map[int64]*provEntry{profileID: {prov: provider, cfg: agent.Config{}}}}}
 	id := profileID
-	runtime := &taskLLMRuntime{s: s, taskID: task.ID, agentKey: "worker", pinProfileID: &id}
+	runtime := &taskLLMRuntime{s: s.Runtime, taskID: task.ID, agentKey: "worker", pinProfileID: &id}
 	if _, _, _, err := runtime.Complete(context.Background(), llm.CompletionRequest{}); err == nil {
 		t.Fatal("pinned quota error unexpectedly succeeded")
 	}
@@ -261,7 +262,7 @@ func TestPinnedWorkerLoopDoesNotConsultTaskRouterAndReportsFailureOnce(t *testin
 	if err != nil {
 		t.Skipf("postgres unavailable: %v", err)
 	}
-	defer m.Close()
+	t.Cleanup(func() { _ = m.Close() })
 	task, err := m.CreateTask("pinned worker loop", "test", nil, 0, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -313,7 +314,7 @@ func TestPinnedWorkerAvailabilityRecoveryUsesSystemSession(t *testing.T) {
 	if err != nil {
 		t.Skipf("postgres unavailable: %v", err)
 	}
-	defer m.Close()
+	t.Cleanup(func() { _ = m.Close() })
 	task, err := m.CreateTask("pinned availability", "test", nil, 0, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -349,7 +350,7 @@ func TestDetachedIntentPinnedOwnerUsesPinnedResolver(t *testing.T) {
 	if err != nil {
 		t.Skipf("postgres unavailable: %v", err)
 	}
-	defer m.Close()
+	t.Cleanup(func() { _ = m.Close() })
 	task, err := m.CreateTask("detached pinned owner", "test", nil, 0, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -366,7 +367,7 @@ func TestDetachedIntentPinnedOwnerUsesPinnedResolver(t *testing.T) {
 		t.Fatalf("pause intent: changed=%v err=%v", changed, err)
 	}
 	e := NewEngine(m)
-	e.slotPlans.Store(task.ID, map[string]int64{"work#4": 12})
+	e.setSlotPlan(task.ID, map[string]int64{"work#4": 12})
 	var pinnedCalls, snapshotCalls atomic.Int32
 	e.SetWorkerResolver(func(_ *Task, slot WorkerSlot) (*agent.Worker, error) {
 		pinnedCalls.Add(1)

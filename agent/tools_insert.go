@@ -337,7 +337,7 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 					errs = append(errs, errEntry{Index: i, Error: err.Error()})
 					continue
 				}
-				if intelligenceEnabled() && typ == "service" && taskID > 0 {
+				if t.host.intelligenceEnabled() && typ == "service" && taskID > 0 {
 					for _, auth := range item.Auth {
 						raw, _ := json.Marshal(auth)
 						input := db.IntelligenceInput{Kind: "credential", Title: fmt.Sprintf("服务 #%d 的认证信息", id), Content: string(raw), Evidence: fmt.Sprintf("insert_assets 上报，服务资产 #%d，来源意图 #%d", id, t.ownerNode), Confidence: "observed", Status: "unverified", AssetIDs: []int64{id}}

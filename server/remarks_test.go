@@ -19,13 +19,16 @@ func TestRemarksRoundTripPreservesExecutionState(t *testing.T) {
 	if err != nil {
 		t.Skipf("postgres unavailable: %v", err)
 	}
-	defer m.Close()
+	t.Cleanup(func() { _ = m.Close() })
 	task, err := m.CreateTask("remark test description", "original goal", nil, 0, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
 	taskID, _ := strconv.ParseInt(task.ID, 10, 64)
 	defer func() { _ = m.pg.DeleteTask(taskID) }()
+	if err := m.ApplyTaskPause(task.ID); err != nil {
+		t.Fatal(err)
+	}
 	scheduleInput := db.TaskScheduleInput{Name: "remark schedule", Enabled: false, ScheduleType: "once", RunDate: "2099-01-01", StartTime: "09:00", TaskIDs: []int64{taskID}}
 	schedule, err := m.pg.CreateTaskSchedule(scheduleInput)
 	if err != nil {
@@ -42,7 +45,8 @@ func TestRemarksRoundTripPreservesExecutionState(t *testing.T) {
 	originalLifecycle := task.lifecycleSnapshot()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	s := New(ctx, m, t.TempDir(), t.TempDir(), t.TempDir())
+	s := newStartedServer(t, ctx, m, t.TempDir(), t.TempDir(), t.TempDir())
+	defer s.Close()
 	token, err := signJWT(s.jwtKey)
 	if err != nil {
 		t.Fatal(err)

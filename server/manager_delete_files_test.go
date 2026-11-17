@@ -17,7 +17,7 @@ func TestSeedAssociatesTargetAssetWithTask(t *testing.T) {
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) - skipping", err)
 	}
-	defer m.Close()
+	t.Cleanup(func() { _ = m.Close() })
 	task, err := m.CreateTask("seed ownership", "seed ownership", nil, 0, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -27,7 +27,7 @@ func TestSeedAssociatesTargetAssetWithTask(t *testing.T) {
 	})
 
 	host := fmt.Sprintf("seed-%s.example.test", task.ID)
-	s := &Server{m: m}
+	s := &Server{Runtime: &Runtime{m: m}}
 	s.seed(task, "https://"+host)
 	taskID := mustTaskID(t, task.ID)
 	assets, err := m.Assets().QueryByTask(taskID, "", 20, 0)

@@ -33,6 +33,7 @@ import (
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/norma/permission"
 	actool "github.com/Autumn-27/norma/tool"
+	"github.com/google/uuid"
 	mproxy "github.com/lqqyt2423/go-mitmproxy/proxy"
 	_ "modernc.org/sqlite"
 )
@@ -139,7 +140,6 @@ type Traffic struct {
 	addr  string
 	db    *sql.DB
 	wmu   sync.Mutex // serializes record() vs DeleteHost (incl. blob GC)
-	seq   atomic.Int64
 	proxy *mproxy.Proxy
 	// fts reports whether the full-text index is available. False on a driver
 	// build without FTS5: recording and metadata search still work, body search
@@ -161,6 +161,8 @@ type Traffic struct {
 	// stopping() treats as "not closing".
 	closed    chan struct{}
 	closeOnce sync.Once
+	closeErr  error
+	captures  sync.WaitGroup
 	// pass is the set of hosts whose MITM interception failed for a proxy/protocol
 	// reason; connections to them are tunneled transparently (fail-open) so the
 	// request still reaches the target — unrecorded — instead of being killed.
@@ -185,14 +187,15 @@ func Open(dir, addr string) (*Traffic, error) {
 	// than in a one-off Exec: the pool opens connections on demand, and an Exec
 	// only configures whichever one happened to serve it — leaving every other
 	// connection to fail instantly the moment a writer holds the database.
-	// The driver splits the DSN at the first '?', so a data directory containing
-	// one would silently name a different file; that path falls back to a bare
-	// DSN, where initIndex still applies the pragmas to its own connection.
-	index := filepath.Join(dir, "_index", "index.sqlite")
-	dsn := index
-	if !strings.ContainsRune(index, '?') {
-		dsn = "file:" + index + "?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)"
+	index, err := filepath.Abs(filepath.Join(dir, "_index", "index.sqlite"))
+	if err != nil {
+		return nil, err
 	}
+	uriPath := filepath.ToSlash(index)
+	if filepath.VolumeName(index) != "" && !strings.HasPrefix(uriPath, "/") {
+		uriPath = "/" + uriPath
+	}
+	dsn := (&url.URL{Scheme: "file", Path: uriPath, RawQuery: "_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)"}).String()
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
@@ -387,11 +390,26 @@ func (t *Traffic) Start() error { return t.proxy.Start() }
 // it holds a whole minutes-long budget, and finishing it is never worth delaying
 // shutdown for — the next deletion resumes it.
 func (t *Traffic) Close() error {
-	if t.closed != nil {
-		t.closeOnce.Do(func() { close(t.closed) })
-	}
-	t.reaping.Wait()
-	return t.db.Close()
+	t.closeOnce.Do(func() {
+		// Stop the producer and drain completed response callbacks before closing
+		// recording admission, including callbacks still waiting for wmu.
+		if t.proxy != nil {
+			t.closeErr = t.proxy.Close()
+		}
+		t.captures.Wait()
+		// Drain the current writer and close admission before waiting for any
+		// background cleanup. No later record may write into the closed index.
+		t.wmu.Lock()
+		if t.closed != nil {
+			close(t.closed)
+		}
+		t.wmu.Unlock()
+		t.reaping.Wait()
+		if t.db != nil {
+			t.closeErr = errors.Join(t.closeErr, t.db.Close())
+		}
+	})
+	return t.closeErr
 }
 
 // stopping reports whether Close has been called. A nil channel (the zero value)
@@ -409,7 +427,8 @@ func (t *Traffic) DB() *sql.DB { return t.db }
 // sink is the go-mitmproxy addon that records completed exchanges.
 type sink struct {
 	mproxy.BaseAddon
-	t *Traffic
+	t       *Traffic
+	streams sync.Map
 }
 
 // Preserve an absent User-Agent when go-mitmproxy creates its outbound Go
@@ -482,21 +501,26 @@ func (t *Traffic) record(f *mproxy.Flow) {
 	// can run under the same lock without racing a concurrent record.
 	t.wmu.Lock()
 	defer t.wmu.Unlock()
+	if t.stopping() {
+		return
+	}
+	reqB := t.spill(f.Request.Body, f.Request.Header.Get("Content-Type"))
+	respB := t.spill(f.Response.Body, f.Response.Header.Get("Content-Type"))
+	t.recordBodies(f, reqB, respB, int64(len(f.Request.Body)), int64(len(f.Response.Body)))
+}
+
+// Caller holds wmu across body publication and the SQLite transaction.
+func (t *Traffic) recordBodies(f *mproxy.Flow, reqB, respB storedBody, reqLen, respLen int64) {
 	host := f.Request.URL.Hostname()
 	method := f.Request.Method
 	tmpl := db.TemplatePath(f.Request.URL.EscapedPath())
-	n := t.seq.Add(1)
 	now := time.Now()
-	id := fmt.Sprintf("%d-%04d", now.Unix(), n%10000)
+	id := fmt.Sprintf("%d-%s", now.Unix(), uuid.NewString())
 
 	ct := f.Response.Header.Get("Content-Type")
 	url := f.Request.URL.String()
 	reqHead := fmt.Sprintf("%s %s %s\n%s", method, f.Request.URL.RequestURI(), f.Request.Proto, requestHeaderLines(f.Request))
 	respHead := fmt.Sprintf("HTTP %d\n%s", f.Response.StatusCode, headerLines(f.Response.Header))
-	// Bodies are spilled before the transaction opens: blob writes are filesystem
-	// work and must not sit inside the SQLite write lock.
-	reqB := t.spill(f.Request.Body, f.Request.Header.Get("Content-Type"))
-	respB := t.spill(f.Response.Body, ct)
 
 	tx, err := t.db.Begin()
 	if err != nil {
@@ -510,7 +534,7 @@ func (t *Traffic) record(f *mproxy.Flow) {
 	res, err := tx.Exec(`INSERT OR REPLACE INTO exchanges(id,ts,host,method,url_template,url,status,content_type,req_len,resp_len,path)
 VALUES(?,?,?,?,?,?,?,?,?,?,'')`,
 		id, now.Unix(), host, method, tmpl, url, f.Response.StatusCode, ct,
-		len(f.Request.Body), len(f.Response.Body))
+		reqLen, respLen)
 	if err != nil {
 		log.Printf("[traffic] 记录 %s 失败（写索引）：%v", url, err)
 		return
@@ -589,22 +613,40 @@ func (t *Traffic) spill(body []byte, contentType string) storedBody {
 	blobDir := filepath.Join(t.dir, "_blobs", "sha256", h[:2])
 	if err := os.MkdirAll(blobDir, 0o755); err != nil {
 		log.Printf("[traffic] 创建 blob 目录失败：%v", err)
-		return storedBody{inline: clipBytes(body, blobPreview), index: indexText()}
+		return storedBody{inline: body, index: indexText()}
 	}
 	blobPath := filepath.Join(blobDir, h+".bin")
-	if _, err := os.Stat(blobPath); os.IsNotExist(err) {
-		if err := os.WriteFile(blobPath, body, 0o644); err != nil {
+	info, statErr := os.Stat(blobPath)
+	if statErr != nil && !os.IsNotExist(statErr) {
+		log.Printf("[traffic] 检查 blob %s 失败：%v", h, statErr)
+		return storedBody{inline: body, index: indexText()}
+	}
+	if statErr != nil || !info.Mode().IsRegular() || info.Size() != int64(len(body)) {
+		if err := writeBlob(blobPath, body); err != nil {
 			log.Printf("[traffic] 写 blob %s 失败：%v", h, err)
-			return storedBody{inline: clipBytes(body, blobPreview), index: indexText()}
+			return storedBody{inline: body, index: indexText()}
 		}
 	}
 	sb := storedBody{hash: h, index: indexText()}
 	if text {
 		sb.inline = []byte(truncateUTF8(body, blobPreview))
 	} else {
-		sb.inline = []byte(binaryTag(contentType, body))
+		sb.inline = []byte(binaryTag(contentType, body, int64(len(body))))
 	}
 	return sb
+}
+
+func writeBlob(path string, body []byte) error {
+	file, err := os.CreateTemp(filepath.Dir(path), ".body-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(file.Name())
+	_, writeErr := file.Write(body)
+	if err := errors.Join(writeErr, file.Close()); err != nil {
+		return err
+	}
+	return os.Rename(file.Name(), path)
 }
 
 // binaryTypes are content-type prefixes whose bodies are never worth indexing or
@@ -637,13 +679,13 @@ func isBinaryBody(contentType string, body []byte) bool {
 
 // binaryTag describes a spilled binary body in one line, including the leading
 // magic bytes so a reader can recognize the format without downloading it.
-func binaryTag(contentType string, body []byte) string {
+func binaryTag(contentType string, body []byte, length int64) string {
 	ct := strings.TrimSpace(contentType)
 	if ct == "" {
 		ct = "application/octet-stream"
 	}
 	magic := hex.EncodeToString(clipBytes(body, 4))
-	return fmt.Sprintf("[binary %s, %d bytes, magic=%s]", ct, len(body), magic)
+	return fmt.Sprintf("[binary %s, %d bytes, magic=%s]", ct, length, magic)
 }
 
 func clipBytes(b []byte, n int) []byte {
@@ -1467,11 +1509,16 @@ func (t *Traffic) reapStage(stageDir string) {
 	if stageDir == "" {
 		return
 	}
-	t.reaping.Go(func() {
+	remove := func() {
 		if err := os.RemoveAll(stageDir); err != nil {
 			log.Printf("[traffic] 清理历史流量目录 %s 失败：%v", stageDir, err)
 		}
-	})
+	}
+	if t.stopping() {
+		remove()
+		return
+	}
+	t.reaping.Go(remove)
 }
 
 // DeleteHostsExact removes recorded exchanges for a set of EXACT hosts (the
@@ -1811,7 +1858,7 @@ func (t *Traffic) indexBytes() int64 {
 // Best-effort throughout. Failing to reclaim costs disk space, never
 // correctness, so errors are logged and the next deletion resumes the work.
 func (t *Traffic) reclaim() {
-	if !t.reclaiming.CompareAndSwap(false, true) {
+	if t.stopping() || !t.reclaiming.CompareAndSwap(false, true) {
 		return // one pass at a time; a second would only contend for the lock
 	}
 	t.reaping.Go(func() {

@@ -24,7 +24,7 @@ func (cfg *updateSettings) validate() error {
 	return nil
 }
 
-func (s *Server) loadUpdateSettings() (updateSettings, error) {
+func (s *Runtime) loadUpdateSettings() (updateSettings, error) {
 	cfg := updateSettings{}
 	raw, ok, err := s.m.pg.GetSetting(updateSettingsKey)
 	if err != nil {
@@ -74,7 +74,7 @@ func (s *Server) putUpdateSettings(w http.ResponseWriter, r *http.Request) {
 
 // Capture one effective proxy for both release discovery and all asset downloads.
 // A different proxy bypasses cached success/error results from the previous route.
-func (s *Server) updateClient() (*http.Client, string, error) {
+func (s *Runtime) updateClient() (*http.Client, string, error) {
 	cfg, err := s.loadUpdateSettings()
 	if err != nil {
 		return nil, "", err

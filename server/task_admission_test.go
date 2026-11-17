@@ -26,7 +26,7 @@ func newAdmissionTestServer(m *Manager, available func(*Task) bool) *Server {
 		}
 		return nil, nil
 	})
-	return &Server{m: m, engine: e, ctx: ctx, chatBusy: map[string]bool{}, chatCancel: map[string]context.CancelCauseFunc{}}
+	return &Server{Runtime: &Runtime{m: m, engine: e, ctx: ctx, chatBusy: map[string]bool{}, chatCancel: map[string]context.CancelCauseFunc{}}}
 }
 
 func restoreConcurrencySetting(t *testing.T, m *Manager) func() {
@@ -47,7 +47,7 @@ func TestAdmitAlreadyRunningTaskDoesNotQueueAfterLimitDecrease(t *testing.T) {
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) - skipping", err)
 	}
-	defer m.Close()
+	t.Cleanup(func() { _ = m.Close() })
 
 	oldEnabled, oldLimit := m.ConcurrencyLimit()
 	if oldLimit < 1 {
@@ -74,7 +74,7 @@ func TestAdmitAlreadyRunningTaskDoesNotQueueAfterLimitDecrease(t *testing.T) {
 	s := newAdmissionTestServer(m, nil)
 	// Simulate a task whose long-lived loops were admitted before the limit was
 	// lowered. The other live task makes the current count exceed the new limit.
-	s.engine.started.Store(running.ID, true)
+	s.engine.taskRun(running.ID).started.Store(true)
 	queued, err := s.admitTask(running, "resume")
 	if err != nil {
 		t.Fatal(err)
@@ -89,7 +89,7 @@ func TestAdmissionDoesNotOverwriteConcurrentTerminalStatus(t *testing.T) {
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) - skipping", err)
 	}
-	defer m.Close()
+	t.Cleanup(func() { _ = m.Close() })
 	defer restoreConcurrencySetting(t, m)()
 	if err := m.SetConcurrency(false, defaultConcurrencyLimit); err != nil {
 		t.Fatal(err)
@@ -126,7 +126,7 @@ func TestAdmitKeepsQueuedBootstrapMode(t *testing.T) {
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) - skipping", err)
 	}
-	defer m.Close()
+	t.Cleanup(func() { _ = m.Close() })
 
 	oldEnabled, oldLimit := m.ConcurrencyLimit()
 	if oldLimit < 1 {
@@ -169,7 +169,7 @@ func TestTerminalTaskQueuedByAdmissionKeepsExecutionBarrier(t *testing.T) {
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) - skipping", err)
 	}
-	defer m.Close()
+	t.Cleanup(func() { _ = m.Close() })
 	defer restoreConcurrencySetting(t, m)()
 	if err := m.SetConcurrency(true, 1); err != nil {
 		t.Fatal(err)
@@ -217,7 +217,7 @@ func TestTimedOutTaskRevivalResetsClockAndSettlingAcrossFIFO(t *testing.T) {
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) - skipping", err)
 	}
-	defer m.Close()
+	t.Cleanup(func() { _ = m.Close() })
 	defer restoreConcurrencySetting(t, m)()
 	if err := m.SetConcurrency(true, 1); err != nil {
 		t.Fatal(err)
@@ -247,10 +247,10 @@ func TestTimedOutTaskRevivalResetsClockAndSettlingAcrossFIFO(t *testing.T) {
 	}
 
 	s := newAdmissionTestServer(m, nil)
-	s.engine.settling.Store(task.ID, true)
-	s.engine.deadline.Store(task.ID, oldClock.DeadlineAt)
-	s.engine.stamped.Store(task.ID, true)
-	s.engine.coordStarted.Store(task.ID, true)
+	s.engine.taskRun(task.ID).settling.Store(true)
+	s.engine.taskRun(task.ID).deadline.Store(oldClock.DeadlineAt)
+	s.engine.taskRun(task.ID).stamped.Store(true)
+	s.engine.taskRun(task.ID).coordinator.Store(new(int))
 
 	queued, err := s.admitTask(task, "resume")
 	if err != nil {
@@ -264,10 +264,10 @@ func TestTimedOutTaskRevivalResetsClockAndSettlingAcrossFIFO(t *testing.T) {
 	if s.engine.isSettling(task.ID) {
 		t.Fatal("timed-out task retained the old settling gate while queued")
 	}
-	if _, ok := s.engine.deadline.Load(task.ID); ok {
+	if run := s.engine.lookupTaskRun(task.ID); run != nil && run.deadline.Load() != 0 {
 		t.Fatal("timed-out task retained the old in-memory deadline")
 	}
-	if _, ok := s.engine.stamped.Load(task.ID); ok {
+	if run := s.engine.lookupTaskRun(task.ID); run != nil && run.stamped.Load() {
 		t.Fatal("timed-out task retained the old first-run stamp")
 	}
 	stored, err := m.pg.GetTask(mustTaskID(t, task.ID))
@@ -293,8 +293,17 @@ func TestTimedOutTaskRevivalResetsClockAndSettlingAcrossFIFO(t *testing.T) {
 	if execCtx := s.engine.execContextFor(context.Background(), task.ID); execCtx.Err() != nil {
 		t.Fatalf("revived task did not receive a live execution context: %v", context.Cause(execCtx))
 	}
-	if _, ok := s.engine.coordStarted.Load(task.ID); !ok {
-		t.Fatal("revived timeout task did not start a fresh deadline coordinator")
+	// This fixture's root is already cancelled: its newly registered routines
+	// must exit and release the coordinator marker, rather than retain it.
+	s.engine.runtimeMu.Lock()
+	rt := s.engine.runtimes[task.ID]
+	s.engine.runtimeMu.Unlock()
+	if rt == nil {
+		t.Fatal("revived timeout task did not register its runtime")
+	}
+	rt.wg.Wait()
+	if run := s.engine.lookupTaskRun(task.ID); run != nil && run.coordinator.Load() != nil {
+		t.Fatal("cancelled runtime retained its deadline coordinator marker")
 	}
 }
 
@@ -303,7 +312,7 @@ func TestQueuedTaskCanPauseAndResumeAtFIFOTail(t *testing.T) {
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) - skipping", err)
 	}
-	defer m.Close()
+	t.Cleanup(func() { _ = m.Close() })
 	defer restoreConcurrencySetting(t, m)()
 	if err := m.SetConcurrency(true, 1); err != nil {
 		t.Fatal(err)
@@ -353,7 +362,7 @@ func TestReadyFIFOIsAdmittedBeforeNewTask(t *testing.T) {
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) - skipping", err)
 	}
-	defer m.Close()
+	t.Cleanup(func() { _ = m.Close() })
 	defer restoreConcurrencySetting(t, m)()
 	if err := m.SetConcurrency(true, 2); err != nil {
 		t.Fatal(err)
@@ -400,7 +409,7 @@ func TestUnavailableTaskReleasesSlotForReadyQueue(t *testing.T) {
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) - skipping", err)
 	}
-	defer m.Close()
+	t.Cleanup(func() { _ = m.Close() })
 	defer restoreConcurrencySetting(t, m)()
 	if err := m.SetConcurrency(true, 1); err != nil {
 		t.Fatal(err)
@@ -419,7 +428,7 @@ func TestUnavailableTaskReleasesSlotForReadyQueue(t *testing.T) {
 		_, _ = m.DeleteTask(ready.ID, DeleteTaskOptions{})
 	}()
 	s := newAdmissionTestServer(m, func(task *Task) bool { return task.ID != unavailable.ID })
-	s.engine.started.Store(unavailable.ID, true)
+	s.engine.taskRun(unavailable.ID).started.Store(true)
 	if err := m.EnqueueTask(ready.ID, "resume"); err != nil {
 		t.Fatal(err)
 	}
@@ -439,7 +448,7 @@ func TestUnavailableTaskWaitsForActiveLLMCallBeforeParking(t *testing.T) {
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) - skipping", err)
 	}
-	defer m.Close()
+	t.Cleanup(func() { _ = m.Close() })
 	defer restoreConcurrencySetting(t, m)()
 	if err := m.SetConcurrency(true, 1); err != nil {
 		t.Fatal(err)
@@ -460,7 +469,7 @@ func TestUnavailableTaskWaitsForActiveLLMCallBeforeParking(t *testing.T) {
 
 	available := map[string]bool{active.ID: true, waiting.ID: true}
 	s := newAdmissionTestServer(m, func(task *Task) bool { return available[task.ID] })
-	s.engine.started.Store(active.ID, true)
+	s.engine.taskRun(active.ID).started.Store(true)
 	if err := m.EnqueueTask(waiting.ID, "resume"); err != nil {
 		t.Fatal(err)
 	}
@@ -493,7 +502,7 @@ func TestRerunAdmissionFailureRestoresIntentState(t *testing.T) {
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) - skipping", err)
 	}
-	defer m.Close()
+	t.Cleanup(func() { _ = m.Close() })
 	task, err := m.CreateTask("failed rerun admission", "restore intent", nil, 0, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -537,7 +546,7 @@ func TestTaskLLMResolutionRejectsInvalidGatewayConfiguration(t *testing.T) {
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) - skipping", err)
 	}
-	defer m.Close()
+	t.Cleanup(func() { _ = m.Close() })
 
 	profileID, err := m.pg.SaveProfile(&db.LLMProfile{
 		Name:   fmt.Sprintf("invalid-resolution-%d", time.Now().UnixNano()),
@@ -561,7 +570,7 @@ func TestTaskLLMResolutionRejectsInvalidGatewayConfiguration(t *testing.T) {
 	}()
 
 	t.Setenv("ARTEX_EGRESS_URL", "://invalid")
-	s := &Server{m: m, provByProfile: map[int64]*provEntry{}}
+	s := &Server{Runtime: &Runtime{m: m, provByProfile: map[int64]*provEntry{}}}
 	got, err := s.resolveTaskRoleLLM(task, "worker")
 	if err != nil {
 		t.Fatal(err)
@@ -578,7 +587,7 @@ func TestTaskLLMResolutionPrefersAgentBindingOverTaskChain(t *testing.T) {
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) - skipping", err)
 	}
-	defer m.Close()
+	t.Cleanup(func() { _ = m.Close() })
 
 	stamp := time.Now().UnixNano()
 	boundID, err := m.pg.SaveProfile(&db.LLMProfile{
@@ -611,7 +620,7 @@ func TestTaskLLMResolutionPrefersAgentBindingOverTaskChain(t *testing.T) {
 		_ = m.pg.DeleteProfile(chainID)
 	}()
 
-	s := &Server{m: m, provByProfile: map[int64]*provEntry{}}
+	s := &Server{Runtime: &Runtime{m: m, provByProfile: map[int64]*provEntry{}}}
 	got, err := s.resolveTaskRoleLLM(task, "worker")
 	if err != nil {
 		t.Fatal(err)
@@ -645,7 +654,7 @@ func TestTaskLLMResolutionReportsDatabaseFailure(t *testing.T) {
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) - skipping", err)
 	}
-	defer m.Close()
+	t.Cleanup(func() { _ = m.Close() })
 	task, err := m.CreateTask("resolution storage failure", "return server error", nil, 0, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -654,7 +663,7 @@ func TestTaskLLMResolutionReportsDatabaseFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	s := &Server{m: m}
+	s := &Server{Runtime: &Runtime{m: m}}
 	req := httptest.NewRequest(http.MethodGet, "/api/tasks/1/llm/resolution", nil)
 	req.SetPathValue("id", task.ID)
 	rec := httptest.NewRecorder()
@@ -665,7 +674,7 @@ func TestTaskLLMResolutionReportsDatabaseFailure(t *testing.T) {
 }
 
 func TestTokenStatsWithoutTaskReturnsStableShape(t *testing.T) {
-	s := &Server{m: &Manager{tasks: map[string]*Task{}}}
+	s := &Server{Runtime: &Runtime{m: &Manager{tasks: map[string]*Task{}}}}
 	req := httptest.NewRequest(http.MethodGet, "/api/exploration/tokens?task=missing", nil)
 	rec := httptest.NewRecorder()
 	s.tokenStats(rec, req)
@@ -690,7 +699,7 @@ func TestBatchControlLimitCountsDeduplicatedIDs(t *testing.T) {
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) - skipping", err)
 	}
-	defer m.Close()
+	t.Cleanup(func() { _ = m.Close() })
 	s := newAdmissionTestServer(m, nil)
 
 	request := func(handler http.HandlerFunc, path string, pathValues map[string]string, payload any) *httptest.ResponseRecorder {
@@ -764,7 +773,7 @@ func TestPauseTaskToolPersistsAndDequeuesTask(t *testing.T) {
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) - skipping", err)
 	}
-	defer m.Close()
+	t.Cleanup(func() { _ = m.Close() })
 	task, err := m.CreateTask("orchestrated pause", "persist queued pause", nil, 0, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -800,7 +809,7 @@ func TestPauseTaskToolUsesOrchestratorCancellationCause(t *testing.T) {
 	if err != nil {
 		t.Skipf("postgres unavailable (%v) - skipping", err)
 	}
-	defer m.Close()
+	t.Cleanup(func() { _ = m.Close() })
 	task, err := m.CreateTask("orchestrated pause cause", "keep audit reason", nil, 0, 0)
 	if err != nil {
 		t.Fatal(err)

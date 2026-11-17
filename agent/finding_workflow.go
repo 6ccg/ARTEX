@@ -10,20 +10,15 @@ import (
 
 const findingIDGuidance = "\n\n**漏洞编号约定**：finding_id 是独立漏洞记录 ID；finding_node_id 是探索节点 ID。list_findings / list_task_findings / node_detail / get_task_node_detail 的 id 保留为探索节点 ID，应从同一返回的 finding_id 读取独立编号。get_finding_traffic / bind_finding_traffic 用独立 finding_id。旧 update_finding_report 的 finding_id 参数仍传 finding_node_id。不要把 report_finding 第一行的数字用于证据工具，也不要遇到编号错误后猜测其他数字。"
 
-// The server supplies the persisted setting. A missing setting/host is off.
-// Consulted at assembly and again on writes so an already-running session
-// cannot keep binding after the user switches the feature off.
-var FindingTrafficBindingEnabled func() bool
-
-func findingTrafficBindingEnabled() bool {
-	return FindingTrafficBindingEnabled != nil && FindingTrafficBindingEnabled()
+func (host *Host) findingTrafficBindingEnabled() bool {
+	return host != nil && host.FindingTrafficBindingEnabled != nil && host.FindingTrafficBindingEnabled()
 }
 
 // Applied after ToolResolve: user descriptions and prompts remain intact, while
 // all actual reporters (including Planner and custom chat agents) see the same
 // API contract. Disabled/unbound tools are never reintroduced here.
-func findingWorkflowTools(agentKey string, tools []actool.CoreTool) ([]actool.CoreTool, string) {
-	if !findingTrafficBindingEnabled() {
+func (host *Host) findingWorkflowTools(agentKey string, tools []actool.CoreTool) ([]actool.CoreTool, string) {
+	if !host.findingTrafficBindingEnabled() {
 		out := make([]actool.CoreTool, 0, len(tools))
 		for _, tool := range tools {
 			if tool.Name() == "bind_finding_traffic" {

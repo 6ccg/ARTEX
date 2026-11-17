@@ -1,22 +1,16 @@
 package server
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/http/httptest"
 	"strconv"
 	"strings"
 	"testing"
 )
 
 func TestTaskArchiveAPIQueueListAndLimits(t *testing.T) {
-	m, err := NewManager(t.TempDir(), "")
-	if err != nil {
-		t.Skipf("postgres unavailable (%v) - skipping", err)
-	}
-	defer m.Close()
+	m := newTestManager(t)
 	task, err := m.CreateTask("archive api", "verify 202", nil, 0, 0)
 	if err != nil {
 		t.Fatal(err)
@@ -30,31 +24,14 @@ func TestTaskArchiveAPIQueueListAndLimits(t *testing.T) {
 		_ = m.pg.DeleteTask(taskID)
 	}()
 
-	// Start with an already-cancelled context so the background archive worker
-	// exits before these route-contract assertions enqueue work.
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	dataDir := t.TempDir()
-	s := New(ctx, m, dataDir, dataDir, dataDir)
-	s.archiveWG.Wait()
-	token, err := signJWT(s.jwtKey)
-	if err != nil {
-		t.Fatal(err)
-	}
-	request := func(method, path, body string) *httptest.ResponseRecorder {
-		req := httptest.NewRequest(method, path, strings.NewReader(body))
-		req.Header.Set("Authorization", "Bearer "+token)
-		req.Header.Set("Content-Type", "application/json")
-		recorder := httptest.NewRecorder()
-		s.Handler().ServeHTTP(recorder, req)
-		return recorder
-	}
+	s := newIdleAPIServer(t, m)
+	request := authenticatedRequest(t, s)
 
 	recorder := request(http.MethodPost, "/api/tasks/"+task.ID+"/archive", "{}")
 	if recorder.Code != http.StatusConflict {
 		t.Fatalf("running archive status=%d body=%s", recorder.Code, recorder.Body.String())
 	}
-	if err := m.pg.SetPaused(taskID, true); err != nil {
+	if err := m.ApplyTaskPause(task.ID); err != nil {
 		t.Fatal(err)
 	}
 	recorder = request(http.MethodPost, "/api/tasks/"+task.ID+"/archive", "{}")

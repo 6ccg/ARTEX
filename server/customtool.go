@@ -195,7 +195,7 @@ func detectPython() string {
 
 // pythonInterpreter resolves the interpreter: user-set > stored auto-detect > live
 // detect. "" only when truly none found.
-func (s *Server) pythonInterpreter() string {
+func (s *Runtime) pythonInterpreter() string {
 	if v, ok, _ := s.m.pg.GetSetting(settingPythonInterp); ok && strings.TrimSpace(v) != "" {
 		return strings.TrimSpace(v)
 	}
@@ -204,7 +204,7 @@ func (s *Server) pythonInterpreter() string {
 
 // seedPythonInterpreter stores the auto-detected interpreter on startup if unset
 // (never clobbers a user-set value).
-func (s *Server) seedPythonInterpreter() {
+func (s *Runtime) seedPythonInterpreter() {
 	if v, ok, _ := s.m.pg.GetSetting(settingPythonInterp); ok && strings.TrimSpace(v) != "" {
 		return
 	}
@@ -246,7 +246,7 @@ func timeoutOr(ms, def int) time.Duration {
 // customTools builds CoreTools for every user-defined (system=false) tool row.
 // shell-kind tools are environment hints only — they surface in the Bash tool
 // description via ToolResolve and do NOT create callable tool entries here.
-func (s *Server) customTools() ([]actool.CoreTool, error) {
+func (s *Runtime) customTools() ([]actool.CoreTool, error) {
 	rows, err := s.m.pg.ListCustomTools()
 	if err != nil {
 		return nil, err
@@ -263,7 +263,7 @@ func (s *Server) customTools() ([]actool.CoreTool, error) {
 
 // buildCustomTool turns one custom-tool row into a CoreTool. Empty schema → a thin
 // {args:string} (薄壳工具), so command/http templates can use {args}.
-func (s *Server) buildCustomTool(t *db.Tool) actool.CoreTool {
+func (s *Runtime) buildCustomTool(t *db.Tool) actool.CoreTool {
 	schema := ensureSchema(t.Schema)
 	key, kind, execRaw := t.Key, t.Kind, t.Exec
 	run := func(ctx context.Context, in json.RawMessage, tc *actool.ToolContext) (actool.Result, error) {
@@ -329,7 +329,7 @@ func ensureSchema(raw json.RawMessage) map[string]any {
 
 // ---------- command:渲染命令 → 复用 Bash 底层 run ----------
 
-func (s *Server) runCommandTool(ctx context.Context, execRaw json.RawMessage, params map[string]any, tc *actool.ToolContext) (actool.Result, error) {
+func (s *Runtime) runCommandTool(ctx context.Context, execRaw json.RawMessage, params map[string]any, tc *actool.ToolContext) (actool.Result, error) {
 	var spec commandExec
 	_ = json.Unmarshal(execRaw, &spec)
 	if strings.TrimSpace(spec.Command) == "" {
@@ -349,7 +349,7 @@ func (s *Server) runCommandTool(ctx context.Context, execRaw json.RawMessage, pa
 
 // ---------- script(仅 Python):临时文件 + stdin JSON + env ----------
 
-func (s *Server) runScriptTool(ctx context.Context, key string, execRaw json.RawMessage, params map[string]any, tc *actool.ToolContext) (actool.Result, error) {
+func (s *Runtime) runScriptTool(ctx context.Context, key string, execRaw json.RawMessage, params map[string]any, tc *actool.ToolContext) (actool.Result, error) {
 	var spec scriptExec
 	_ = json.Unmarshal(execRaw, &spec)
 	if strings.TrimSpace(spec.Code) == "" {
@@ -418,7 +418,7 @@ func execPython(ctx context.Context, interp, key, code string, params map[string
 
 // ---------- http:原生请求 + 代理 ----------
 
-func (s *Server) runHTTPTool(ctx context.Context, execRaw json.RawMessage, params map[string]any, tc *actool.ToolContext) (actool.Result, error) {
+func (s *Runtime) runHTTPTool(ctx context.Context, execRaw json.RawMessage, params map[string]any, tc *actool.ToolContext) (actool.Result, error) {
 	var spec httpExec
 	_ = json.Unmarshal(execRaw, &spec)
 	method := strings.ToUpper(strings.TrimSpace(spec.Method))
@@ -463,7 +463,7 @@ func (s *Server) runHTTPTool(ctx context.Context, execRaw json.RawMessage, param
 
 // httpProxyTransport builds a Transport for the http tool's proxy config, or nil
 // (direct). use_recording_proxy routes through the recording proxy + trusts its CA.
-func (s *Server) httpProxyTransport(spec httpExec) *http.Transport {
+func (s *Runtime) httpProxyTransport(spec httpExec) *http.Transport {
 	proxyStr := strings.TrimSpace(spec.Proxy)
 	var caFile string
 	if spec.UseRecordingProxy {

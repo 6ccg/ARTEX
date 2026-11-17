@@ -32,6 +32,26 @@ func caseTestDB(t *testing.T) (*DB, *Task, []int64) {
 	t.Cleanup(func() { _, _ = d.Exec(`DELETE FROM findings WHERE task_id=$1`, task.ID); _ = d.DeleteTask(task.ID) })
 	return d, task, ids
 }
+func TestFindingCaseSummariesBatch(t *testing.T) {
+	d, _, ids := caseTestDB(t)
+	if _, err := d.Exec(`UPDATE findings SET evidence='original proof',report='full report' WHERE id=$1`, ids[0]); err != nil {
+		t.Fatal(err)
+	}
+	for _, originalRows := range []bool{false, true} {
+		rows, err := d.FindingCaseSummaries([]int64{ids[0], ids[1], 0}, originalRows)
+		if err != nil || len(rows) != 2 || rows[ids[0]] == nil || rows[ids[1]] == nil {
+			t.Fatalf("page summaries: %v %v", rows, err)
+		}
+		wantEvidence := ""
+		if originalRows {
+			wantEvidence = "original proof"
+		}
+		if rows[ids[0]].Evidence != wantEvidence || rows[ids[0]].Report != "" {
+			t.Fatalf("summary body selection: %+v", rows[ids[0]])
+		}
+	}
+}
+
 func TestFindingCaseMergePreservesRecordsAndVersions(t *testing.T) {
 	d, task, ids := caseTestDB(t)
 	ctx := context.Background()

@@ -20,12 +20,6 @@ func TestFindingTrafficLegacyArchiveDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer d.Close()
-	if err = d.EnsureLLMRecordsTable(); err != nil {
-		t.Fatal(err)
-	}
-	if err = d.EnsureLLMUsageTable(); err != nil {
-		t.Fatal(err)
-	}
 	for _, version := range []int{1, 2} {
 		t.Run(fmt.Sprint(version), func(t *testing.T) {
 			task, err := d.CreateTask("legacy archive evidence defaults", "fixture", nil, 0, 0)
