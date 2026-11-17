@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"time"
@@ -27,18 +28,30 @@ func connectMCP(ctx context.Context, m *db.MCPServer) (mcpClient, error) {
 		if m.Command == "" {
 			return nil, fmt.Errorf("stdio 传输缺少命令")
 		}
-		return mcp.NewStdioClient(ctx, m.Name, m.Command, jsonStrMap(m.Env), jsonStrSlice(m.Args)...)
+		cl, err := mcp.NewStdioClient(ctx, m.Name, m.Command, jsonStrMap(m.Env), jsonStrSlice(m.Args)...)
+		if err != nil {
+			return nil, err
+		}
+		return cl, nil
 	case "http":
 		if m.URL == "" {
 			return nil, fmt.Errorf("http 传输缺少 URL")
 		}
 		// env map doubles as HTTP headers (e.g. Authorization).
-		return mcphttp.New(ctx, m.Name, m.URL, jsonStrMap(m.Env), m.Insecure)
+		cl, err := mcphttp.New(ctx, m.Name, m.URL, jsonStrMap(m.Env), m.Insecure)
+		if err != nil {
+			return nil, err
+		}
+		return cl, nil
 	case "sse":
 		if m.URL == "" {
 			return nil, fmt.Errorf("sse 传输缺少 URL")
 		}
-		return mcphttp.NewSSE(ctx, m.Name, m.URL, jsonStrMap(m.Env), m.Insecure)
+		cl, err := mcphttp.NewSSE(ctx, m.Name, m.URL, jsonStrMap(m.Env), m.Insecure)
+		if err != nil {
+			return nil, err
+		}
+		return cl, nil
 	default:
 		return nil, fmt.Errorf("未知传输方式 %q", m.Transport)
 	}
@@ -58,7 +71,11 @@ func (s *Runtime) discoverAndCacheMCP(ctx context.Context, m *db.MCPServer) erro
 	}
 	tools := make([]db.MCPTool, 0, len(ts))
 	for _, t := range ts {
-		tools = append(tools, db.MCPTool{Name: t.Name(), Description: t.Description()})
+		schema, err := json.Marshal(t.InputSchema())
+		if err != nil {
+			return err
+		}
+		tools = append(tools, db.MCPTool{Name: t.Name(), Description: t.Description(), Schema: schema})
 	}
 	if err := s.m.pg.SaveMCPTools(m.ID, tools); err != nil {
 		return err

@@ -8,6 +8,8 @@ import (
 	"log"
 	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 
 	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/db"
@@ -75,30 +77,90 @@ func wireAgentAugment(host *agent.Host, pg *db.DB, skillDir string, hostTools fu
 			mcpIDs, _ := pg.AgentVisible(a.ID, "mcp")
 			want := idSet(mcpIDs)
 			all, _ := pg.ListMCP()
-			for _, m := range all {
-				if !m.Enabled {
+			type cachedDiscovery struct {
+				tools []db.MCPTool
+				err   error
+			}
+			results := make([]cachedDiscovery, len(all))
+			batchCtx, batchCancel := context.WithTimeout(ctx, 45*time.Second)
+			sem := make(chan struct{}, 4)
+			var wg sync.WaitGroup
+			for i, m := range all {
+				if !m.Enabled || (!want[m.ID] && !gated[m.Name]) {
 					continue
 				}
-				directVisible := want[m.ID]
-				skillGated := gated[m.Name]
-				if !directVisible && !skillGated {
-					continue // neither directly visible nor referenced by a visible skill
-				}
-				cl, err := connectMCP(ctx, m)
-				if err != nil {
-					log.Printf("[mcp] %s 连接失败: %v", m.Name, err)
+				wg.Add(1)
+				go func(i int, m *db.MCPServer) {
+					defer wg.Done()
+					cached, err := pg.MCPToolsDetailed(m.ID)
+					complete := err == nil && len(cached) > 0
+					for _, t := range cached {
+						var schema map[string]any
+						if json.Unmarshal(t.Schema, &schema) != nil || schema == nil {
+							complete = false
+						}
+					}
+					if complete {
+						results[i].tools = cached
+						return
+					}
+					select {
+					case sem <- struct{}{}:
+					case <-batchCtx.Done():
+						results[i] = cachedDiscovery{cached, batchCtx.Err()}
+						return
+					}
+					defer func() { <-sem }()
+					cl, discoverErr := connectMCP(batchCtx, m)
+					if discoverErr == nil {
+						var ts []actool.CoreTool
+						ts, discoverErr = cl.Tools(batchCtx)
+						if discoverErr == nil {
+							var fresh []db.MCPTool
+							for _, t := range ts {
+								schema, e := json.Marshal(t.InputSchema())
+								if e != nil {
+									discoverErr = e
+									break
+								}
+								fresh = append(fresh, db.MCPTool{Name: t.Name(), Description: t.Description(), Schema: schema})
+							}
+							if discoverErr == nil {
+								discoverErr = pg.SaveMCPTools(m.ID, fresh)
+								if discoverErr == nil {
+									cached = fresh
+								}
+							}
+						}
+						_ = cl.Close()
+					}
+					results[i] = cachedDiscovery{cached, discoverErr}
+				}(i, m)
+			}
+			wg.Wait()
+			batchCancel()
+			for i, m := range all {
+				if !m.Enabled || (!want[m.ID] && !gated[m.Name]) {
 					continue
 				}
-				closers = append(closers, cl)
-				ts, err := cl.Tools(ctx)
-				if err != nil {
-					log.Printf("[mcp] %s tools/list 失败: %v", m.Name, err)
-					continue
+				cached, coldErr := results[i].tools, results[i].err
+				if coldErr != nil {
+					log.Printf("[mcp] %s 发现失败: %v", m.Name, coldErr)
 				}
-				for _, t := range ts {
-					// Playwright exposes the screenshot capability as a separate tool. Keep
-					// it opt-in so a normal browser MCP session does not unexpectedly send
-					// image payloads to the model or consume extra tokens.
+
+				lazy := newLazyMCP(m)
+				closers = append(closers, lazy)
+				for _, item := range cached {
+					var schema map[string]any
+					if json.Unmarshal(item.Schema, &schema) != nil || schema == nil {
+						schema = map[string]any{"type": "object"}
+					}
+					var t actool.CoreTool
+					if coldErr != nil {
+						t = failedDiscoveryTool(item.Name, m.Name, coldErr)
+					} else {
+						t = lazy.tool(item.Name, item.Description, schema)
+					}
 					if m.Name == browserMCPName && isBrowserScreenshotTool(t.Name()) &&
 						(agentKey != "reporter" || !pg.GetBool(settingBrowserScreenshot, false)) {
 						continue
@@ -106,12 +168,10 @@ func wireAgentAugment(host *agent.Host, pg *db.DB, skillDir string, hostTools fu
 					extra = append(extra, t)
 					allNames = append(allNames, t.Name())
 					serverTools[m.Name] = append(serverTools[m.Name], t.Name())
-					if directVisible && !skillGated {
-						// directly visible and not gated → available from session start
+					if want[m.ID] && !gated[m.Name] {
 						globalNames = append(globalNames, t.Name())
 						globalSet[t.Name()] = true
 					}
-					// skill-gated tools stay out of globalNames; unlocked via unlockSkill()
 				}
 			}
 		}

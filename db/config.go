@@ -893,13 +893,14 @@ func (d *DB) MCPToolNames(serverID int64) ([]string, error) {
 
 // MCPTool is one cached tool of an MCP server (name + description).
 type MCPTool struct {
-	Name        string `json:"name"`
-	Description string `json:"description"`
+	Name        string          `json:"name"`
+	Description string          `json:"description"`
+	Schema      json.RawMessage `json:"schema,omitempty"`
 }
 
 // MCPToolsDetailed returns the cached tools (name + description) for a server.
 func (d *DB) MCPToolsDetailed(serverID int64) ([]MCPTool, error) {
-	rows, err := d.Query(`SELECT tool_name, COALESCE(description,'') FROM mcp_tools_cache WHERE server_id=$1 ORDER BY tool_name`, serverID)
+	rows, err := d.Query(`SELECT tool_name, COALESCE(description,''), schema FROM mcp_tools_cache WHERE server_id=$1 ORDER BY tool_name`, serverID)
 	if err != nil {
 		return nil, err
 	}
@@ -907,9 +908,11 @@ func (d *DB) MCPToolsDetailed(serverID int64) ([]MCPTool, error) {
 	var out []MCPTool
 	for rows.Next() {
 		var t MCPTool
-		if err := rows.Scan(&t.Name, &t.Description); err != nil {
+		var schema []byte
+		if err := rows.Scan(&t.Name, &t.Description, &schema); err != nil {
 			return nil, err
 		}
+		t.Schema = schema
 		out = append(out, t)
 	}
 	return out, rows.Err()
@@ -926,8 +929,12 @@ func (d *DB) SaveMCPTools(serverID int64, tools []MCPTool) error {
 		return err
 	}
 	for _, t := range tools {
-		if _, err := tx.Exec(`INSERT INTO mcp_tools_cache(server_id, tool_name, description) VALUES ($1,$2,$3)
-ON CONFLICT (server_id, tool_name) DO UPDATE SET description=EXCLUDED.description`, serverID, t.Name, t.Description); err != nil {
+		var schema any
+		if len(t.Schema) > 0 {
+			schema = string(t.Schema)
+		}
+		if _, err := tx.Exec(`INSERT INTO mcp_tools_cache(server_id, tool_name, description, schema) VALUES ($1,$2,$3,$4)
+ON CONFLICT (server_id, tool_name) DO UPDATE SET description=EXCLUDED.description, schema=EXCLUDED.schema`, serverID, t.Name, t.Description, schema); err != nil {
 			return err
 		}
 	}
@@ -948,9 +955,20 @@ func (d *DB) SaveMCP(m *MCPServer) (int64, error) {
 			m.Name, m.Transport, m.Command, args, env, m.URL, m.Enabled, m.Insecure).Scan(&id)
 		return id, err
 	}
-	_, err := d.Exec(`UPDATE mcp_servers SET name=$1,transport=$2,command=NULLIF($3,''),args=$4,env=$5,url=NULLIF($6,''),enabled=$7,insecure=$8 WHERE id=$9`,
+	tx, err := d.Begin()
+	if err != nil {
+		return m.ID, err
+	}
+	defer tx.Rollback()
+	_, err = tx.Exec(`UPDATE mcp_servers SET name=$1,transport=$2,command=NULLIF($3,''),args=$4,env=$5,url=NULLIF($6,''),enabled=$7,insecure=$8 WHERE id=$9`,
 		m.Name, m.Transport, m.Command, args, env, m.URL, m.Enabled, m.Insecure, m.ID)
-	return m.ID, err
+	if err != nil {
+		return m.ID, err
+	}
+	if _, err = tx.Exec(`UPDATE mcp_tools_cache SET schema=NULL WHERE server_id=$1`, m.ID); err != nil {
+		return m.ID, err
+	}
+	return m.ID, tx.Commit()
 }
 
 func (d *DB) DeleteMCP(id int64) error {
