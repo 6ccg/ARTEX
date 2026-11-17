@@ -163,6 +163,24 @@ func TestGraphPagesCoverAllVisibleNodesAndCrossPageEdges(t *testing.T) {
 	if err != nil || len(hidden) != 0 {
 		t.Fatalf("inherited frontier leaked: %+v %v", hidden, err)
 	}
+	index, err := store.GraphIndex(context.Background(), nil, 2)
+	if err != nil || len(index) != 2 || index[0].Through != ids[1] || index[1].After != ids[2]-1 {
+		t.Fatalf("wrong graph index: %+v, %v", index, err)
+	}
+	if _, err := store.db.Exec(`UPDATE exploration_nodes SET state='done' WHERE id=$1`, ids[0]); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := store.GraphIndex(context.Background(), nil, 2)
+	if err != nil || len(updated) != 2 || updated[0].Revision == index[0].Revision || updated[1] != index[1] {
+		t.Fatalf("only the changed node's range should be invalidated: %+v, %v", updated, err)
+	}
+	if _, err := store.db.Exec(`DELETE FROM exploration_edges WHERE exploration_id=$1`, store.ID()); err != nil {
+		t.Fatal(err)
+	}
+	afterDelete, err := store.GraphIndex(context.Background(), nil, 2)
+	if err != nil || len(afterDelete) != 2 || afterDelete[0].Revision == updated[0].Revision || afterDelete[1].Revision == updated[1].Revision {
+		t.Fatalf("both ranges containing the deleted edge should be invalidated: %+v, %v", afterDelete, err)
+	}
 }
 
 func TestSideSnapshotMetadataDoesNotReadRequest(t *testing.T) {

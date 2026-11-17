@@ -142,6 +142,15 @@ export function downloadFilename(contentDisposition: string, fallback: string): 
   return (legacy?.[1] ?? legacy?.[2] ?? fallback).trim() || fallback;
 }
 
+type GraphRange = { after: string; through: string; revision: string };
+type GraphRangePage = GraphRange & { nodes: TaskNode[]; edges: Edge[] };
+
+export type ExplorationGraphSnapshot = {
+  ranges: GraphRangePage[];
+  nodes: TaskNode[];
+  edges: Edge[];
+};
+
 function getToken(): string | null {
   if (typeof window === "undefined") return null;
   return localStorage.getItem("artex_token");
@@ -1005,23 +1014,43 @@ export const api = {
     get<ConvTokenSummary[]>("/tokens/conversations")
       .then(arr)
       .catch(() => [] as ConvTokenSummary[]),
-  explorationGraph: async (task?: string) => {
+  explorationGraph: async (task: string, previous?: ExplorationGraphSnapshot, signal?: AbortSignal) => {
+    const options = { signal, cache: "no-store" } as const;
+    const indexQuery = new URLSearchParams({ task, view: "index" });
+    const { ranges } = await http<{ ranges: GraphRange[] }>(`/exploration/graph?${indexQuery}`, options);
+    const cached = new Map((previous ? previous.ranges : []).map((range) => [range.after, range]));
+    const matching = (range: GraphRange) => {
+      const page = cached.get(range.after);
+      return page?.through === range.through && page.revision === range.revision ? page : undefined;
+    };
+    if (previous && previous.ranges.length === ranges.length && ranges.every(matching)) return previous;
+
+    const pages: GraphRangePage[] = [];
+    // Ranges have independent bounds. Limit parallel requests while loading the
+    // initial graph and reuse unchanged ranges on subsequent refreshes.
+    for (let start = 0; start < ranges.length; start += 4) {
+      const batch = await Promise.all(
+        ranges.slice(start, start + 4).map(async (range) => {
+          const hit = matching(range);
+          if (hit) return hit;
+          const query = new URLSearchParams({ task, after: range.after, through: range.through });
+          const page = await http<{ nodes: TaskNode[]; edges: Edge[]; has_more: boolean }>(
+            `/exploration/graph?${query}`,
+            options,
+          );
+          if (page.has_more) throw new Error("Graph range changed during refresh");
+          return { ...range, nodes: page.nodes, edges: page.edges };
+        }),
+      );
+      pages.push(...batch);
+    }
     const nodes: TaskNode[] = [];
     const edges = new Map<string, Edge>();
-    let cursor = 0;
-    for (;;) {
-      const query = new URLSearchParams({ after: String(cursor), limit: "500" });
-      if (task) query.set("task", task);
-      const page = await get<{ nodes: TaskNode[]; edges: Edge[]; next_cursor: number; has_more: boolean }>(
-        `/exploration/graph?${query}`,
-      );
-      nodes.push(...(page.nodes ?? []));
-      for (const edge of page.edges ?? []) edges.set(`${edge.src}:${edge.rel}:${edge.dst}`, edge);
-      if (!page.has_more) break;
-      if (page.next_cursor <= cursor) throw new Error("Graph cursor did not advance");
-      cursor = page.next_cursor;
+    for (const page of pages) {
+      nodes.push(...page.nodes);
+      for (const edge of page.edges) edges.set(`${edge.src}:${edge.rel}:${edge.dst}`, edge);
     }
-    return { nodes, edges: [...edges.values()] };
+    return { ranges: pages, nodes, edges: [...edges.values()] };
   },
   // 播报板:服务端按创建顺序分页的探索节点(默认最新在前)。
   explorationNodes: (task: string, query: ExplorationNodeQuery = {}) => {

@@ -2396,7 +2396,17 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
       total: selectedTask?.tokens ?? D.tokenTotal,
     };
   }
-  if (path === "/exploration/graph") return D.explorationGraph;
+  if (path === "/exploration/graph") {
+    const graph = D.explorationGraph;
+    if (q.get("view") === "index") {
+      return {
+        ranges: graph.nodes.length
+          ? [{ after: "0", through: String(graph.nodes.length), revision: JSON.stringify(graph) }]
+          : [],
+      };
+    }
+    return { ...graph, has_more: false };
+  }
   // 播报板:和后端 /exploration/nodes 同语义 —— 按创建顺序(mock 里用 ts + id)分页,
   // 并带上这一页涉及的边与边另一端的节点。
   if (path === "/exploration/nodes") {

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"compress/gzip"
 	"encoding/json"
 	"fmt"
 	"net/http/httptest"
@@ -138,6 +139,42 @@ func TestInheritedGraphPagesFilterLiveIntentsAndEdges(t *testing.T) {
 	for edge := range edges {
 		if edge.Src == hidden || edge.Dst == hidden {
 			t.Fatalf("hidden source edge leaked: %+v", edge)
+		}
+	}
+	w := httptest.NewRecorder()
+	s.explorationGraph(w, httptest.NewRequest("GET", "/api/exploration/graph?view=index&task="+child.ID, nil))
+	var index struct{ Ranges []db.GraphRange }
+	if err := json.Unmarshal(w.Body.Bytes(), &index); w.Code != 200 || err != nil || len(index.Ranges) != 1 {
+		t.Fatalf("invalid graph index: code=%d ranges=%+v err=%v", w.Code, index.Ranges, err)
+	}
+	r := index.Ranges[0]
+	w = httptest.NewRecorder()
+	req := httptest.NewRequest("GET", fmt.Sprintf("/api/exploration/graph?task=%s&after=%d&through=%d", child.ID, r.After, r.Through), nil)
+	req.Header.Set("Accept-Encoding", "br, gzip")
+	s.explorationGraph(w, req)
+	if w.Code != 200 || w.Header().Get("Content-Encoding") != "gzip" {
+		t.Fatalf("expected compressed range, code=%d headers=%v", w.Code, w.Header())
+	}
+	z, err := gzip.NewReader(w.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer z.Close()
+	var page struct {
+		Nodes []TaskNodeDTO
+		Edges []EdgeDTO
+	}
+	if err := json.NewDecoder(z).Decode(&page); err != nil || len(page.Nodes) != len(seen) || len(page.Edges) != len(edges) {
+		t.Fatalf("invalid indexed graph page: %+v %v", page, err)
+	}
+	for _, node := range page.Nodes {
+		if node != seen[node.ID] {
+			t.Fatalf("indexed graph changed node: %+v", node)
+		}
+	}
+	for _, edge := range page.Edges {
+		if !edges[edge] {
+			t.Fatalf("indexed graph changed edge: %+v", edge)
 		}
 	}
 }
