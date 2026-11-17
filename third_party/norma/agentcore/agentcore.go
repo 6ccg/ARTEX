@@ -376,15 +376,14 @@ func (s *Session) Resume(sessionID string) error {
 	if s.store == nil {
 		return errors.New("agentcore: Resume requires Options.Transcript")
 	}
-	recs, err := s.store.Load(s.store.MainPath(sessionID))
+	msgs, usage, lastUUID, err := s.store.ResumeHistory(sessionID)
 	if err != nil {
 		return err
 	}
-	msgs, usage := transcript.Messages(recs)
 	s.messages = cleanResumed(msgs)
 	s.usage = usage
 	s.sessionID = sessionID
-	s.writer = s.store.ResumeWriter(sessionID, transcript.LastUUID(recs))
+	s.writer = s.store.ResumeWriter(sessionID, lastUUID)
 	return nil
 }
 
