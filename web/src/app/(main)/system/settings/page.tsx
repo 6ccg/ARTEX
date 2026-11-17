@@ -125,6 +125,8 @@ export default function SystemSettingsPage() {
     probeEgress,
   } = useEgressIp();
 
+  const [httpUserAgent, setHTTPUserAgent] = React.useState("");
+  const [savingHTTPUserAgent, setSavingHTTPUserAgent] = React.useState(false);
   const apply = React.useCallback((s: Settings) => {
     setCredentialAgent(!!s.credential_agent_enabled);
     setCredentialBinding(!!s.credential_traffic_binding);
@@ -135,6 +137,7 @@ export default function SystemSettingsPage() {
     setBrowserScreenshot(!!s.browser_screenshot_enabled);
     setBrowserScreenshotTimestamp(!!s.browser_screenshot_timestamp_enabled);
     setOpsecEnabled(!!s.opsec_enabled);
+    setHTTPUserAgent(s.http_user_agent ?? "");
     setAgentTrafficBinding(!!s.agent_traffic_binding);
     setWebSearch(!!s.web_search_enabled);
     setBackend(s.web_search_backend || "ddgs");
@@ -445,6 +448,18 @@ export default function SystemSettingsPage() {
       })
       .catch((e) => toast.error(t("settings.saveFailedPrefix") + localizedError(e, t)))
       .finally(() => setSavingProxy(false));
+  };
+
+  const saveHTTPUserAgent = async () => {
+    setSavingHTTPUserAgent(true);
+    try {
+      apply(await api.setSettings({ http_user_agent: httpUserAgent.trim() }));
+      toast.success(t("settings.httpUserAgentSaved"));
+    } catch (error) {
+      toast.error(t("settings.saveFailedPrefix") + localizedError(error, t));
+    } finally {
+      setSavingHTTPUserAgent(false);
+    }
   };
 
   const saveLLMProxy = () => {
@@ -1517,6 +1532,33 @@ export default function SystemSettingsPage() {
                     />
                   </Field>
                 ) : null}
+              </CardContent>
+            </Card>
+
+            <Card
+              className={`${isSettingVisible("network", "settings.keywords.httpUserAgent") ? "" : "hidden"} mb-4 break-inside-avoid md:mb-6`}
+            >
+              <CardHeader>
+                <CardTitle className="text-base">{t("settings.httpUserAgent")}</CardTitle>
+                <CardDescription>{t("settings.httpUserAgentHelp")}</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <Label htmlFor="http-user-agent" className="sr-only">
+                  {t("settings.httpUserAgent")}
+                </Label>
+                <div className="flex items-center gap-2">
+                  <Input
+                    id="http-user-agent"
+                    value={httpUserAgent}
+                    autoComplete="off"
+                    placeholder={t("settings.httpUserAgentPlaceholder")}
+                    disabled={!loaded || savingHTTPUserAgent}
+                    onChange={(event) => setHTTPUserAgent(event.target.value)}
+                  />
+                  <Button type="button" onClick={saveHTTPUserAgent} disabled={!loaded || savingHTTPUserAgent}>
+                    {t("settings.save")}
+                  </Button>
+                </div>
               </CardContent>
             </Card>
 

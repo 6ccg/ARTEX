@@ -24,8 +24,8 @@ import (
 	"time"
 
 	"github.com/Autumn-27/artex/egress"
-	"github.com/Autumn-27/artex/traffic"
 	"github.com/Autumn-27/artex/internal/httpidentity"
+	"github.com/Autumn-27/artex/traffic"
 )
 
 const settingEgressProbeURL = "egress_probe_url"

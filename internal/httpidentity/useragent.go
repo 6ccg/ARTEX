@@ -3,6 +3,7 @@ package httpidentity
 
 import (
 	"crypto/rand"
+	"fmt"
 	"io"
 	"math/big"
 	"net/http"
@@ -41,16 +42,22 @@ var userAgents = [...]string{
 // sample when unset, empty or malformed. Call once per logical request and reuse
 // the selected value for redirects and retries.
 func UserAgent() string {
-	value := strings.Trim(os.Getenv("ARTEX_HTTP_USER_AGENT"), " ")
+	value, err := ValidateUserAgent(os.Getenv("ARTEX_HTTP_USER_AGENT"))
+	if err != nil || value == "" {
+		return randomUserAgent(rand.Reader)
+	}
+	return value
+}
+
+// ValidateUserAgent normalizes the system setting before it reaches HTTP headers.
+func ValidateUserAgent(value string) (string, error) {
+	value = strings.Trim(value, " ")
 	for _, c := range value {
 		if c < 32 || c > 126 {
-			return randomUserAgent(rand.Reader)
+			return "", fmt.Errorf("User-Agent must contain printable ASCII characters only")
 		}
 	}
-	if value != "" {
-		return value
-	}
-	return randomUserAgent(rand.Reader)
+	return value, nil
 }
 
 func randomUserAgent(source io.Reader) string {

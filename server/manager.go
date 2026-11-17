@@ -319,6 +319,7 @@ const (
 	settingBrowserScreenshot   = "browser_screenshot_enabled"
 	settingScreenshotTimestamp = "browser_screenshot_timestamp_enabled"
 	settingOpsecEnabled        = "opsec_enabled"
+	settingHTTPUserAgent       = "http_user_agent"
 	settingAgentTrafficBinding = "agent_traffic_binding"
 	settingWebSearchOn         = "web_search_enabled"
 	settingWebSearchBackend    = "web_search_backend"
@@ -589,6 +590,16 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 	log.Printf("[pg] 数据库配置来源: %s", source)
 	pg, err := pgdb.Open(dsn)
 	if err != nil {
+		return nil, err
+	}
+	// Settings remain authoritative; child collection scripts inherit this value.
+	userAgent, _, err := pg.GetSetting(settingHTTPUserAgent)
+	if err != nil {
+		pg.Close()
+		return nil, err
+	}
+	if err := os.Setenv("ARTEX_HTTP_USER_AGENT", userAgent); err != nil {
+		pg.Close()
 		return nil, err
 	}
 	// A live segment cannot be trusted across a process restart: its end time

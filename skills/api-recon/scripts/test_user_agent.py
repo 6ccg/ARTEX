@@ -64,7 +64,7 @@ class UserAgentTests(unittest.TestCase):
         self.assertTrue(all(ua == expected for _, ua, _ in seen), seen)
 
     def test_random_selection_and_explicit_override(self):
-        go_source = (SCRIPTS.parents[2] / "internal/httpidentity/useragent.go").read_text()
+        go_source = (SCRIPTS.parents[2] / "internal/httpidentity/useragent.go").read_text(encoding="utf-8")
         go_pool = tuple(re.findall(r'^\s*"(Mozilla/5\.0 [^"]+)",$', go_source, re.MULTILINE))
         self.assertEqual(len(go_pool), 20)
         self.assertEqual(len(set(go_pool)), 20)

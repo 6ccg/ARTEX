@@ -468,6 +468,7 @@ func (s *Runtime) nodeAnchoredAssets(t *Task, nodeIDs []int64) map[string][]Find
 func (s *Runtime) settingsPayload() map[string]any {
 	on, backend, braveKey, tavilyKey, proxy := s.m.WebSearch()
 	pyStored, _, _ := s.m.pg.GetSetting(settingPythonInterp)
+	userAgent, _, _ := s.m.pg.GetSetting(settingHTTPUserAgent)
 	concOn, concLimit := s.m.ConcurrencyLimit()
 	if concLimit == 0 {
 		concLimit = defaultConcurrencyLimit // 关闭时也回显一个合理默认值给 UI
@@ -477,6 +478,7 @@ func (s *Runtime) settingsPayload() map[string]any {
 		"browser_screenshot_enabled":           s.m.pg.GetBool(settingBrowserScreenshot, false),
 		"browser_screenshot_timestamp_enabled": s.m.pg.GetBool(settingScreenshotTimestamp, false),
 		"opsec_enabled":                        s.m.pg.GetBool(settingOpsecEnabled, false),
+		"http_user_agent":                      userAgent,
 		"agent_traffic_binding":                s.m.pg.GetBool(settingAgentTrafficBinding, false),
 		"task_intelligence_enabled":            s.m.pg.GetBool(db.SettingTaskIntelligence, false),
 		db.SettingTaskAutoTitle:                s.m.pg.GetBool(db.SettingTaskAutoTitle, false),

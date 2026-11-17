@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
+
+	"github.com/Autumn-27/artex/internal/httpidentity"
 )
 
 func TestTargetHTTPIdentityOverrides(t *testing.T) {
@@ -50,5 +53,46 @@ func TestTargetHTTPIdentityOverrides(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestHTTPUserAgentSettingsPersistAndApply(t *testing.T) {
+	t.Setenv("ARTEX_HTTP_USER_AGENT", "")
+	m := newTestManager(t)
+	old, existed, err := m.pg.GetSetting(settingHTTPUserAgent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if existed {
+			_ = m.pg.SetSetting(settingHTTPUserAgent, old)
+		} else {
+			_, _ = m.pg.Exec(`DELETE FROM settings WHERE key=$1`, settingHTTPUserAgent)
+		}
+	})
+	s := newIdleAPIServer(t, m)
+	request := authenticatedRequest(t, s)
+	w := request(http.MethodPut, "/api/settings", `{"http_user_agent":" Captured-UA/2.0 "}`)
+	if w.Code != http.StatusOK || httpidentity.UserAgent() != "Captured-UA/2.0" {
+		t.Fatalf("save status=%d ua=%q", w.Code, httpidentity.UserAgent())
+	}
+	w = request(http.MethodPut, "/api/settings", `{"http_user_agent":"bad\r\nX-Header: value"}`)
+	if w.Code != http.StatusBadRequest || !strings.Contains(w.Body.String(), "http_user_agent_invalid") || httpidentity.UserAgent() != "Captured-UA/2.0" {
+		t.Fatalf("invalid update changed settings: status=%d body=%s", w.Code, w.Body.String())
+	}
+	if err := os.Setenv("ARTEX_HTTP_USER_AGENT", "stale process value"); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := NewManager(t.TempDir(), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restarted.Close()
+	if httpidentity.UserAgent() != "Captured-UA/2.0" {
+		t.Fatal("restart did not load the persisted setting")
+	}
+	w = request(http.MethodPut, "/api/settings", `{"http_user_agent":""}`)
+	if w.Code != http.StatusOK || !strings.HasPrefix(httpidentity.UserAgent(), "Mozilla/5.0 ") {
+		t.Fatalf("default not restored: status=%d", w.Code)
 	}
 }
