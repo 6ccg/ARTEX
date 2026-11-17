@@ -33,6 +33,7 @@ import type {
   TaskTemplate,
   TrafficEvidenceRole,
   TrafficEvidenceSnapshot,
+  TrafficRouteGroup,
 } from "../types";
 import { MAX_TASK_REMARK_RUNES, MAX_TASK_WORKER_COUNT } from "../types";
 import * as D from "./data";
@@ -2456,7 +2457,50 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   if (path === "/traffic" && m === "DELETE") return { deleted: 0 };
   if (path === "/traffic/hosts" && m === "DELETE") return { deleted: (b.hosts as unknown[])?.length ?? 0 };
   if (path === "/traffic/hosts") return { hosts: D.trafficHosts };
-  if (path === "/traffic") return D.traffic;
+  if (path === "/traffic") {
+    const page = Math.max(0, Number(q.get("page")) || 0);
+    const size = Math.min(500, Math.max(1, Number(q.get("size")) || 100));
+    const routeURL = (url: string) => url.split(/[?#]/, 1)[0];
+    const contains = (value: string, key: string) => value.toLowerCase().includes((q.get(key) ?? "").toLowerCase());
+    const status = q.get("status") ?? "";
+    const matches = (D.traffic.exchanges ?? []).filter((item) =>
+      contains(item.host, "host") && contains(item.url, "q") && contains(new URL(item.url).pathname, "path") &&
+      (!q.get("method") || item.method === q.get("method")) &&
+      (!q.get("route") || routeURL(item.url) === q.get("route")) &&
+      (!status || status === "all" || (status.endsWith("xx")
+        ? Math.floor(item.status / 100) === Number(status[0]) : item.status === Number(status))) &&
+      (!q.get("resp_min") || item.resp_len >= Number(q.get("resp_min"))) &&
+      (!q.get("resp_max") || item.resp_len <= Number(q.get("resp_max"))),
+    );
+    const direction = q.get("order") === "asc" ? 1 : -1;
+    const meta = { ...D.traffic, page, size, matched_count: matches.length };
+    if (q.get("view") === "routes") {
+      const grouped = new Map<string, TrafficRouteGroup>();
+      for (const item of matches) {
+        const url = routeURL(item.url);
+        const id = `${item.method} ${url}`;
+        const ts = Date.parse(item.ts) / 1000;
+        const group = grouped.get(id) ?? {
+          id, url, host: item.host, method: item.method, count: 0,
+          first_ts: ts, last_ts: ts, resp_len: 0, statuses: {},
+        };
+        group.count++;
+        group.first_ts = Math.min(group.first_ts, ts);
+        group.last_ts = Math.max(group.last_ts, ts);
+        group.resp_len += item.resp_len;
+        group.statuses[item.status] = (group.statuses[item.status] ?? 0) + 1;
+        grouped.set(id, group);
+      }
+      const value = (g: TrafficRouteGroup) => q.get("sort") === "resp_len" ? g.resp_len
+        : q.get("sort") === "status" ? Math.max(...Object.keys(g.statuses).map(Number)) : g.last_ts;
+      const groups = [...grouped.values()].sort((a, b) => direction * (value(a) - value(b)) || a.id.localeCompare(b.id));
+      return { ...meta, exchanges: [], groups: groups.slice(page * size, (page + 1) * size), total: groups.length };
+    }
+    const value = (item: (typeof matches)[number]) => q.get("sort") === "resp_len" ? item.resp_len
+      : q.get("sort") === "status" ? item.status : Date.parse(item.ts);
+    matches.sort((a, b) => direction * (value(a) - value(b)) || a.id.localeCompare(b.id));
+    return { ...meta, total: matches.length, exchanges: matches.slice(page * size, (page + 1) * size) };
+  }
   if (path === "/traffic/exchange") return D.trafficDetail;
   if (path === "/settings" && m === "GET") return D.settings;
   if (path === "/settings" && m === "PUT") {

@@ -977,6 +977,20 @@ export interface TrafficResp {
   page?: number;
   size?: number;
   exchanges?: TrafficExchange[];
+  groups?: TrafficRouteGroup[];
+  matched_count?: number;
+}
+
+export interface TrafficRouteGroup {
+  id: string;
+  url: string;
+  host: string;
+  method: string;
+  count: number;
+  first_ts: number;
+  last_ts: number;
+  resp_len: number;
+  statuses: Record<string, number>;
 }
 
 // Full raw request/response of one exchange (lazy-loaded on row select).

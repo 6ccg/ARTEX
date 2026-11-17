@@ -5,7 +5,9 @@ import { useRouter } from "next/navigation";
 
 import {
   ArrowDownWideNarrowIcon,
+  ArrowLeftIcon,
   ArrowUpNarrowWideIcon,
+  ChevronDownIcon,
   ChevronLeftIcon,
   ChevronRightIcon,
   CopyIcon,
@@ -14,6 +16,7 @@ import {
   ListChecksIcon,
   Loader2Icon,
   RadioTowerIcon,
+  RefreshCwIcon,
   SearchIcon,
   Trash2Icon,
 } from "lucide-react";
@@ -23,6 +26,7 @@ import { HttpCodeBlock } from "@/components/http-code-block";
 import { LinkTrafficDialog } from "@/components/link-traffic-dialog";
 import { requestFromTraffic } from "@/components/repeater/repeater-http";
 import { seedFromEvidence } from "@/components/repeater/repeater-store";
+import { TrafficRouteGroups, trafficPath } from "@/components/traffic-route-groups";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -37,6 +41,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -47,7 +52,7 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip
 import { type UITranslate, useUITranslation } from "@/i18n/use-ui-translation";
 import { api } from "@/lib/api";
 import { useStoredSortPreference } from "@/lib/sort-preference";
-import type { TrafficDetail, TrafficExchange, TrafficHost, TrafficResp } from "@/lib/types";
+import type { TrafficDetail, TrafficExchange, TrafficHost, TrafficResp, TrafficRouteGroup } from "@/lib/types";
 import { cn, copyText } from "@/lib/utils";
 
 function fmtTime(ts: string, ui: UITranslate) {
@@ -144,6 +149,13 @@ export function TrafficHistory({ taskId }: { taskId?: string }) {
   const { ui, liveUI } = useUITranslation();
 
   const taskScoped = Boolean(taskId);
+  const [view, setView] = React.useState<"routes" | "requests">("routes");
+  const [activeGroup, setActiveGroup] = React.useState<TrafficRouteGroup | null>(null);
+  const groupPageRef = React.useRef(0);
+  const [advancedOpen, setAdvancedOpen] = React.useState(false);
+  const [loadError, setLoadError] = React.useState("");
+  const [loading, setLoading] = React.useState(true);
+  const captureEnabledRef = React.useRef(false);
   const [selectedFlows, setSelectedFlows] = React.useState<Map<string, TrafficExchange>>(() => new Map());
   const router = useRouter();
   const [importing, setImporting] = React.useState(false);
@@ -228,16 +240,22 @@ export function TrafficHistory({ taskId }: { taskId?: string }) {
   // biome-ignore lint/correctness/useExhaustiveDependencies: these values intentionally trigger a page reset.
   React.useEffect(() => {
     setPage(0);
+    groupPageRef.current = 0;
   }, [hostQ, queryQ, method, size, bodyQ, pathQ, statusFilter, respMinQ, respMaxQ, sort, taskId]);
 
-  // Load the current page. Auto-refresh only on page 0 (newest) so paging back
-  // through history isn't yanked out from under the user.
+  // Load the current page. Auto-refresh only on page 0 (newest) when visible,
+  // backing off when capture is disabled.
   // biome-ignore lint/correctness/useExhaustiveDependencies: reloadTick is an explicit manual-refetch trigger.
   React.useEffect(() => {
     let alive = true;
-    const load = () => {
+    let requestInFlight = false;
+    let hostsInFlight = false;
+    const load = (initial: boolean) => {
+      if (requestInFlight) return;
+      requestInFlight = true;
+      if (initial) setLoading(true);
       api
-        .traffic(page, size, hostQ, method, queryQ, {
+        .traffic(page, size, hostQ, activeGroup?.method ?? method, queryQ, {
           taskId,
           body: bodyQ,
           path: pathQ,
@@ -246,14 +264,26 @@ export function TrafficHistory({ taskId }: { taskId?: string }) {
           respMax: respMaxQ,
           sort: sort.field,
           order: sort.direction,
+          view: view === "routes" && !activeGroup ? "routes" : "requests",
+          route: activeGroup?.url,
         })
         .then((r) => {
-          if (alive) setTraffic(r);
+          if (alive) {
+            setTraffic(r);
+            captureEnabledRef.current = r.enabled;
+            setLoadError("");
+            setLoading(false);
+          }
         })
-        .catch(() => {
-          // Keep the last successful snapshot during transient refresh failures.
-        });
-      if (!taskScoped) {
+        .catch((error) => {
+          if (alive) {
+            setLoadError((error as Error).message);
+            setLoading(false);
+          }
+        })
+        .finally(() => { requestInFlight = false; });
+      if (!taskScoped && !hostsInFlight) {
+        hostsInFlight = true;
         api
           .trafficHosts()
           .then((r) => {
@@ -261,15 +291,19 @@ export function TrafficHistory({ taskId }: { taskId?: string }) {
           })
           .catch(() => {
             // Keep the last successful host list during transient refresh failures.
-          });
-      } else if (alive) {
+          })
+          .finally(() => { hostsInFlight = false; });
+      } else if (taskScoped && alive) {
         setHosts([]);
       }
     };
-    load();
+    load(true);
+    let idleTicks = 0;
     const t = setInterval(() => {
-      if (page !== 0) return; // only auto-refresh the newest page
-      load();
+      if (page !== 0 || document.hidden) return;
+      if (!captureEnabledRef.current && ++idleTicks < 6) return;
+      idleTicks = 0;
+      load(false);
     }, 5000);
     return () => {
       alive = false;
@@ -290,6 +324,8 @@ export function TrafficHistory({ taskId }: { taskId?: string }) {
     reloadTick,
     taskId,
     taskScoped,
+    view,
+    activeGroup,
   ]);
 
   // Delete traffic for the current host filter (substring) or the checked
@@ -304,8 +340,6 @@ export function TrafficHistory({ taskId }: { taskId?: string }) {
     [hosts, hostCountSortDirection],
   );
 
-  // "清空" for the unfiltered purge, "删除" for the host-scoped ones — the dialog's
-  // title and its confirm button both follow from which is in play.
   const deleteVerb = deleteMode === "all" ? ui("screen.1ef3de06b32e52") : ui("screen.2f9daa828907b9");
   const deleteTitle = deleteMode
     ? {
@@ -315,8 +349,6 @@ export function TrafficHistory({ taskId }: { taskId?: string }) {
       }[deleteMode]
     : "";
 
-  // `reclaimed` only comes back from the full purge; the host-scoped deletions
-  // report the row count alone.
   const requestDelete = (mode: "filter" | "selected" | "all"): Promise<{ deleted: number; reclaimed?: number }> => {
     if (mode === "all") return api.trafficDeleteAll();
     if (mode === "selected") return api.trafficDeleteHosts(selectedHosts);
@@ -337,7 +369,6 @@ export function TrafficHistory({ taskId }: { taskId?: string }) {
           setPickerOpen(false);
         }
         if (mode === "all") {
-          // Reclaimed space is the whole point of compacting an emptied index, so say so.
           const reclaimed = r.reclaimed ?? 0;
           const freed = reclaimed > 0 ? ui("screen.6960a3f6384445", { v0: fmtBytes(reclaimed) }) : "";
           toast.success(ui("screen.38496069e0a73b", { v0: r.deleted, v1: freed }));
@@ -346,7 +377,6 @@ export function TrafficHistory({ taskId }: { taskId?: string }) {
         setReloadTick((t) => t + 1);
       })
       .catch((e) => {
-        // Keep the confirmation open so the user can retry a failed deletion.
         if (mode === "all") toast.error(ui("screen.3a6ecda56c2904", { v0: (e as Error).message }));
       })
       .finally(() => setDeleting(false));
@@ -383,8 +413,6 @@ export function TrafficHistory({ taskId }: { taskId?: string }) {
     setImporting(true);
     let imported = 0;
     try {
-      // Sequential loading limits pressure when a whole page is selected. A bad
-      // capture does not discard drafts imported successfully before it.
       for (const flow of flows) {
         try {
           const raw = await api.trafficExchange(flow.id);
@@ -395,7 +423,7 @@ export function TrafficHistory({ taskId }: { taskId?: string }) {
           );
           imported += 1;
         } catch (error) {
-          toast.error(`${flow.host}：${(error as Error).message}`);
+          toast.error(`${flow.host}: ${(error as Error).message}`);
         }
       }
       if (imported) {
@@ -419,13 +447,15 @@ export function TrafficHistory({ taskId }: { taskId?: string }) {
     );
 
   const exchanges = React.useMemo(() => traffic?.exchanges ?? [], [traffic]);
-  const total = traffic?.total ?? exchanges.length;
+  const groups = React.useMemo(() => traffic?.groups ?? [], [traffic]);
+  const grouped = view === "routes" && !activeGroup;
+  const total = traffic?.total ?? (grouped ? groups.length : exchanges.length);
   const pageCount = Math.max(1, Math.ceil(total / size));
   const rangeStart = total === 0 ? 0 : page * size + 1;
-  const rangeEnd = page * size + exchanges.length;
+  const rangeEnd = page * size + (grouped ? groups.length : exchanges.length);
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-4">
+    <div className="flex min-h-0 flex-1 flex-col gap-3">
       <div className="flex items-center justify-between gap-4">
         <div>
           <h1 className="text-xl font-semibold tracking-tight">{ui("screen.81a9d0b5a2a24f")}</h1>
@@ -455,6 +485,86 @@ export function TrafficHistory({ taskId }: { taskId?: string }) {
           </span>
         </div>
       </div>
+
+      {/* View switcher & route drill-down bar */}
+      <div className="flex flex-wrap items-center gap-2">
+        <fieldset
+          aria-label={ui("opt.trafficView")}
+          className="m-0 inline-flex min-w-0 items-center gap-0.5 rounded-md border-0 bg-muted p-0.5 text-muted-foreground text-xs"
+        >
+          {(
+            [
+              ["routes", ui("opt.byRoute")],
+              ["requests", ui("opt.originalRequests")],
+            ] as const
+          ).map(([value, label]) => {
+            const active = (activeGroup ? "requests" : view) === value;
+            return (
+              <button
+                key={value}
+                type="button"
+                aria-pressed={active}
+                onClick={() => {
+                  setView(value);
+                  setActiveGroup(null);
+                  setTraffic(null);
+                  setPage(0);
+                }}
+                className={cn(
+                  "rounded-sm px-2.5 py-1 font-medium transition-colors",
+                  active ? "bg-background text-foreground shadow-xs" : "hover:text-foreground",
+                )}
+              >
+                {label}
+              </button>
+            );
+          })}
+        </fieldset>
+        {activeGroup ? (
+          <>
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="h-8 gap-1"
+              onClick={() => {
+                setActiveGroup(null);
+                setView("routes");
+                setPage(groupPageRef.current);
+                setTraffic(null);
+              }}
+            >
+              <ArrowLeftIcon className="size-3.5" />
+              {ui("opt.backToGroups")}
+            </Button>
+            <span className="min-w-0 truncate font-mono text-xs" title={activeGroup.url}>
+              {activeGroup.method} {activeGroup.url}
+            </span>
+          </>
+        ) : (
+          <span className="text-muted-foreground text-xs">
+            {ui(grouped ? "opt.groupedHint" : "opt.originalHint", {
+              count: traffic?.matched_count ?? traffic?.total ?? 0,
+            })}
+          </span>
+        )}
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          className="ml-auto h-8 gap-1.5"
+          onClick={() => setReloadTick((t) => t + 1)}
+        >
+          <RefreshCwIcon className="size-3.5" />
+          {ui("opt.refresh")}
+        </Button>
+      </div>
+
+      {loadError ? (
+        <p role="alert" className="border-destructive/30 bg-destructive/10 text-destructive rounded-md border px-3 py-2 text-xs">
+          {loadError}
+        </p>
+      ) : null}
 
       {/* Toolbar */}
       <div className="flex flex-wrap items-center gap-2">
@@ -572,8 +682,6 @@ export function TrafficHistory({ taskId }: { taskId?: string }) {
             {ui("screen.967568fd42269f")}
           </Button>
         )}
-        {/* Outline rather than a second destructive button: this one ignores every
-            filter, so it must not look one mis-click away from "删除该目标". */}
         {!taskScoped && (
           <Button
             variant="outline"
@@ -650,194 +758,231 @@ export function TrafficHistory({ taskId }: { taskId?: string }) {
         </div>
       </div>
 
-      {/* Advanced filters (issue #177): narrow 660k+ exchanges down to the one packet. */}
-      <div className="flex flex-wrap items-center gap-2 rounded-md border bg-muted/30 px-2 py-1.5">
-        <span className="pl-1 text-xs font-medium text-muted-foreground">{ui("screen.97a1d7b98ba6de")}</span>
-        <div className="relative w-56">
-          <Input
-            placeholder={ui("screen.5cba4dfcb02d73")}
-            value={body}
-            onChange={(e) => setBody(e.target.value)}
-            className="h-8"
-          />
+      {/* Collapsible Advanced Filters */}
+      <Collapsible open={advancedOpen} onOpenChange={setAdvancedOpen} className="rounded-md border bg-muted/30 px-2.5 py-1.5">
+        <div className="flex items-center justify-between gap-2">
+          <CollapsibleTrigger asChild>
+            <button
+              type="button"
+              className="text-muted-foreground hover:text-foreground flex items-center gap-1.5 text-left text-xs font-medium transition-colors"
+            >
+              <ChevronDownIcon className={cn("size-3.5 transition-transform", !advancedOpen && "-rotate-90")} />
+              <span>{ui("screen.97a1d7b98ba6de")}</span>
+              {hasAdvancedFilter ? (
+                <Badge variant="secondary" className="px-1.5 py-0 text-[10px]">
+                  {ui("opt.filtersActive")}
+                </Badge>
+              ) : null}
+            </button>
+          </CollapsibleTrigger>
+          {hasAdvancedFilter ? (
+            <Button variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={resetAdvancedFilters}>
+              <FilterXIcon className="size-3.5" />
+              {ui("screen.657d9cbf45ec9e")}
+            </Button>
+          ) : null}
         </div>
-        <div className="relative w-52">
-          <Input
-            placeholder={ui("screen.acdead918ec785")}
-            value={path}
-            onChange={(e) => setPath(e.target.value)}
-            className="h-8"
-          />
-        </div>
-        <Select value={statusFilter} onValueChange={setStatusFilter}>
-          <SelectTrigger size="sm" className="w-28">
-            <SelectValue placeholder={ui("screen.06f7d73412128f")} />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="all">{ui("screen.27554bb50ad8e5")}</SelectItem>
-            {STATUS_BUCKETS.map((s) => (
-              <SelectItem key={s} value={s}>
-                {s}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
-        <div className="flex items-center gap-1 text-xs text-muted-foreground">
-          <span>{ui("screen.71150dc5f9bf29")}</span>
-          <Input
-            type="number"
-            min={0}
-            placeholder={ui("screen.81ccd8b89d0289")}
-            value={respMin}
-            onChange={(e) => setRespMin(e.target.value)}
-            className="h-8 w-24"
-          />
-          <span>–</span>
-          <Input
-            type="number"
-            min={0}
-            placeholder={ui("screen.c0191c7ae4b381")}
-            value={respMax}
-            onChange={(e) => setRespMax(e.target.value)}
-            className="h-8 w-24"
-          />
-        </div>
-        {hasAdvancedFilter ? (
-          <Button variant="ghost" size="sm" className="h-8" onClick={resetAdvancedFilters}>
-            <FilterXIcon className="size-3.5" />
-            {ui("screen.657d9cbf45ec9e")}
-          </Button>
-        ) : null}
-      </div>
+        <CollapsibleContent className="pt-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="relative w-56">
+              <Input
+                placeholder={ui("screen.5cba4dfcb02d73")}
+                value={body}
+                onChange={(e) => setBody(e.target.value)}
+                className="h-8"
+              />
+            </div>
+            <div className="relative w-52">
+              <Input
+                placeholder={ui("screen.acdead918ec785")}
+                value={path}
+                onChange={(e) => setPath(e.target.value)}
+                className="h-8"
+              />
+            </div>
+            <Select value={statusFilter} onValueChange={setStatusFilter}>
+              <SelectTrigger size="sm" className="w-28">
+                <SelectValue placeholder={ui("screen.06f7d73412128f")} />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="all">{ui("screen.27554bb50ad8e5")}</SelectItem>
+                {STATUS_BUCKETS.map((s) => (
+                  <SelectItem key={s} value={s}>
+                    {s}
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <div className="flex items-center gap-1 text-xs text-muted-foreground">
+              <span>{ui("screen.71150dc5f9bf29")}</span>
+              <Input
+                type="number"
+                min={0}
+                placeholder={ui("screen.81ccd8b89d0289")}
+                value={respMin}
+                onChange={(e) => setRespMin(e.target.value)}
+                className="h-8 w-24"
+              />
+              <span>–</span>
+              <Input
+                type="number"
+                min={0}
+                placeholder={ui("screen.c0191c7ae4b381")}
+                value={respMax}
+                onChange={(e) => setRespMax(e.target.value)}
+                className="h-8 w-24"
+              />
+            </div>
+          </div>
+        </CollapsibleContent>
+      </Collapsible>
 
-      <div className="flex flex-wrap items-center gap-2">
-        <span className="text-sm text-muted-foreground">
-          {ui("screen.7ecf1cde648680")}
-          {selectedFlows.size} {ui("screen.68b6937344542d")}
-        </span>
-        <Button variant="outline" size="sm" disabled={selectedFlows.size === 0} onClick={() => setLinking(true)}>
-          {ui("screen.ab5bc41d5f9382")}
-        </Button>
-        <Button
-          variant="outline"
-          size="sm"
-          disabled={selectedFlows.size === 0 || importing}
-          onClick={() => void openRepeater([...selectedFlows.values()])}
-        >
-          {importing ? ui("screen.73a589a315aab8") : ui("screen.f69052b85f5594")}
-        </Button>
-        {selectedFlows.size > 0 ? (
+      {/* Batch selection bar */}
+      {selectedFlows.size > 0 ? (
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-sm text-muted-foreground tabular-nums">
+            {ui("opt.selectedCaptures", { count: selectedFlows.size })}
+          </span>
+          <Button variant="outline" size="sm" disabled={selectedFlows.size === 0} onClick={() => setLinking(true)}>
+            {ui("screen.ab5bc41d5f9382")}
+          </Button>
+          <Button
+            variant="outline"
+            size="sm"
+            disabled={selectedFlows.size === 0 || importing}
+            onClick={() => void openRepeater([...selectedFlows.values()])}
+          >
+            {importing ? ui("screen.73a589a315aab8") : ui("screen.f69052b85f5594")}
+          </Button>
           <Button variant="ghost" size="sm" onClick={() => setSelectedFlows(new Map())}>
             {ui("screen.a3c9748924640c")}
           </Button>
-        ) : null}
-      </div>
-      {/* History table */}
+        </div>
+      ) : null}
+
+      {/* History table (routes or individual requests) */}
       <div className="flex h-[calc(100vh-15rem)] min-h-0 flex-col">
         <Card className="flex min-h-0 flex-1 flex-col overflow-hidden py-0">
           <div className="min-h-0 flex-1 overflow-auto">
-            <Table>
-              <TableHeader className="sticky top-0 z-10 bg-card">
-                <TableRow>
-                  <TableHead className="w-10">
-                    <Checkbox
-                      aria-label={ui("screen.7f7a0502cab321")}
-                      checked={exchanges.length > 0 && exchanges.every((e) => selectedFlows.has(e.id))}
-                      onCheckedChange={(checked) =>
-                        setSelectedFlows((previous) => {
-                          const next = new Map(previous);
-                          for (const e of exchanges) {
-                            if (checked === true) next.set(e.id, e);
-                            else next.delete(e.id);
-                          }
-                          return next;
-                        })
-                      }
-                    />
-                  </TableHead>
-                  <TableHead className="w-44">{ui("screen.1079886b92d48a")}</TableHead>
-                  <SortableHead
-                    field="ts"
-                    label={ui("screen.8b6ff498515bcc")}
-                    activeField={sort.field}
-                    direction={sort.direction}
-                    onSort={toggleSort}
-                    className="w-36"
-                  />
-                  <TableHead className="w-44">host</TableHead>
-                  <TableHead className="w-20">{ui("screen.22b9f0b6621280")}</TableHead>
-                  <TableHead>URL</TableHead>
-                  <SortableHead
-                    field="status"
-                    label={ui("screen.06f7d73412128f")}
-                    activeField={sort.field}
-                    direction={sort.direction}
-                    onSort={toggleSort}
-                    className="w-20"
-                  />
-                  <TableHead className="w-36">content-type</TableHead>
-                  <SortableHead
-                    field="resp_len"
-                    label={ui("screen.71150dc5f9bf29")}
-                    activeField={sort.field}
-                    direction={sort.direction}
-                    onSort={toggleSort}
-                    align="right"
-                    className="w-24 text-right"
-                  />
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {exchanges.map((e) => (
-                  <TableRow
-                    key={e.id}
-                    className={cn("cursor-pointer", selected?.id === e.id && "bg-accent hover:bg-accent")}
-                    onClick={() => setSelected(e)}
-                  >
-                    <TableCell>
+            {grouped ? (
+              <TrafficRouteGroups
+                groups={groups}
+                sort={sort}
+                onSort={toggleSort}
+                loading={loading && traffic === null}
+                onOpen={(group) => {
+                  groupPageRef.current = page;
+                  setActiveGroup(group);
+                  setTraffic(null);
+                  setPage(0);
+                }}
+              />
+            ) : (
+              <Table>
+                <TableHeader className="sticky top-0 z-10 bg-card">
+                  <TableRow>
+                    <TableHead className="w-10">
                       <Checkbox
-                        aria-label={ui("screen.be085904b7f30c", { v0: e.id })}
-                        checked={selectedFlows.has(e.id)}
-                        onClick={(event) => event.stopPropagation()}
+                        aria-label={ui("screen.7f7a0502cab321")}
+                        checked={exchanges.length > 0 && exchanges.every((e) => selectedFlows.has(e.id))}
                         onCheckedChange={(checked) =>
                           setSelectedFlows((previous) => {
                             const next = new Map(previous);
-                            if (checked === true) next.set(e.id, e);
-                            else next.delete(e.id);
+                            for (const e of exchanges) {
+                              if (checked === true) next.set(e.id, e);
+                              else next.delete(e.id);
+                            }
                             return next;
                           })
                         }
                       />
-                    </TableCell>
-                    <TableCell>
-                      <TrafficID id={e.id} />
-                    </TableCell>
-                    <TableCell className="text-xs text-muted-foreground tabular-nums">{fmtTime(e.ts, ui)}</TableCell>
-                    <TableCell className="font-mono text-xs">{e.host}</TableCell>
-                    <TableCell>
-                      <MethodBadge method={e.method} />
-                    </TableCell>
-                    <TableCell className="max-w-0">
-                      <span className="block truncate font-mono text-xs">{e.url}</span>
-                    </TableCell>
-                    <TableCell>
-                      <span className={cn("font-mono text-xs font-semibold tabular-nums", statusTone(e.status))}>
-                        {e.status}
-                      </span>
-                    </TableCell>
-                    <TableCell className="text-xs text-muted-foreground">{e.content_type}</TableCell>
-                    <TableCell className="text-right text-xs tabular-nums">{fmtBytes(e.resp_len)}</TableCell>
+                    </TableHead>
+                    <TableHead className="w-44">{ui("screen.1079886b92d48a")}</TableHead>
+                    <SortableHead
+                      field="ts"
+                      label={ui("screen.8b6ff498515bcc")}
+                      activeField={sort.field}
+                      direction={sort.direction}
+                      onSort={toggleSort}
+                      className="w-36"
+                    />
+                    <TableHead className="w-44">host</TableHead>
+                    <TableHead className="w-20">{ui("screen.22b9f0b6621280")}</TableHead>
+                    <TableHead>URL</TableHead>
+                    <SortableHead
+                      field="status"
+                      label={ui("screen.06f7d73412128f")}
+                      activeField={sort.field}
+                      direction={sort.direction}
+                      onSort={toggleSort}
+                      className="w-20"
+                    />
+                    <TableHead className="w-36">content-type</TableHead>
+                    <SortableHead
+                      field="resp_len"
+                      label={ui("screen.71150dc5f9bf29")}
+                      activeField={sort.field}
+                      direction={sort.direction}
+                      onSort={toggleSort}
+                      align="right"
+                      className="w-24 text-right"
+                    />
                   </TableRow>
-                ))}
-                {exchanges.length === 0 && (
-                  <TableRow>
-                    <TableCell colSpan={9} className="py-12 text-center text-sm text-muted-foreground">
-                      {traffic === null ? ui("screen.4927a53bcc886a") : ui("screen.2e8f51bea742fa")}
-                    </TableCell>
-                  </TableRow>
-                )}
-              </TableBody>
-            </Table>
+                </TableHeader>
+                <TableBody>
+                  {exchanges.map((e) => (
+                    <TableRow
+                      key={e.id}
+                      className={cn("cursor-pointer", selected?.id === e.id && "bg-accent hover:bg-accent")}
+                      onClick={() => setSelected(e)}
+                    >
+                      <TableCell>
+                        <Checkbox
+                          aria-label={ui("screen.be085904b7f30c", { v0: e.id })}
+                          checked={selectedFlows.has(e.id)}
+                          onClick={(event) => event.stopPropagation()}
+                          onCheckedChange={(checked) =>
+                            setSelectedFlows((previous) => {
+                              const next = new Map(previous);
+                              if (checked === true) next.set(e.id, e);
+                              else next.delete(e.id);
+                              return next;
+                            })
+                          }
+                        />
+                      </TableCell>
+                      <TableCell>
+                        <TrafficID id={e.id} />
+                      </TableCell>
+                      <TableCell className="text-xs text-muted-foreground tabular-nums">{fmtTime(e.ts, ui)}</TableCell>
+                      <TableCell className="font-mono text-xs">{e.host}</TableCell>
+                      <TableCell>
+                        <MethodBadge method={e.method} />
+                      </TableCell>
+                      <TableCell className="max-w-0">
+                        <span className="block truncate font-mono text-xs" title={e.url}>
+                          {trafficPath(e.url)}
+                        </span>
+                      </TableCell>
+                      <TableCell>
+                        <span className={cn("font-mono text-xs font-semibold tabular-nums", statusTone(e.status))}>
+                          {e.status}
+                        </span>
+                      </TableCell>
+                      <TableCell className="text-xs text-muted-foreground">{e.content_type}</TableCell>
+                      <TableCell className="text-right text-xs tabular-nums">{fmtBytes(e.resp_len)}</TableCell>
+                    </TableRow>
+                  ))}
+                  {exchanges.length === 0 && (
+                    <TableRow>
+                      <TableCell colSpan={9} className="py-12 text-center text-sm text-muted-foreground">
+                        {traffic === null ? ui("screen.4927a53bcc886a") : ui("screen.2e8f51bea742fa")}
+                      </TableCell>
+                    </TableRow>
+                  )}
+                </TableBody>
+              </Table>
+            )}
           </div>
         </Card>
       </div>

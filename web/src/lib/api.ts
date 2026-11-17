@@ -1112,6 +1112,8 @@ export const api = {
       respMax?: string;
       sort?: string;
       order?: string;
+      view?: "routes" | "requests";
+      route?: string;
     } = {},
   ) =>
     get<TrafficResp>(
@@ -1126,7 +1128,9 @@ export const api = {
         (opts.respMin ? `&resp_min=${encodeURIComponent(opts.respMin)}` : "") +
         (opts.respMax ? `&resp_max=${encodeURIComponent(opts.respMax)}` : "") +
         (opts.sort ? `&sort=${encodeURIComponent(opts.sort)}` : "") +
-        (opts.order ? `&order=${encodeURIComponent(opts.order)}` : ""),
+        (opts.order ? `&order=${encodeURIComponent(opts.order)}` : "") +
+        (opts.view ? `&view=${opts.view}` : "") +
+        (opts.route ? `&route=${encodeURIComponent(opts.route)}` : ""),
     ),
   trafficExchange: (id: string) => get<TrafficDetail>(`/traffic/exchange?id=${encodeURIComponent(id)}`),
   trafficHosts: (taskId?: string) =>

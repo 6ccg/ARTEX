@@ -2567,19 +2567,41 @@ func (s *Server) getTraffic(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pageQuery := traffic.PageQuery{
-		Hosts:   taskHosts,
-		Host:    q.Get("host"),
-		Method:  q.Get("method"),
-		Query:   q.Get("q"),
-		Body:    q.Get("body"),
-		Path:    q.Get("path"),
-		Status:  q.Get("status"),
-		RespMin: int64(atoiDefault(q.Get("resp_min"), -1)),
-		RespMax: int64(atoiDefault(q.Get("resp_max"), -1)),
-		Sort:    q.Get("sort"),
-		Order:   q.Get("order"),
+		Hosts:    taskHosts,
+		Host:     q.Get("host"),
+		Method:   q.Get("method"),
+		Query:    q.Get("q"),
+		Body:     q.Get("body"),
+		Path:     q.Get("path"),
+		Status:   q.Get("status"),
+		RespMin:  int64(atoiDefault(q.Get("resp_min"), -1)),
+		RespMax:  int64(atoiDefault(q.Get("resp_max"), -1)),
+		Sort:     q.Get("sort"),
+		Order:    q.Get("order"),
+		RouteURL: q.Get("route"),
 	}
-	ex, matched, _ := tr.Page(pageQuery, page, size)
+	if q.Get("view") == "routes" {
+		groups, total, matched, err := tr.GroupPage(pageQuery, page, size)
+		if err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		count := matched
+		if !taskScoped {
+			count, err = tr.Count()
+			if err != nil {
+				writeErr(w, 500, err.Error())
+				return
+			}
+		}
+		writeJSON(w, 200, map[string]any{"enabled": s.m.TrafficEnabled(), "count": count, "total": total, "matched_count": matched, "groups": groups, "exchanges": []any{}})
+		return
+	}
+	ex, matched, err := tr.Page(pageQuery, page, size)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
 	count, _ := tr.Count() // global total, for the stat card
 	if taskScoped {
 		// matched already represents the current task scope plus all active

@@ -904,17 +904,18 @@ func ftsQuote(s string) string {
 // of -1 skip the response-size bounds. An empty Sort/Order defaults to
 // newest-first by timestamp.
 type PageQuery struct {
-	Host    string   // host substring
-	Hosts   []string // task-scoped host candidates (exact host or host:port)
-	Method  string   // exact method (case-insensitive)
-	Query   string   // broad search box: metadata columns OR captured text
-	Body    string   // content box: captured request/response text only (full-text)
-	Path    string   // url_template substring — the vulnerability's path
-	Status  string   // exact code ("404") or class bucket ("4xx")
-	RespMin int64    // minimum resp_len, or -1 when unset
-	RespMax int64    // maximum resp_len, or -1 when unset
-	Sort    string   // ts | status | resp_len (default ts)
-	Order   string   // asc | desc (default desc)
+	Host     string   // host substring
+	Hosts    []string // task-scoped host candidates (exact host or host:port)
+	Method   string   // exact method (case-insensitive)
+	Query    string   // broad search box: metadata columns OR captured text
+	Body     string   // content box: captured request/response text only (full-text)
+	Path     string   // url_template substring — the vulnerability's path
+	Status   string   // exact code ("404") or class bucket ("4xx")
+	RespMin  int64    // minimum resp_len, or -1 when unset
+	RespMax  int64    // maximum resp_len, or -1 when unset
+	Sort     string   // ts | status | resp_len (default ts)
+	Order    string   // asc | desc (default desc)
+	RouteURL string   // exact request URL without query/fragment, for group drill-down
 }
 
 // hostScopeClause limits traffic to the hosts attached to a task. Captures
@@ -973,20 +974,7 @@ func statusFilter(s string) (cond string, args []any, ok bool) {
 	return "", nil, false
 }
 
-// Page returns one page of exchange metadata for the traffic list, filtered by
-// the criteria in f (all optional, combined with AND) and ordered by the
-// requested column. Query is the broad search box (metadata columns OR, when the
-// term is long enough for the trigram index, captured request/response text);
-// Body narrows to exchanges whose captured text matches, via that same index.
-// Also returns the total number of rows matching the filter (for the UI's
-// pagination). Bodies are never included in the rows.
-func (t *Traffic) Page(f PageQuery, page, size int) (rows []ExchangeMeta, total int, err error) {
-	if size <= 0 || size > 500 {
-		size = 100
-	}
-	if page < 0 {
-		page = 0
-	}
+func (t *Traffic) pageFilter(f PageQuery) (string, []any) {
 	where := ""
 	var args []any
 	add := func(cond string, vs ...any) {
@@ -1039,6 +1027,27 @@ func (t *Traffic) Page(f PageQuery, page, size int) (rows []ExchangeMeta, total 
 			add(cond, arg)
 		}
 	}
+	if f.RouteURL != "" {
+		add(routeURLSQL+"=?", f.RouteURL)
+	}
+	return where, args
+}
+
+// Page returns one page of exchange metadata for the traffic list, filtered by
+// the criteria in f (all optional, combined with AND) and ordered by the
+// requested column. Query is the broad search box (metadata columns OR, when the
+// term is long enough for the trigram index, captured request/response text);
+// Body narrows to exchanges whose captured text matches, via that same index.
+// Also returns the total number of rows matching the filter (for the UI's
+// pagination). Bodies are never included in the rows.
+func (t *Traffic) Page(f PageQuery, page, size int) (rows []ExchangeMeta, total int, err error) {
+	if size <= 0 || size > 500 {
+		size = 100
+	}
+	if page < 0 {
+		page = 0
+	}
+	where, args := t.pageFilter(f)
 	if err = t.db.QueryRow(`SELECT COUNT(*) FROM exchanges`+where, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
