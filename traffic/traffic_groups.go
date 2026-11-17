@@ -1,14 +1,35 @@
 package traffic
 
 import (
+	"context"
+	"database/sql"
 	"encoding/json"
 	"net/url"
 	"strings"
 )
 
 // Group only request metadata. Bodies, query values and capture IDs stay intact.
-const routeWithoutQuerySQL = `CASE WHEN instr(url,'?')>0 THEN substr(url,1,instr(url,'?')-1) ELSE url END`
-const routeURLSQL = `CASE WHEN instr(` + routeWithoutQuerySQL + `,'#')>0 THEN substr(` + routeWithoutQuerySQL + `,1,instr(` + routeWithoutQuerySQL + `,'#')-1) ELSE ` + routeWithoutQuerySQL + ` END`
+const routeURLSQL = `substr(url,1,min(instr(url||'?','?'),instr(url||'#','#'))-1)`
+
+func ensureRouteIndex(ctx context.Context, conn *sql.Conn) error {
+	var hasRoute bool
+	if err := conn.QueryRowContext(ctx, `SELECT EXISTS(
+ SELECT 1 FROM pragma_table_xinfo('exchanges') WHERE name='route_url'
+)`).Scan(&hasRoute); err != nil {
+		return err
+	}
+	if !hasRoute {
+		if _, err := conn.ExecContext(ctx, `ALTER TABLE exchanges ADD COLUMN route_url TEXT
+ GENERATED ALWAYS AS (`+routeURLSQL+`) VIRTUAL`); err != nil {
+			return err
+		}
+	}
+	// A named virtual column lets SQLite serve the aggregation from the index
+	// alone. An expression index still fetches original URLs for grouped output.
+	_, err := conn.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_ex_route_stats
+ ON exchanges(method,route_url,status,ts,resp_len)`)
+	return err
+}
 
 type RouteGroup struct {
 	ID       string      `json:"id"`
@@ -32,32 +53,33 @@ func (t *Traffic) GroupPage(f PageQuery, page, size int) (groups []RouteGroup, t
 		size = 100
 	}
 	where, args := t.pageFilter(f)
-	base := `WITH filtered AS (SELECT *,` + routeURLSQL + ` AS route_url FROM exchanges` + where + `) `
-	err = t.db.QueryRow(base+`SELECT (SELECT count(*) FROM (SELECT 1 FROM filtered GROUP BY method,route_url)),count(*) FROM filtered`, args...).Scan(&total, &matched)
-	if err != nil {
-		return
-	}
-	col := map[string]string{"status": "a.max_status", "resp_len": "a.resp_len", "ts": "a.last_ts"}[f.Sort]
+	col := map[string]string{"status": "max_status", "resp_len": "resp_len", "ts": "last_ts"}[f.Sort]
 	if col == "" {
-		col = "a.last_ts"
+		col = "last_ts"
 	}
 	dir := "DESC"
 	if strings.EqualFold(f.Order, "asc") {
 		dir = "ASC"
 	}
-	// Aggregate statuses once for the complete filtered set. A correlated status
-	// subquery per route repeatedly scanned the capture index on every page load.
-	q := base + `, route_stats AS (
- SELECT method,route_url,count(*) AS captures,min(ts) AS first_ts,max(ts) AS last_ts,
- sum(resp_len) AS resp_len,max(status) AS max_status FROM filtered GROUP BY method,route_url
-), status_stats AS (
- SELECT method,route_url,json_group_object(status,n) AS statuses FROM (
-  SELECT method,route_url,status,count(*) AS n FROM filtered GROUP BY method,route_url,status
- ) GROUP BY method,route_url
+	// Reduce captures once by route and status. Both totals and the page then
+	// read the smaller route aggregates, including when the requested page is empty.
+	order := col + " " + dir + ",route_url,method"
+	q := `WITH by_status AS (
+ SELECT method,route_url,status,count(*) AS captures,
+ min(ts) AS first_ts,max(ts) AS last_ts,sum(resp_len) AS resp_len
+ FROM exchanges` + where + ` GROUP BY method,route_url,status
+), routes AS (
+ SELECT method,route_url,sum(captures) AS captures,min(first_ts) AS first_ts,max(last_ts) AS last_ts,
+ sum(resp_len) AS resp_len,max(status) AS max_status,json_group_object(status,captures) AS statuses
+ FROM by_status GROUP BY method,route_url
+), totals AS (
+ SELECT count(*) AS total,COALESCE(sum(captures),0) AS matched FROM routes
+), page AS (
+ SELECT * FROM routes WHERE method IS NOT NULL AND route_url IS NOT NULL
+ ORDER BY ` + order + ` LIMIT ? OFFSET ?
 )
-SELECT a.method,a.route_url,a.captures,a.first_ts,a.last_ts,a.resp_len,b.statuses,a.max_status
-FROM route_stats a JOIN status_stats b USING(method,route_url)
-ORDER BY ` + col + ` ` + dir + `,a.route_url,a.method LIMIT ? OFFSET ?`
+SELECT method,route_url,COALESCE(captures,0),COALESCE(first_ts,0),COALESCE(last_ts,0),COALESCE(resp_len,0),
+ COALESCE(statuses,''),total,matched FROM totals LEFT JOIN page ON true ORDER BY ` + order
 	qargs := append(append([]any{}, args...), size, page*size)
 	rows, e := t.db.Query(q, qargs...)
 	if e != nil {
@@ -67,11 +89,15 @@ ORDER BY ` + col + ` ` + dir + `,a.route_url,a.method LIMIT ? OFFSET ?`
 	defer rows.Close()
 	for rows.Next() {
 		var g RouteGroup
+		var method, route sql.NullString
 		var statuses string
-		var maxStatus int
-		if err = rows.Scan(&g.Method, &g.URL, &g.Count, &g.FirstTS, &g.LastTS, &g.RespLen, &statuses, &maxStatus); err != nil {
+		if err = rows.Scan(&method, &route, &g.Count, &g.FirstTS, &g.LastTS, &g.RespLen, &statuses, &total, &matched); err != nil {
 			return
 		}
+		if !method.Valid {
+			continue
+		}
+		g.Method, g.URL = method.String, route.String
 		if err = json.Unmarshal([]byte(statuses), &g.Statuses); err != nil {
 			return
 		}
