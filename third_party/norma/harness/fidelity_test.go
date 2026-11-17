@@ -172,6 +172,18 @@ func TestStopHookBlockingContinues(t *testing.T) {
 	}
 }
 
+func TestStopHookConsecutiveLimit(t *testing.T) {
+	hooks := &fakeHooks{stop: func(int) (bool, []string, string) {
+		return false, []string{"submit a concrete next action"}, ""
+	}}
+	m := &scriptedModel{turns: [][]llm.StreamEvent{textTurn("stop"), textTurn("stop again"), textTurn("still stop")}}
+	term := drain(t, QueryInput{Messages: []llm.Message{llm.UserText("go")},
+		Tools: tool.NewRegistry(), Hooks: hooks, MaxStopHookContinuations: 2}, QueryDeps{CallModel: m.call})
+	if term.Reason != ReasonCompleted || hooks.n != 2 || m.calls != 3 {
+		t.Fatalf("reason=%v hook calls=%d model calls=%d", term.Reason, hooks.n, m.calls)
+	}
+}
+
 func TestMessagesForAPIExcludesPreBoundary(t *testing.T) {
 	seeded := []llm.Message{
 		llm.UserText("ancient question"),

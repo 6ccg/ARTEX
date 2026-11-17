@@ -67,7 +67,7 @@ func (s *Server) generateFindingReport(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "关联报告对话失败: "+err.Error())
 		return
 	}
-	s.StartTriggeredRunWithConversation(
+	if !s.StartTriggeredRunWithConversation(
 		"reporter",
 		fmt.Sprintf("人工生成步骤与报告 · finding#%d", f.ID),
 		message,
@@ -75,7 +75,10 @@ func (s *Server) generateFindingReport(w http.ResponseWriter, r *http.Request) {
 		false,
 		taskDesc,
 		taskGoal, conversation.ID,
-	)
+	) {
+		writeErr(w, http.StatusServiceUnavailable, "报告任务入队失败")
+		return
+	}
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"queued":          true,
 		"agent_key":       "reporter",

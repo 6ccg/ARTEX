@@ -10,5 +10,7 @@ Local fixes:
 - Wait for managed processes and PTYs before removing their output directories.
 - Preserve executed tool history on stream errors without dispatching partial calls.
 - Give settlement tools a live parent context and enforce disabled tools at execution.
+- Bound model calls and settlement with separate deadlines.
+- Allow bounded consecutive stop-hook corrections and an absolute primary deadline.
 
 Update this record and `go.mod` together when syncing upstream.

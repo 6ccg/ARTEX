@@ -2,6 +2,7 @@ package db
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 )
 
@@ -292,5 +293,62 @@ func TestNodesPageQueryMatchesID(t *testing.T) {
 		t.Fatal(err)
 	} else if total != 0 || len(nodes) != 0 {
 		t.Fatalf("non-existent id: total=%d nodes=%+v, want empty", total, nodes)
+	}
+}
+
+func TestGoalProofAndCompletionGuard(t *testing.T) {
+	d, err := Open(testDSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	task, err := d.CreateTask("goal guard", "test", nil, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.DeleteTask(task.ID)
+	es := d.Exploration(task.ExplorationID)
+	goal, err := es.AddGoal(map[string]any{"text": "first"}, "human")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := es.ProveGoal(goal, -1); err == nil {
+		t.Fatal("missing evidence must fail")
+	}
+	node, err := es.GetNode(goal)
+	if err != nil || node.State != "open" {
+		t.Fatalf("failed proof changed goal: %+v %v", node, err)
+	}
+	fact, err := es.AddNode(KindFact, map[string]any{"summary": "proof"}, 0, "confirmed", "worker", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := es.ProveGoal(goal, fact, "observed proof meets goal"); err != nil {
+		t.Fatal(err)
+	}
+	node, err = es.GetNode(goal)
+	if err != nil || !strings.Contains(string(node.Payload), "observed proof meets goal") {
+		t.Fatalf("proof reason missing: %+v %v", node, err)
+	}
+	if _, err := es.AddGoal(map[string]any{"text": "new"}, "human"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, won, err := d.SetTaskDoneIfGoalsSettled(task.ID, false); err != nil || won {
+		t.Fatalf("new goal must prevent completion: %v %v", won, err)
+	}
+	if _, err := d.Exec(`UPDATE tasks SET paused=true WHERE id=$1`, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Exec(`UPDATE exploration_nodes SET state='abandoned' WHERE exploration_id=$1 AND kind='goal' AND state='open'`, task.ExplorationID); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, won, err := d.SetTaskDoneIfGoalsSettled(task.ID, false); err != nil || won {
+		t.Fatalf("paused task completed: %v %v", won, err)
+	}
+	if _, err := d.Exec(`UPDATE tasks SET paused=false WHERE id=$1`, task.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, won, err := d.SetTaskDoneIfGoalsSettled(task.ID, false); err != nil || !won {
+		t.Fatalf("settled goals must complete: %v %v", won, err)
 	}
 }

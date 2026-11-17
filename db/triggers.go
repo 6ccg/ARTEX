@@ -3,6 +3,7 @@ package db
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"time"
 )
 
@@ -66,20 +67,93 @@ func scanTrigger(sc interface{ Scan(...any) error }) (*AgentTrigger, error) {
 
 // CreateTrigger inserts a trigger for agentKey and returns it.
 func (d *DB) CreateTrigger(t *AgentTrigger) (*AgentTrigger, error) {
-	row := d.QueryRow(`
-INSERT INTO agent_triggers(agent_key, enabled, interval_sec, on_finding, on_goal_met, on_task_timeout, on_tool_call, on_task_create, interval_message, finding_message, goal_message, task_timeout_message, tool_call_message, task_create_message, tool_names)
-VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING `+triggerCols,
-		t.AgentKey, t.Enabled, t.IntervalSec, t.OnFinding, t.OnGoalMet, t.OnTaskTimeout, t.OnToolCall, t.OnTaskCreate,
-		t.IntervalMessage, t.FindingMessage, t.GoalMessage, t.TaskTimeoutMessage, t.ToolCallMessage, t.TaskCreateMessage, marshalToolNames(t.ToolNames))
-	return scanTrigger(row)
+	tx, err := d.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	row := tx.QueryRow(`INSERT INTO agent_triggers(agent_key, enabled, interval_sec, on_finding, on_goal_met, on_task_timeout, on_tool_call, on_task_create, interval_message, finding_message, goal_message, task_timeout_message, tool_call_message, task_create_message, tool_names)
+ VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) RETURNING `+triggerCols,
+		t.AgentKey, t.Enabled, t.IntervalSec, t.OnFinding, t.OnGoalMet, t.OnTaskTimeout, t.OnToolCall, t.OnTaskCreate, t.IntervalMessage, t.FindingMessage, t.GoalMessage, t.TaskTimeoutMessage, t.ToolCallMessage, t.TaskCreateMessage, marshalToolNames(t.ToolNames))
+	created, err := scanTrigger(row)
+	if err != nil {
+		return nil, err
+	}
+	if err := resetNewTriggerConditions(tx, nil, created); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return created, nil
 }
 
-// UpdateTrigger updates a trigger's fields (not last_fire).
 func (d *DB) UpdateTrigger(t *AgentTrigger) error {
-	_, err := d.Exec(`UPDATE agent_triggers SET enabled=$2, interval_sec=$3, on_finding=$4, on_goal_met=$5, on_task_timeout=$6, on_tool_call=$7, on_task_create=$8, interval_message=$9, finding_message=$10, goal_message=$11, task_timeout_message=$12, tool_call_message=$13, task_create_message=$14, tool_names=$15 WHERE id=$1`,
-		t.ID, t.Enabled, t.IntervalSec, t.OnFinding, t.OnGoalMet, t.OnTaskTimeout, t.OnToolCall, t.OnTaskCreate,
-		t.IntervalMessage, t.FindingMessage, t.GoalMessage, t.TaskTimeoutMessage, t.ToolCallMessage, t.TaskCreateMessage, marshalToolNames(t.ToolNames))
-	return err
+	tx, err := d.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	old, err := scanTrigger(tx.QueryRow(`SELECT `+triggerCols+` FROM agent_triggers WHERE id=$1 FOR UPDATE`, t.ID))
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(`UPDATE agent_triggers SET enabled=$2, interval_sec=$3, on_finding=$4, on_goal_met=$5, on_task_timeout=$6, on_tool_call=$7, on_task_create=$8, interval_message=$9, finding_message=$10, goal_message=$11, task_timeout_message=$12, tool_call_message=$13, task_create_message=$14, tool_names=$15 WHERE id=$1`,
+		t.ID, t.Enabled, t.IntervalSec, t.OnFinding, t.OnGoalMet, t.OnTaskTimeout, t.OnToolCall, t.OnTaskCreate, t.IntervalMessage, t.FindingMessage, t.GoalMessage, t.TaskTimeoutMessage, t.ToolCallMessage, t.TaskCreateMessage, marshalToolNames(t.ToolNames))
+	if err != nil {
+		return err
+	}
+	if err := resetNewTriggerConditions(tx, old, t); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// New conditions start at the current event boundary, including events created
+// since the scheduler's most recent tick. Existing active conditions keep progress.
+func resetNewTriggerConditions(tx *sql.Tx, old, current *AgentTrigger) error {
+	if !current.Enabled {
+		return nil
+	}
+	if old == nil {
+		old = &AgentTrigger{}
+	}
+	queries := []struct {
+		key, query  string
+		now, before bool
+	}{
+		{"last_finding_id", `SELECT COALESCE(MAX(n.id),0)::text FROM exploration_nodes n JOIN tasks t ON t.exploration_id=n.exploration_id WHERE n.kind='finding' AND t.deleted_at IS NULL`, current.OnFinding, old.Enabled && old.OnFinding},
+		{"fired_goals", `SELECT COALESCE(json_agg(n.id),'[]'::json)::text FROM exploration_nodes n JOIN tasks t ON t.exploration_id=n.exploration_id WHERE n.kind='goal' AND n.state='met' AND t.deleted_at IS NULL`, current.OnGoalMet, old.Enabled && old.OnGoalMet},
+		{"last_toolcall_id", `SELECT COALESCE(MAX(a.id),0)::text FROM activity a JOIN tasks t ON t.exploration_id=a.exploration_id WHERE a.kind='tool_result' AND t.deleted_at IS NULL`, current.OnToolCall, old.Enabled && old.OnToolCall},
+		{"last_taskcreate_id", `SELECT COALESCE(MAX(id),0)::text FROM tasks WHERE deleted_at IS NULL`, current.OnTaskCreate, old.Enabled && old.OnTaskCreate},
+	}
+	for _, q := range queries {
+		if !q.now || q.before {
+			continue
+		}
+		var value string
+		if err := tx.QueryRow(q.query).Scan(&value); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`INSERT INTO scheduler_state(key,value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value`, fmt.Sprintf("%s:trigger:%d", q.key, current.ID), value); err != nil {
+			return err
+		}
+	}
+	if current.OnTaskTimeout && !(old.Enabled && old.OnTaskTimeout) {
+		var c TaskTimeoutCursor
+		err := tx.QueryRow(`SELECT id,COALESCE(completed_at,created_at) FROM tasks WHERE status='timeout' AND deleted_at IS NULL ORDER BY COALESCE(completed_at,created_at) DESC,id DESC LIMIT 1`).Scan(&c.TaskID, &c.CompletedAt)
+		if err != nil && err != sql.ErrNoRows {
+			return err
+		}
+		raw, err := json.Marshal(c)
+		if err != nil {
+			return err
+		}
+		if _, err = tx.Exec(`INSERT INTO scheduler_state(key,value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value`, fmt.Sprintf("last_timeout_cursor:trigger:%d", current.ID), string(raw)); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // DeleteTrigger removes a trigger.

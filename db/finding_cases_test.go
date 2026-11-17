@@ -77,6 +77,13 @@ func TestFindingCaseMergePreservesRecordsAndVersions(t *testing.T) {
 	if stats.Total != 2 || stats.Reports != 4 || stats.Unassessed != 1 {
 		t.Fatalf("stats %+v", stats)
 	}
+	store := d.Exploration(task.ExplorationID)
+	if got, err := store.FindingStats(); err != nil || got.Total != 2 || got.Reports != 4 {
+		t.Fatalf("planner finding counts: %+v %v", got, err)
+	}
+	if got, err := store.FindingReportDisposition(); err != nil || got["pending"] != 4 {
+		t.Fatalf("report disposition: %+v %v", got, err)
+	}
 	again, err := d.MergeFindingCase(ctx, task.ID, ids[:3], "same", "same", "reporter")
 	if err != nil || again != id {
 		t.Fatalf("idempotency %d %v", again, err)

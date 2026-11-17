@@ -30,6 +30,9 @@ func (s *Runtime) Start() error {
 		s.stopLogWriter = logSink.attachDB(s.m.pg)
 	}
 	s.restoreTaskRuntimes()
+	if s.m.pg != nil {
+		s.restorePendingTriggers()
+	}
 	s.startProxySupervisor()
 	s.proxyPoolWG.Add(1)
 	go func() { defer s.proxyPoolWG.Done(); s.runProxyPoolSupervisor(s.ctx) }()

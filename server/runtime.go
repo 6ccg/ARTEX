@@ -60,8 +60,7 @@ type Runtime struct {
 	// counts in-flight runs per agent (replaces a boolean drain flag); a run's
 	// completion decrements it and re-pumps to fill the freed slot. triggerCfg caches
 	// the agent's last-read策略 so the pump never queries the DB while holding queueMu.
-	// Distinct agents always run concurrently. Queue is in-memory (matches chatBusy); a
-	// restart drops pending fires — the scheduler re-fires from watermarks next tick.
+	// Distinct agents always run concurrently. Pending fires are persisted for recovery.
 	queueMu       sync.Mutex
 	triggerQ      map[string][]triggeredRun
 	triggerActive map[string]int
@@ -133,6 +132,8 @@ type provEntry struct {
 // taskID + mergeable let the drainer coalesce several event triggers (finding/goal)
 // from the SAME task into one conversation before it starts (interval fires don't merge).
 type triggeredRun struct {
+	pendingIDs     []int64
+	started        bool
 	conversationID int64 // pre-created manual finding review; never coalesced
 
 	agentKey  string

@@ -6,6 +6,24 @@ import (
 	"testing"
 )
 
+func TestGoalCompletionPublishesStateBeforeCancel(t *testing.T) {
+	m := newTestManager(t)
+	task, err := m.CreateTask("completion order", "", nil, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	won, err := m.setTaskDoneAndCancel(task.ID, func() {
+		called = true
+		if status := m.TaskStatus(task.ID); status != "done" {
+			t.Errorf("cancel observed status %q", status)
+		}
+	})
+	if err != nil || !won || !called {
+		t.Fatalf("won=%v cancelled=%v err=%v", won, called, err)
+	}
+}
+
 func TestTaskLifecycleSnapshotCopiesContextSlices(t *testing.T) {
 	task := &Task{
 		Status:        "running",

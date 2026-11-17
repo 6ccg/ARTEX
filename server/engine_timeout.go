@@ -19,6 +19,7 @@ import (
 const (
 	settleDrainGrace     = 90 * time.Second // 等在跑 worker 优雅收尾的上限;超过则硬 cancel
 	deadlinePollInterval = 2 * time.Second  // deadline 未盖章/LLM 未就绪时的轮询间隔
+	finalPlannerTimeout  = 60 * time.Second // bound final judgment, including provider calls
 	deadlineMaxSleep     = 30 * time.Second // 单次最长睡眠(便于周期复查终态)
 )
 
@@ -277,6 +278,9 @@ func (e *Engine) settleTask(ctx context.Context, t *Task, reason string) {
 
 	// ⑤ 终局一轮 planner(任务超时词,最后目标判定,不产新意图)。
 	met := e.runFinalPlannerRound(ctx, t, reason)
+	if ctx.Err() != nil || e.IsDeleting(t.ID) {
+		return
+	}
 	if !e.beginTaskOperation(t.ID) {
 		return
 	}
@@ -284,10 +288,18 @@ func (e *Engine) settleTask(ctx context.Context, t *Task, reason string) {
 
 	// ⑥ 定终态(带守卫):met → done(completed);否则 timeout。若常规路径已先落 done,
 	// 守卫(SetTaskStatusGuarded)会拒绝覆盖,保留 completed 语义。
-	status := "timeout"
 	if met {
-		status = "done"
+		won, err := e.m.SetTaskDoneIfGoalsSettled(t.ID, false)
+		if err != nil {
+			log.Printf("[deadline] task %s 目标完成落库失败: %v", t.ID, err)
+			return
+		}
+		if won {
+			log.Printf("[deadline] task %s 收尾完成,终态=done", t.ID)
+			return
+		}
 	}
+	status := "timeout"
 	won, err := e.m.SetTaskStatusGuardedReason(t.ID, status, reason)
 	switch {
 	case err != nil:
@@ -300,27 +312,24 @@ func (e *Engine) settleTask(ctx context.Context, t *Task, reason string) {
 }
 
 // runFinalPlannerRound drives exactly ONE terminal planner round with the
-// task-timeout planner words (final goal judgment; no new intents). Waits for the
-// LLM to be ready (bounded by ctx) so a completable task isn't mis-judged timeout.
+// task-timeout planner words (final goal judgment; no new intents). If no planner
+// is available, it returns immediately; otherwise the round has its own deadline.
 func (e *Engine) runFinalPlannerRound(ctx context.Context, t *Task, reason string) (met bool) {
 	if e.IsDeleting(t.ID) {
 		return false
 	}
 	planner, _ := e.snapshotFor(t)
-	for planner == nil {
-		if sleepCtx(ctx, deadlinePollInterval) {
-			return false
+	if planner == nil {
+		log.Printf("[deadline] task %s 终局模型不可用，按未达成结束收尾", t.ID)
+		if t.Store != nil {
+			e.emitActivity(t, db.Activity{Worker: "system", Kind: "text", Summary: "终局规划模型不可用，跳过最终判定，任务按超时结束"})
 		}
-		if isTerminalStatus(e.m.TaskStatus(t.ID)) {
-			return false
-		}
-		if e.IsDeleting(t.ID) {
-			return false
-		}
-		planner, _ = e.snapshotFor(t)
+		return false
 	}
 	// 独立 ctx(不挂 execCancel,避免 pause/硬 cancel 打断这最后一轮),带 Final 注入任务超时词。
-	fctx := e.clockCtx(ctx, t, true)
+	bounded, cancel := context.WithTimeout(ctx, finalPlannerTimeout)
+	defer cancel()
+	fctx := e.clockCtx(bounded, t, true)
 	if !e.beginTaskOperation(t.ID) {
 		return false
 	}
@@ -338,6 +347,10 @@ func (e *Engine) runFinalPlannerRound(ctx context.Context, t *Task, reason strin
 	e.EndLLMCall(t.ID)
 	if err != nil {
 		log.Printf("[deadline] task %s 终局规划出错: %v", t.ID, err)
+		if ctx.Err() == nil {
+			e.emitActivity(t, db.Activity{Worker: "system", Kind: "text", IsError: true,
+				Summary: "最终判定未能完成，按当前目标状态结束收尾", Detail: err.Error()})
+		}
 	} else if met {
 		log.Printf("[deadline] task %s 终局判定目标达成: %s", t.ID, decision)
 	}

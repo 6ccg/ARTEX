@@ -31,12 +31,16 @@ type QueryInput struct {
 	DeferredTools []string
 	MaxTokens     int
 	Temperature   *float64
-	// MaxTurns bounds tool-turns (0 = off). MaxDuration bounds wall-clock time,
-	// checked at the turn boundary so a turn is never aborted mid-stream — unlike
-	// cancelling ctx, which cuts an in-flight stream/tool (0 = off).
-	MaxTurns       int
-	MaxDuration    time.Duration
-	MaxConcurrency int
+	// MaxTurns bounds tool-turns (0 = off). MaxDuration bounds primary execution,
+	// including model/tool waits. PrimaryDeadline also counts caller preparation;
+	// the earlier deadline wins. Settlement has its own bounded live context.
+	MaxTurns        int
+	MaxDuration     time.Duration
+	PrimaryDeadline time.Time
+	MaxConcurrency  int
+	// MaxStopHookContinuations bounds consecutive stop-hook nudges without a
+	// tool turn. Zero uses one; callers can allow a small bounded recovery loop.
+	MaxStopHookContinuations int
 	// NonStreaming makes each model call a single non-streaming request (via
 	// QueryDeps.CallModelSync / Provider.Complete) instead of a token stream. The
 	// loop still emits the same KindText/KindThinking/KindToolUse/KindUsage events
@@ -222,11 +226,7 @@ type budgetTracker struct {
 
 type loop struct {
 	ctx context.Context
-	// toolCtx bounds tool execution with the run's MaxDuration deadline, so a tool
-	// that overruns the wall-clock budget is interrupted mid-flight (the model call
-	// stays on ctx — streams are never cut mid-flight). Derived from ctx, so a parent
-	// cancellation (pause/kill/shutdown) still cancels it. Swapped to ctx once the
-	// wrap-up phase begins, so settlement tools run live, bounded only by settleMaxTurns.
+	// toolCtx bounds the current execution phase, including model calls and tools.
 	toolCtx context.Context
 	in      QueryInput
 	deps    QueryDeps
@@ -243,13 +243,14 @@ type loop struct {
 	// settlement (wrap-up) phase state, entered when a budget is hit
 	settling     bool
 	settleReason TerminalReason // the budget reason to finish with after wrap-up
+	settleCancel context.CancelFunc
 	settleTurn   int
 
 	// recovery / continuation state
 	maxOutputTokensOverride      int
 	maxOutputTokensRecoveryCount int
 	hasAttemptedReactiveCompact  bool
-	stopHookActive               bool
+	stopHookContinuations        int
 	budget                       budgetTracker
 	lastContinue                 ContinueReason
 }
@@ -263,6 +264,7 @@ const (
 	// maxLoopIterations is a defensive backstop; turnCount counts only tool-turns,
 	// so this only guards against a pathological recovery/continuation loop.
 	maxLoopIterations = 10000
+	settlementTimeout = 60 * time.Second
 )
 
 func (l *loop) emit(ev Event) bool { return l.yield(ev, nil) }
@@ -378,16 +380,23 @@ func (l *loop) run() {
 	l.turnCount = 1 // the first model call is turn 1
 	l.boundaryCount = countBoundaries(l.messages)
 	l.startTime = time.Now() // wall-clock baseline for MaxDuration
-	// toolCtx carries the MaxDuration deadline so a tool that overruns the wall-clock
-	// budget is interrupted mid-flight (rather than the run only noticing at the next
-	// turn boundary, which a hung tool never reaches). On interrupt the loop enters the
-	// wrap-up phase on the live parent ctx instead of aborting — see the tools branch.
 	l.toolCtx = l.ctx
+	deadline := l.in.PrimaryDeadline
 	if l.in.MaxDuration > 0 {
+		if ownDeadline := l.startTime.Add(l.in.MaxDuration); deadline.IsZero() || ownDeadline.Before(deadline) {
+			deadline = ownDeadline
+		}
+	}
+	if !deadline.IsZero() {
 		var stopTool context.CancelFunc
-		l.toolCtx, stopTool = context.WithDeadline(l.ctx, l.startTime.Add(l.in.MaxDuration))
+		l.toolCtx, stopTool = context.WithDeadline(l.ctx, deadline)
 		defer stopTool()
 	}
+	defer func() {
+		if l.settleCancel != nil {
+			l.settleCancel()
+		}
+	}()
 	iterations := 0
 	for {
 		if l.ctx.Err() != nil {
@@ -405,13 +414,45 @@ func (l *loop) run() {
 
 		// Non-destructive proactive compaction (MicroCompact → AutoCompact).
 		if l.in.Compactor != nil {
-			l.messages = l.in.Compactor.Pre(l.ctx, l.messages, l.lastInputTokens)
+			l.messages = l.in.Compactor.Pre(l.toolCtx, l.messages, l.lastInputTokens)
 			l.recordNewBoundary()
+		}
+
+		if l.ctx.Err() != nil {
+			l.finish(ReasonAbortedStreaming, l.ctx.Err(), "")
+			return
+		}
+		if l.toolCtx.Err() != nil {
+			if !l.settling && l.beginSettlement(ReasonTimeout, &schemas) {
+				continue
+			}
+			if l.settling {
+				l.finish(l.settleReason, nil, "")
+			} else {
+				l.finish(ReasonTimeout, nil, "")
+			}
+			return
 		}
 
 		usageBefore := l.usage
 		asst, exec, stopReason, streamErr, consumerStopped, aborted := l.streamAndExecute(schemas)
 		if consumerStopped {
+			return
+		}
+		if l.toolCtx.Err() != nil && l.ctx.Err() == nil {
+			if len(asst.Content) > 0 {
+				l.messages = append(l.messages, asst)
+				l.record(asst, usageDelta(usageBefore, l.usage))
+				l.recordToolResults(exec)
+			}
+			if !l.settling && l.beginSettlement(ReasonTimeout, &schemas) {
+				continue
+			}
+			if l.settling {
+				l.finish(l.settleReason, nil, "")
+			} else {
+				l.finish(ReasonTimeout, nil, "")
+			}
 			return
 		}
 		if streamErr != nil {
@@ -427,10 +468,13 @@ func (l *loop) run() {
 			// Reactive recovery from prompt-too-long: one forced AutoCompact, then retry.
 			if exec.count() == 0 && l.in.Compactor != nil && l.in.Compactor.IsOverflow(streamErr) && !l.hasAttemptedReactiveCompact {
 				l.hasAttemptedReactiveCompact = true
-				if msgs, ok := l.in.Compactor.Reactive(l.ctx, l.messages); ok {
+				if msgs, ok := l.in.Compactor.Reactive(l.toolCtx, l.messages); ok {
 					l.messages = msgs
 					l.recordNewBoundary()
 					l.lastContinue = ContinueReactiveCompactRetry
+					continue
+				}
+				if l.toolCtx.Err() != nil {
 					continue
 				}
 				l.finish(ReasonPromptTooLong, streamErr, "")
@@ -476,10 +520,13 @@ func (l *loop) run() {
 				return
 			}
 			// Stop hooks: hard terminate, or force continue with injected errors.
-			// stopHookActive prevents an always-blocking hook from looping forever
-			// without an intervening tool-turn.
-			if l.in.Hooks != nil && !l.stopHookActive {
-				prevent, blocking, msg := l.in.Hooks.Stop(l.ctx, l.messages)
+			// Bound consecutive blocking hooks even when the model calls no tools.
+			stopLimit := l.in.MaxStopHookContinuations
+			if stopLimit <= 0 {
+				stopLimit = 1
+			}
+			if l.in.Hooks != nil && l.stopHookContinuations < stopLimit {
+				prevent, blocking, msg := l.in.Hooks.Stop(l.toolCtx, l.messages)
 				if prevent {
 					l.finish(ReasonStopHookPrevented, nil, msg)
 					return
@@ -490,12 +537,12 @@ func (l *loop) run() {
 						l.messages = append(l.messages, bm)
 						l.record(bm, llm.Usage{})
 					}
-					l.stopHookActive = true
+					l.stopHookContinuations++
 					l.lastContinue = ContinueStopHookBlocking
 					continue
 				}
 			}
-			l.stopHookActive = false
+			l.stopHookContinuations = 0
 			// Surface any background-task completions before ending the turn; if any
 			// landed, take another turn so the model can react to them.
 			if l.injectTaskNotifications() {
@@ -540,7 +587,7 @@ func (l *loop) run() {
 		}
 
 		// next_turn: only tool-turns advance turnCount.
-		l.stopHookActive = false // a real turn happened; stop hooks may fire fresh
+		l.stopHookContinuations = 0 // a real tool turn allows fresh stop hooks
 		if l.settling {
 			// wrap-up phase: bounded by its own small turn budget. When spent, finish
 			// with the original budget reason (not "completed").
@@ -613,7 +660,7 @@ func (l *loop) beginSettlement(reason TerminalReason, schemas *[]llm.ToolSchema)
 	l.messages = append(l.messages, msg)
 	l.record(msg, llm.Usage{})
 	l.settling = true
-	l.toolCtx = l.ctx
+	l.toolCtx, l.settleCancel = context.WithTimeout(l.ctx, settlementTimeout)
 	l.settleReason = reason
 	l.settleTurn = 0
 	if len(s.DisabledTools) > 0 {
@@ -781,7 +828,7 @@ func messageHasToolUse(m llm.Message, name string) bool {
 // Either way l.messages is left untouched.
 func (l *loop) requestMessages() []llm.Message {
 	if v, ok := l.in.Compactor.(ContextView); ok {
-		return v.View(l.ctx, l.messages)
+		return v.View(l.toolCtx, l.messages)
 	}
 	return llm.MessagesForAPI(l.messages)
 }
@@ -828,7 +875,7 @@ func (l *loop) streamAndExecute(schemas []llm.ToolSchema) (asst llm.Message, exe
 		return exec.drain()
 	}
 
-	for ev, e := range l.deps.CallModel(l.ctx, req) {
+	for ev, e := range l.deps.CallModel(l.toolCtx, req) {
 		if e != nil {
 			err = e
 			break
@@ -896,7 +943,7 @@ func (l *loop) streamAndExecute(schemas []llm.ToolSchema) (asst llm.Message, exe
 func (l *loop) completeAndExecute(req llm.CompletionRequest) (asst llm.Message, exec *streamExec, stopReason string, err error, consumerStopped, aborted bool) {
 	exec = newStreamExec(l)
 	defer exec.stopAndWait()
-	msg, sr, usage, cerr := l.deps.CallModelSync(l.ctx, req)
+	msg, sr, usage, cerr := l.deps.CallModelSync(l.toolCtx, req)
 	if cerr != nil {
 		return asst, exec, "", cerr, false, false
 	}

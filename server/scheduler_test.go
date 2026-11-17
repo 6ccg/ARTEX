@@ -43,9 +43,11 @@ func TestBoundTriggerAndSettingsWorkWithoutGlobalModel(t *testing.T) {
 	}
 	defer m.pg.DeleteTask(task.ID)
 	sc := newScheduler(s.Runtime)
+	m.pg.Exec(`DELETE FROM scheduler_state WHERE key=$1`, schedKeyLastTaskCreate+":trigger:0")
+	defer m.pg.Exec(`DELETE FROM scheduler_state WHERE key=$1`, schedKeyLastTaskCreate+":trigger:0")
 	triggers := []*db.AgentTrigger{{AgentKey: key, OnTaskCreate: true}}
 	sc.fireTaskCreates(triggers)
-	if sc.mustState(schedKeyLastTaskCreate) != i64s(last) {
+	if sc.mustState(schedKeyLastTaskCreate+":trigger:0") != i64s(last) {
 		t.Fatal("unavailable model consumed event")
 	}
 	if err := m.pg.SetAgentLLMProfile(key, &id); err != nil {

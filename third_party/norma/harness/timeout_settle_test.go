@@ -3,6 +3,8 @@ package harness
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"iter"
 	"strings"
 	"testing"
 	"time"
@@ -145,5 +147,62 @@ func TestParentCancelStillAbortsNoSettlement(t *testing.T) {
 	}
 	if m.calls != 1 {
 		t.Fatalf("父取消后不应再调用模型收尾，模型调用数=%d，want 1", m.calls)
+	}
+}
+
+func TestModelDeadlineEntersBoundedSettlement(t *testing.T) {
+	for _, syncCall := range []bool{false, true} {
+		t.Run(fmt.Sprint("sync=", syncCall), func(t *testing.T) {
+			calls := 0
+			run := func(ctx context.Context) error {
+				calls++
+				if calls == 1 {
+					<-ctx.Done()
+					return ctx.Err()
+				}
+				if ctx.Err() != nil {
+					t.Fatal("settlement context already cancelled")
+				}
+				if _, ok := ctx.Deadline(); !ok {
+					t.Fatal("settlement has no deadline")
+				}
+				return nil
+			}
+			deps := QueryDeps{
+				CallModel: func(ctx context.Context, _ llm.CompletionRequest) iter.Seq2[llm.StreamEvent, error] {
+					return func(yield func(llm.StreamEvent, error) bool) {
+						if err := run(ctx); err != nil {
+							yield(llm.StreamEvent{}, err)
+							return
+						}
+						for _, ev := range textTurn("saved") {
+							if !yield(ev, nil) {
+								return
+							}
+						}
+					}
+				},
+				CallModelSync: func(ctx context.Context, _ llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {
+					if err := run(ctx); err != nil {
+						return llm.Message{}, "", llm.Usage{}, err
+					}
+					return llm.Message{Role: llm.RoleAssistant, Content: []llm.ContentBlock{{Type: llm.BlockText, Text: "saved"}}}, "end_turn", llm.Usage{}, nil
+				},
+			}
+			term := drain(t, QueryInput{Messages: []llm.Message{llm.UserText("go")}, MaxDuration: 30 * time.Millisecond, NonStreaming: syncCall, Settlement: &Settlement{Prompt: "settle"}}, deps)
+			if term.Reason != ReasonTimeout || calls != 2 {
+				t.Fatalf("reason=%v calls=%d", term.Reason, calls)
+			}
+		})
+	}
+}
+
+func TestExpiredPrimaryDeadlineStillSettles(t *testing.T) {
+	m := &scriptedModel{turns: [][]llm.StreamEvent{textTurn("saved")}}
+	term := drain(t, QueryInput{Messages: []llm.Message{llm.UserText("go")},
+		MaxDuration: time.Hour, PrimaryDeadline: time.Now().Add(-time.Second),
+		Settlement: &Settlement{Prompt: "settle"}}, QueryDeps{CallModel: m.call})
+	if term.Reason != ReasonTimeout || term.Text != "saved" || m.calls != 1 {
+		t.Fatalf("reason=%v text=%q calls=%d", term.Reason, term.Text, m.calls)
 	}
 }

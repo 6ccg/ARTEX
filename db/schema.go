@@ -11,7 +11,7 @@ import (
 //go:embed upgrade_legacy.sql
 var legacySchemaSQL string
 
-const schemaRevision = 1
+const schemaRevision = 2
 const schemaRevisionKey = "database_schema_revision"
 
 // The caller holds schemaMigrationLockKey on conn. Each upgrade and its version
@@ -47,7 +47,7 @@ func initializeSchema(ctx context.Context, conn *sql.Conn) error {
 		return err
 	}
 	defer tx.Rollback() //nolint:errcheck
-	if exists {
+	if exists && version == 0 {
 		if _, err := tx.ExecContext(ctx, legacySchemaSQL); err != nil {
 			return err
 		}
@@ -63,13 +63,16 @@ func initializeSchema(ctx context.Context, conn *sql.Conn) error {
 		if _, err := tx.ExecContext(ctx, `DROP TRIGGER trg_assets_task_links ON assets; DROP FUNCTION sync_task_asset_links(); ALTER TABLE assets DROP COLUMN task_ids`); err != nil {
 			return err
 		}
-	} else {
+	} else if !exists {
 		if _, err := tx.ExecContext(ctx, `SET LOCAL check_function_bodies=false`); err != nil {
 			return err
 		}
 		if _, err := tx.ExecContext(ctx, schemaSQL); err != nil {
 			return err
 		}
+	}
+	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS pending_trigger_runs (id BIGSERIAL PRIMARY KEY, agent_key TEXT NOT NULL, title TEXT NOT NULL, message TEXT NOT NULL, task_id BIGINT NOT NULL DEFAULT 0, task_desc TEXT NOT NULL DEFAULT '', task_goal TEXT NOT NULL DEFAULT '', mergeable BOOLEAN NOT NULL DEFAULT false, conversation_id BIGINT, started BOOLEAN NOT NULL DEFAULT false)`); err != nil {
+		return err
 	}
 	if err := seedInitialSchemaData(ctx, tx); err != nil {
 		return err

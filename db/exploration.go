@@ -201,6 +201,12 @@ func (s *ExplorationStore) AddNode(kind string, payload map[string]any, priority
 		return 0, err
 	}
 	defer tx.Rollback()
+	if kind == "goal" {
+		var locked int64
+		if err := tx.QueryRow(`SELECT id FROM explorations WHERE id=$1 FOR UPDATE`, s.expID).Scan(&locked); err != nil {
+			return 0, err
+		}
+	}
 	var id int64
 	if err := tx.QueryRow(`
 INSERT INTO exploration_nodes(exploration_id, kind, payload, priority, state, origin)
@@ -263,11 +269,114 @@ ON CONFLICT (exploration_id, src_id, rel, dst_id) DO NOTHING`, s.expID, from, re
 	return err
 }
 
+// ProveGoal commits the proof edge and goal state together.
+func (s *ExplorationStore) ProveGoal(goal, evidence int64, reasons ...string) error {
+	reason := ""
+	if len(reasons) > 0 {
+		reason = strings.TrimSpace(reasons[0])
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.Exec(`INSERT INTO exploration_edges(exploration_id, src_id, rel, dst_id) VALUES ($1,$2,$3,$4) ON CONFLICT (exploration_id, src_id, rel, dst_id) DO NOTHING`, s.expID, evidence, RelProves, goal); err != nil {
+		return err
+	}
+	res, err := tx.Exec(`UPDATE exploration_nodes SET state='met', blocked_reason=NULL, payload=CASE WHEN $3 <> '' THEN jsonb_set(payload::jsonb, '{proof_reason}', to_jsonb($3::text), true) ELSE payload::jsonb END, content_version=content_version+1 WHERE id=$1 AND exploration_id=$2 AND kind='goal'`, goal, s.expID, reason)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n != 1 {
+		return errors.New("goal not found")
+	}
+	return tx.Commit()
+}
+
+func (s *ExplorationStore) FindingStats() (*FindingDistinctStats, error) {
+	var id int64
+	if err := s.db.QueryRow(`SELECT id FROM tasks WHERE exploration_id=$1`, s.expID).Scan(&id); err != nil {
+		return nil, err
+	}
+	return s.db.DistinctFindingStats(strconv.FormatInt(id, 10))
+}
+
+// FindingReportDisposition counts raw reports by triage status.
+func (s *ExplorationStore) FindingReportDisposition() (map[string]int, error) {
+	rows, err := s.db.Query(`SELECT COALESCE(f.status,'pending'), count(*) FROM findings f JOIN tasks t ON t.id=f.task_id WHERE t.exploration_id=$1 GROUP BY 1`, s.expID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	counts := map[string]int{}
+	for rows.Next() {
+		var state string
+		var n int
+		if err := rows.Scan(&state, &n); err != nil {
+			return nil, err
+		}
+		counts[state] = n
+	}
+	return counts, rows.Err()
+}
+
+// SetTaskDoneIfGoalsSettled serializes with goal insertion and commits only if
+// no open goal remains and the task is still running.
+func (d *DB) SetTaskDoneIfGoalsSettled(id int64, noActiveIntents bool) (active int64, started *time.Time, won bool, err error) {
+	tx, err := d.Begin()
+	if err != nil {
+		return 0, nil, false, err
+	}
+	defer tx.Rollback()
+	var expID int64
+	err = tx.QueryRow(`SELECT e.id FROM explorations e JOIN tasks t ON t.exploration_id=e.id WHERE t.id=$1 FOR UPDATE OF e`, id).Scan(&expID)
+	if err == sql.ErrNoRows {
+		return 0, nil, false, nil
+	}
+	if err != nil {
+		return 0, nil, false, err
+	}
+	err = tx.QueryRow(`UPDATE tasks SET status='done', pause_reason='', stop_reason='', completed_at=COALESCE(completed_at,now()), active_run_seconds=active_run_seconds + CASE WHEN run_segment_started_at IS NOT NULL THEN GREATEST(0,FLOOR(EXTRACT(EPOCH FROM (now()-run_segment_started_at)))::bigint) ELSE 0 END, run_segment_started_at=NULL
+ WHERE id=$1 AND status IN ('created','running') AND NOT paused AND deleted_at IS NULL
+ AND NOT EXISTS (SELECT 1 FROM exploration_nodes WHERE exploration_id=$2 AND kind='goal' AND state='open')
+ AND (NOT $3 OR NOT EXISTS (SELECT 1 FROM exploration_nodes WHERE exploration_id=$2 AND kind='intent' AND state IN ('open','running')))
+ RETURNING active_run_seconds,run_segment_started_at`, id, expID, noActiveIntents).Scan(&active, &started)
+	if err == sql.ErrNoRows {
+		return 0, nil, false, nil
+	}
+	if err != nil {
+		return 0, nil, false, err
+	}
+	if err = tx.Commit(); err != nil {
+		return 0, nil, false, err
+	}
+	return active, started, true, nil
+}
+
 // SetNodeState updates any node's state (never deletes). content_version bumps
 // so a folded member's state flip invalidates its digest's cached body (§5.3).
 func (s *ExplorationStore) SetNodeState(id int64, state string) error {
-	_, err := s.db.Exec(`UPDATE exploration_nodes SET state=$1, blocked_reason=NULL, content_version=content_version+1 WHERE id=$2 AND exploration_id=$3`, state, id, s.expID)
-	return err
+	if state != "open" {
+		_, err := s.db.Exec(`UPDATE exploration_nodes SET state=$1, blocked_reason=NULL, content_version=content_version+1 WHERE id=$2 AND exploration_id=$3`, state, id, s.expID)
+		return err
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var locked int64
+	if err := tx.QueryRow(`SELECT id FROM explorations WHERE id=$1 FOR UPDATE`, s.expID).Scan(&locked); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE exploration_nodes SET state=$1, blocked_reason=NULL, content_version=content_version+1 WHERE id=$2 AND exploration_id=$3`, state, id, s.expID); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // UpdateGoalPayload rewrites a goal node's payload text (and optional vulnclass);

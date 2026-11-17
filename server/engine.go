@@ -645,7 +645,7 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 			if active, err := t.Store.HasActiveIntent(); err == nil && !active {
 				// frontier 抽干且无在跑意图 → 收尾。用 Guarded 版做 CAS，避免踩到并发的
 				// pause/delete/超时收尾的状态转换。
-				if won, err := e.m.SetTaskStatusGuarded(t.ID, "done"); err != nil {
+				if won, err := e.m.SetTaskDoneIfGoalsSettled(t.ID, true); err != nil {
 					log.Printf("[goalless] task %s 收尾落 done 失败: %v", t.ID, err)
 				} else if won {
 					e.emitActivity(t, db.Activity{Worker: "system", Kind: "text",
@@ -691,16 +691,15 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 			if e.proxyFailure != nil && isProxyFailure(err) {
 				e.proxyFailure(t.ID, err)
 			}
-		case met:
-			log.Printf("[planner] task %s 判定目标达成: %s", t.ID, reason)
-			// 所有目标达成 → 持久化任务状态为 done（前端 DTO 会优先展示该终态）。
-			if err := e.m.SetTaskStatus(t.ID, "done"); err != nil {
-				log.Printf("[planner] task %s 标记完成落库失败: %v", t.ID, err)
+		case met && ectx.Err() == nil && !e.IsDeleting(t.ID):
+			won, statusErr := e.m.setTaskDoneAndCancel(t.ID, func() { e.cancelExec(t.ID, agent.AbortGoalMet) })
+			if statusErr != nil {
+				log.Printf("[planner] task %s 标记完成落库失败: %v", t.ID, statusErr)
 			}
-			// 任务已判完成 → 立刻取消在跑的 worker：它们手头的意图跑出来也没意义了。
-			// 下一轮 worker 循环撞终态门就不再领新意图;被取消的这批走下方"任务已完成"分支
-			// 归为 stopped(而非 blocked)。
-			e.cancelExec(t.ID, agent.AbortGoalMet)
+			if won {
+				log.Printf("[planner] task %s 判定目标达成: %s", t.ID, reason)
+			}
+
 		default:
 			log.Printf("[planner] task %s 规划完成", t.ID)
 		}
@@ -810,7 +809,11 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 	hasChatMessage := message != ""
 	e.stampFirstRun(t) // 首次真正执行 → 盖 first_run_at + 算 deadline(仅带 timeout 的任务)
 	e.touch(t.ID)
+	var usedTool atomic.Bool
 	emit := func(r db.Activity) {
+		if r.Kind == "tool_use" || r.Kind == "tool_result" {
+			usedTool.Store(true)
+		}
 		if r.Kind == "tool_result" && r.IsError && e.proxyFailure != nil && isGlobalProxyDialFailure(errors.New(r.Detail+" "+r.Summary)) {
 			e.proxyFailure(t.ID, errors.New(r.Detail+" "+r.Summary))
 		}
@@ -839,6 +842,7 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 	}
 	label := fmt.Sprintf("%s · #%d", name, iid)
 	workCtx = intercept.WithTaskContext(workCtx, t.ID, label, taskEmit)
+	workCtx = worker.WithIntentBudget(workCtx)
 	// nudges 有意建在 model_error 重跑循环之外:空转续跑的上限是「这条意图」的总量，
 	// 重跑一轮不该把额度清零重来。
 	hooks := steerHooks{
@@ -852,6 +856,7 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 	e.BeginLLMCall(t.ID)
 	var reason harness.TerminalReason
 	var wrote agent.WriteCounts
+	var totalWrote agent.WriteCounts
 	var err error
 	if hasChatMessage {
 		reason, wrote, err = worker.ExecuteWithMessage(workCtx, name, wTaskID, e.m.assets, t.Store, intent, hooks, emit, e.m.enrich, t.NotifyFinding, requestID, message)
@@ -862,16 +867,32 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 		e.proxyFailure(t.ID, err)
 	}
 	e.EndLLMCall(t.ID)
+	totalWrote = wrote
 	// model_error 收场 → 额外重跑几次（退避后再试）。仅在意图仍属本 work、任务
 	// 未暂停/未终止/未取消【且未进入收尾】时重试；否则让位给对应分支处理(收尾期不
 	// 再重试,避免退避挤占其他 worker 的优雅收尾窗口)。
 	maxRetries, retryBackoff := e.modelErrorRetryPolicy()
 	for attempt := 1; attempt <= maxRetries &&
 		retryableWorkerModelError(reason, err) &&
+		(worker.CanResumeIntent() || !usedTool.Load()) &&
 		workCtx.Err() == nil && ectx.Err() == nil && !e.IsPaused(t.ID) && !e.isSettling(t.ID); attempt++ {
 		log.Printf("[worker %s] task %s 意图 #%d model_error 收场，%v 后重试 (%d/%d)",
 			name, t.ID, intent.ID, retryBackoff, attempt, maxRetries)
-		if sleepCtx(workCtx, retryBackoff) {
+		remaining, limited := agent.IntentWaitRemaining(workCtx)
+		continuation := "沿用已有执行记录"
+		if !worker.CanResumeIntent() {
+			continuation = "尚无工具执行，重新开始"
+		}
+		if limited {
+			taskEmit(db.Activity{Kind: "text", Summary: fmt.Sprintf("模型错误，继续意图（重跑 %d/%d，剩余预算 %s）；%s", attempt, maxRetries, remaining.Round(time.Millisecond), continuation)})
+		} else {
+			taskEmit(db.Activity{Kind: "text", Summary: fmt.Sprintf("模型错误，继续意图（重跑 %d/%d，预算不限）；%s", attempt, maxRetries, continuation)})
+		}
+		delay := retryBackoff
+		if limited && remaining < delay {
+			delay = remaining
+		}
+		if sleepCtx(workCtx, delay) {
 			break // 退避期间被取消（终止/暂停）→ 交给下方分支处理
 		}
 		e.BeginLLMCall(t.ID)
@@ -881,6 +902,14 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 			reason, wrote, err = worker.Execute(workCtx, name, wTaskID, e.m.assets, t.Store, intent, hooks, emit, e.m.enrich, t.NotifyFinding)
 		}
 		e.EndLLMCall(t.ID)
+		totalWrote.Facts += wrote.Facts
+		totalWrote.Assets += wrote.Assets
+		totalWrote.Findings += wrote.Findings
+		totalWrote.Intelligence += wrote.Intelligence
+	}
+	wrote = totalWrote
+	if reason == harness.ReasonTimeout {
+		taskEmit(db.Activity{Kind: "text", Summary: fmt.Sprintf("意图执行预算耗尽，已尝试收尾写回：%s", wrote)})
 	}
 	// Capture kill state before detachWork cancels workCtx. kill = this work's
 	// ctx was cancelled (planner kill_work) while the TASK ctx kept running; a
@@ -972,14 +1001,14 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 	// 试过但没真正做完、需换角度，而非当成已覆盖永久跳过）；出错→blocked；正常→done。
 	state := "done"
 	switch {
+	case reason == harness.ReasonTimeout:
+		state = "exhausted"
+		log.Printf("[worker %s] intent %d 运行超时(exhausted)，收尾后写回 %s", name, intent.ID, wrote)
 	case err != nil:
 		state = "blocked"
 	case reason == harness.ReasonMaxTurns:
 		state = "exhausted"
 		log.Printf("[worker %s] intent %d 撞步数上限(exhausted)，本次写回 %s", name, intent.ID, wrote)
-	case reason == harness.ReasonTimeout:
-		state = "exhausted"
-		log.Printf("[worker %s] intent %d 运行超时(exhausted)，收尾后写回 %s", name, intent.ID, wrote)
 	}
 	if state == "blocked" && isTaskLLMChainExhausted(err) {
 		_ = t.Store.SetIntentBlockedReason(intent.ID, db.IntentBlockedLLMQuota)

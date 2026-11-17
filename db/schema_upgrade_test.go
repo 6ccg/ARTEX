@@ -64,6 +64,17 @@ INSERT INTO scheduler_state(key,value) VALUES('last_timeout_id','2');
 	if err := conn.QueryRowContext(ctx, `SELECT count(*) FROM information_schema.columns WHERE table_schema=$1 AND ((table_name='assets' AND column_name='task_ids') OR (table_name='tasks' AND column_name='llm_profile_id'))`, name).Scan(&columns); err != nil || columns != 0 {
 		t.Fatalf("legacy columns=%d err=%v", columns, err)
 	}
+	// A revision 1 database must only run the new migration, not legacy DDL.
+	if _, err := conn.ExecContext(ctx, `DROP TABLE pending_trigger_runs; UPDATE settings SET value='1' WHERE key='database_schema_revision'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := initializeSchema(ctx, conn); err != nil {
+		t.Fatalf("revision 1 upgrade: %v", err)
+	}
+	var pendingExists bool
+	if err := conn.QueryRowContext(ctx, `SELECT to_regclass('pending_trigger_runs') IS NOT NULL`).Scan(&pendingExists); err != nil || !pendingExists {
+		t.Fatalf("pending table: %v %v", pendingExists, err)
+	}
 	// Holding a read transaction would deadlock a second connection trying DDL.
 	reader, err := d.Begin()
 	if err != nil {

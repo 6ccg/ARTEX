@@ -20,10 +20,11 @@ import (
 // + finding watermark + fired-goal set) so a restart resumes without double-firing.
 // Triggers only attach to CUSTOM agents.
 type Scheduler struct {
-	s         *Runtime
-	pg        *db.DB
-	tick      time.Duration
-	startedAt time.Time
+	s           *Runtime
+	pg          *db.DB
+	tick        time.Duration
+	startedAt   time.Time
+	stateSuffix string
 }
 
 const (
@@ -61,6 +62,7 @@ func (sc *Scheduler) Run(ctx context.Context) {
 			return
 		case <-t.C:
 			sc.s.reconcileConcurrency() // 并发上限:有空位就把排队任务补位启动
+			sc.s.retryPendingTriggers()
 			sc.step()
 		}
 	}
@@ -215,6 +217,10 @@ func (sc *Scheduler) fireIntervals(triggers []*db.AgentTrigger) {
 // fireFindings fires on_finding triggers for findings above the persisted
 // watermark (monotonic node id → no double-fire across restarts).
 func (sc *Scheduler) fireFindings(triggers []*db.AgentTrigger) {
+	sc.firePerTrigger(triggers, schedKeyLastFinding, func(tr *db.AgentTrigger) bool { return tr.OnFinding }, sc.fireFindingsOne)
+}
+
+func (sc *Scheduler) fireFindingsOne(triggers []*db.AgentTrigger) {
 	var want []*db.AgentTrigger
 	for _, tr := range triggers {
 		if tr.OnFinding {
@@ -247,12 +253,21 @@ func (sc *Scheduler) fireFindings(triggers []*db.AgentTrigger) {
 				return
 			}
 		}
+		if len(want) > 0 {
+			if err := sc.setState(schedKeyLastFinding, strconv.FormatInt(e.NodeID, 10)); err != nil {
+				return
+			}
+		}
 	}
-	_ = sc.pg.SetSchedState(schedKeyLastFinding, strconv.FormatInt(maxID, 10))
+	_ = sc.setState(schedKeyLastFinding, strconv.FormatInt(maxID, 10))
 }
 
 // fireGoals fires on_goal_met triggers for met goals not yet in the fired set.
 func (sc *Scheduler) fireGoals(triggers []*db.AgentTrigger) {
+	sc.firePerTrigger(triggers, schedKeyFiredGoals, func(tr *db.AgentTrigger) bool { return tr.OnGoalMet }, sc.fireGoalsOne)
+}
+
+func (sc *Scheduler) fireGoalsOne(triggers []*db.AgentTrigger) {
 	var want []*db.AgentTrigger
 	for _, tr := range triggers {
 		if tr.OnGoalMet {
@@ -285,6 +300,9 @@ func (sc *Scheduler) fireGoals(triggers []*db.AgentTrigger) {
 				return
 			}
 		}
+		if len(want) > 0 {
+			sc.saveFiredGoalSet(fired)
+		}
 	}
 	if changed {
 		sc.saveFiredGoalSet(fired)
@@ -294,13 +312,17 @@ func (sc *Scheduler) fireGoals(triggers []*db.AgentTrigger) {
 // fireTaskTimeouts fires on_task_timeout triggers for tasks that newly reached
 // status='timeout' after the persisted completion cursor.
 func (sc *Scheduler) fireTaskTimeouts(triggers []*db.AgentTrigger) {
+	sc.firePerTrigger(triggers, schedKeyLastTimeout, func(tr *db.AgentTrigger) bool { return tr.OnTaskTimeout }, sc.fireTaskTimeoutsOne)
+}
+
+func (sc *Scheduler) fireTaskTimeoutsOne(triggers []*db.AgentTrigger) {
 	var want []*db.AgentTrigger
 	for _, tr := range triggers {
 		if tr.OnTaskTimeout {
 			want = append(want, tr)
 		}
 	}
-	raw, err := sc.pg.GetSchedState(schedKeyLastTimeout)
+	raw, err := sc.getState(schedKeyLastTimeout)
 	if err != nil {
 		return
 	}
@@ -326,17 +348,30 @@ func (sc *Scheduler) fireTaskTimeouts(triggers []*db.AgentTrigger) {
 				return
 			}
 		}
+		if len(want) > 0 {
+			data, err := json.Marshal(db.TaskTimeoutCursor{CompletedAt: e.CompletedAt, TaskID: e.TaskID})
+			if err != nil {
+				return
+			}
+			if err := sc.setState(schedKeyLastTimeout, string(data)); err != nil {
+				return
+			}
+		}
 	}
 	last := events[len(events)-1]
 	data, err := json.Marshal(db.TaskTimeoutCursor{CompletedAt: last.CompletedAt, TaskID: last.TaskID})
 	if err == nil {
-		_ = sc.pg.SetSchedState(schedKeyLastTimeout, string(data))
+		_ = sc.setState(schedKeyLastTimeout, string(data))
 	}
 }
 
 // fireTaskCreates fires on_task_create triggers for tasks newly created above the
 // persisted watermark (task id → no double-fire across restarts).
 func (sc *Scheduler) fireTaskCreates(triggers []*db.AgentTrigger) {
+	sc.firePerTrigger(triggers, schedKeyLastTaskCreate, func(tr *db.AgentTrigger) bool { return tr.OnTaskCreate }, sc.fireTaskCreatesOne)
+}
+
+func (sc *Scheduler) fireTaskCreatesOne(triggers []*db.AgentTrigger) {
 	var want []*db.AgentTrigger
 	for _, tr := range triggers {
 		if tr.OnTaskCreate {
@@ -366,14 +401,23 @@ func (sc *Scheduler) fireTaskCreates(triggers []*db.AgentTrigger) {
 				return
 			}
 		}
+		if len(want) > 0 {
+			if err := sc.setState(schedKeyLastTaskCreate, strconv.FormatInt(e.NodeID, 10)); err != nil {
+				return
+			}
+		}
 	}
-	_ = sc.pg.SetSchedState(schedKeyLastTaskCreate, strconv.FormatInt(maxID, 10))
+	_ = sc.setState(schedKeyLastTaskCreate, strconv.FormatInt(maxID, 10))
 }
 
 // fireToolCalls fires on_tool_call triggers for tool calls (tool_result rows) above
 // the persisted watermark whose tool name is in the trigger's selected set. The fire
 // message carries the task id/desc/goal + tool name + (truncated) input & output.
 func (sc *Scheduler) fireToolCalls(triggers []*db.AgentTrigger) {
+	sc.firePerTrigger(triggers, schedKeyLastToolCall, func(tr *db.AgentTrigger) bool { return tr.OnToolCall && len(tr.ToolNames) > 0 }, sc.fireToolCallsOne)
+}
+
+func (sc *Scheduler) fireToolCallsOne(triggers []*db.AgentTrigger) {
 	var want []*db.AgentTrigger
 	for _, tr := range triggers {
 		if tr.OnToolCall && len(tr.ToolNames) > 0 {
@@ -427,8 +471,13 @@ func (sc *Scheduler) fireToolCalls(triggers []*db.AgentTrigger) {
 				return
 			}
 		}
+		if len(want) > 0 {
+			if err := sc.setState(schedKeyLastToolCall, strconv.FormatInt(e.NodeID, 10)); err != nil {
+				return
+			}
+		}
 	}
-	_ = sc.pg.SetSchedState(schedKeyLastToolCall, strconv.FormatInt(maxID, 10))
+	_ = sc.setState(schedKeyLastToolCall, strconv.FormatInt(maxID, 10))
 }
 
 func (sc *Scheduler) triggersReady(triggers []*db.AgentTrigger) bool {
@@ -460,7 +509,7 @@ func trunc(s string, max int) string {
 }
 
 func (sc *Scheduler) mustState(key string) string {
-	v, _ := sc.pg.GetSchedState(key)
+	v, _ := sc.getState(key)
 	return v
 }
 
@@ -485,7 +534,42 @@ func (sc *Scheduler) saveFiredGoalSet(set map[int64]bool) {
 		ids = append(ids, id)
 	}
 	b, _ := json.Marshal(ids)
-	if err := sc.pg.SetSchedState(schedKeyFiredGoals, string(b)); err != nil {
+	if err := sc.setState(schedKeyFiredGoals, string(b)); err != nil {
 		log.Printf("[scheduler] save fired goals failed: %v", err)
 	}
+}
+
+// Each trigger retains its own progress when another target cannot start.
+// The category watermark continues advancing to seed newly enabled triggers.
+func (sc *Scheduler) firePerTrigger(triggers []*db.AgentTrigger, key string, matches func(*db.AgentTrigger) bool, fire func([]*db.AgentTrigger)) {
+	base, err := sc.pg.GetSchedState(key)
+	if err != nil || base == "" {
+		return
+	}
+	for _, tr := range triggers {
+		if !matches(tr) {
+			continue
+		}
+		scoped := fmt.Sprintf("%s:trigger:%d", key, tr.ID)
+		value, err := sc.pg.GetSchedState(scoped)
+		if err != nil {
+			continue
+		}
+		if value == "" {
+			if err := sc.pg.SetSchedState(scoped, base); err != nil {
+				continue
+			}
+		}
+		sc.stateSuffix = fmt.Sprintf(":trigger:%d", tr.ID)
+		fire([]*db.AgentTrigger{tr})
+		sc.stateSuffix = ""
+	}
+	fire(nil)
+}
+
+func (sc *Scheduler) getState(key string) (string, error) {
+	return sc.pg.GetSchedState(key + sc.stateSuffix)
+}
+func (sc *Scheduler) setState(key, value string) error {
+	return sc.pg.SetSchedState(key+sc.stateSuffix, value)
 }

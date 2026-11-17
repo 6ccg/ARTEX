@@ -2076,7 +2076,23 @@ func (m *Manager) SetTaskStatusGuarded(id, status string) (won bool, err error) 
 	return m.SetTaskStatusGuardedReason(id, status, "")
 }
 
-func (m *Manager) SetTaskStatusGuardedReason(id, status, reason string) (won bool, err error) {
+func (m *Manager) SetTaskDoneIfGoalsSettled(id string, requireNoActiveIntents bool) (bool, error) {
+	m.taskControlMu.Lock()
+	defer m.taskControlMu.Unlock()
+	return m.setTaskStatusGuardedReason(id, "done", "", true, requireNoActiveIntents, nil)
+}
+
+func (m *Manager) setTaskDoneAndCancel(id string, cancel func()) (bool, error) {
+	m.taskControlMu.Lock()
+	defer m.taskControlMu.Unlock()
+	return m.setTaskStatusGuardedReason(id, "done", "", true, false, cancel)
+}
+
+func (m *Manager) SetTaskStatusGuardedReason(id, status, reason string) (bool, error) {
+	return m.setTaskStatusGuardedReason(id, status, reason, false, false, nil)
+}
+
+func (m *Manager) setTaskStatusGuardedReason(id, status, reason string, goalsGuard, noActiveIntents bool, onDone func()) (won bool, err error) {
 	if status != "timeout" {
 		reason = ""
 	}
@@ -2087,7 +2103,13 @@ func (m *Manager) SetTaskStatusGuardedReason(id, status, reason string) (won boo
 	if err != nil {
 		return false, err
 	}
-	active, started, won, err := m.pg.SetTerminalStatusGuardedReasonRuntime(n, status, reason)
+	var active int64
+	var started *time.Time
+	if goalsGuard {
+		active, started, won, err = m.pg.SetTaskDoneIfGoalsSettled(n, noActiveIntents)
+	} else {
+		active, started, won, err = m.pg.SetTerminalStatusGuardedReasonRuntime(n, status, reason)
+	}
 	if err != nil || !won {
 		return won, err
 	}
@@ -2113,6 +2135,11 @@ func (m *Manager) SetTaskStatusGuardedReason(id, status, reason string) (won boo
 		})
 	}
 	m.mu.Unlock()
+	// Workers must see the committed state before observing cancellation. Keep
+	// both changes ordered with revival by retaining the lifecycle locks.
+	if onDone != nil {
+		onDone()
+	}
 	if err := m.syncTaskRuntime(id, n); err != nil {
 		return true, err
 	}

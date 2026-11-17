@@ -144,9 +144,12 @@ type Options struct {
 	SystemReminderFunc func() string
 
 	MaxTurns int
-	// MaxDuration bounds wall-clock run time, checked at the turn boundary (never
-	// mid-stream), so a run ends cleanly rather than being aborted in flight (0 = off).
+	// MaxStopHookContinuations bounds consecutive stop-hook nudges (0 = one).
+	MaxStopHookContinuations int
+	// MaxDuration bounds primary execution, including model and tool waits (0 = off).
 	MaxDuration time.Duration
+	// PrimaryDeadline includes caller preparation in the primary execution budget.
+	PrimaryDeadline time.Time
 	// Settlement, when set with a Prompt, runs a bounded wrap-up phase when a budget
 	// (MaxTurns/MaxDuration) is hit — injecting the prompt and hiding DisabledTools —
 	// so a budget-terminated run checkpoints its findings. See harness.Settlement.
@@ -491,34 +494,36 @@ func (s *Session) Prompt(ctx context.Context, input string) iter.Seq2[harness.Ev
 		reminderExtra = s.opts.SystemReminderFunc()
 	}
 	in := harness.QueryInput{
-		Provider:           s.opts.Provider,
-		System:             s.system(),
-		DynamicBoundary:    s.opts.DynamicBoundary,
-		Messages:           s.messages,
-		SystemReminder:     buildSystemReminder(reminderExtra),
-		Tools:              s.registry,
-		DeferredTools:      s.opts.DeferredTools,
-		MaxTokens:          s.opts.MaxTokens,
-		Temperature:        s.opts.Temperature,
-		MaxTurns:           s.opts.MaxTurns,
-		MaxDuration:        s.opts.MaxDuration,
-		Settlement:         s.opts.Settlement,
-		MaxConcurrency:     s.opts.MaxConcurrency,
-		WorkingDir:         s.opts.WorkingDir,
-		Todos:              s.opts.Todos,
-		ToolOutputDir:      s.opts.ToolOutputDir,
-		MaxToolOutputChars: s.opts.MaxToolOutputChars,
-		Tasks:              s.tasks,
-		BashEnv:            s.opts.BashEnv,
-		PermissionMode:     s.opts.PermissionMode,
-		Allowed:            s.opts.AllowedTools,
-		Disallowed:         s.opts.DisallowedTools,
-		CanUseTool:         s.opts.CanUseTool,
-		Hooks:              s.opts.Hooks,
-		Compactor:          s.compactor,
-		TokenBudget:        s.opts.TokenBudget,
-		EscalateMaxTokens:  s.opts.EscalateMaxTokens,
-		NonStreaming:       s.opts.NonStreaming,
+		Provider:                 s.opts.Provider,
+		System:                   s.system(),
+		DynamicBoundary:          s.opts.DynamicBoundary,
+		Messages:                 s.messages,
+		SystemReminder:           buildSystemReminder(reminderExtra),
+		Tools:                    s.registry,
+		DeferredTools:            s.opts.DeferredTools,
+		MaxTokens:                s.opts.MaxTokens,
+		Temperature:              s.opts.Temperature,
+		MaxTurns:                 s.opts.MaxTurns,
+		MaxStopHookContinuations: s.opts.MaxStopHookContinuations,
+		MaxDuration:              s.opts.MaxDuration,
+		PrimaryDeadline:          s.opts.PrimaryDeadline,
+		Settlement:               s.opts.Settlement,
+		MaxConcurrency:           s.opts.MaxConcurrency,
+		WorkingDir:               s.opts.WorkingDir,
+		Todos:                    s.opts.Todos,
+		ToolOutputDir:            s.opts.ToolOutputDir,
+		MaxToolOutputChars:       s.opts.MaxToolOutputChars,
+		Tasks:                    s.tasks,
+		BashEnv:                  s.opts.BashEnv,
+		PermissionMode:           s.opts.PermissionMode,
+		Allowed:                  s.opts.AllowedTools,
+		Disallowed:               s.opts.DisallowedTools,
+		CanUseTool:               s.opts.CanUseTool,
+		Hooks:                    s.opts.Hooks,
+		Compactor:                s.compactor,
+		TokenBudget:              s.opts.TokenBudget,
+		EscalateMaxTokens:        s.opts.EscalateMaxTokens,
+		NonStreaming:             s.opts.NonStreaming,
 	}
 	if s.writer != nil {
 		in.Recorder = s.writer

@@ -226,3 +226,15 @@ func TestCreateTaskRejectsInvalidNoResultSeverity(t *testing.T) {
 		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
 	}
 }
+
+func TestFinalPlannerUnavailableReturnsPromptly(t *testing.T) {
+	e := NewEngine(&Manager{})
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	if e.runFinalPlannerRound(ctx, &Task{ID: "1"}, db.StopReasonNoResult) {
+		t.Fatal("unavailable planner reported goal met")
+	}
+	if ctx.Err() != nil {
+		t.Fatal("waited for context rather than handling unavailable planner")
+	}
+}

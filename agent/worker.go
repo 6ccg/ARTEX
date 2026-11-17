@@ -354,6 +354,10 @@ func (w *Worker) ExecuteWithMessage(ctx context.Context, name string, taskID int
 }
 
 func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.AssetStore, ts *db.ExplorationStore, intent *db.Node, hooks harness.HookRunner, emit func(db.Activity), enr EnrichTrigger, notifyFinding func(int64, string), requestID, message string) (harness.TerminalReason, WriteCounts, error) {
+	if _, shared := ctx.Value(workerBudgetKey{}).(time.Time); !shared {
+		ctx = w.WithIntentBudget(ctx)
+	}
+	primaryDeadline := workerPrimaryDeadline(ctx, w.runTimeout)
 	tsx := NewToolSet(w.host, ts, name)
 	tsx.SetFindingRecorder(w.findingRecorder)
 	tsx.SetTaskID(taskID)
@@ -373,7 +377,9 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	// 收敛工具面、减少低价值调用。其余 SDK 默认工具(Read/Write/Edit/LS/Bash/Sleep)照常。
 	base = append(base, defaultToolsExcept("MultiEdit", "Glob", "Grep")...)
 	ctx = WithRunInfo(ctx, RunInfo{TaskID: taskID, ExplorationID: explorationID(ts), IntentID: intent.ID})
-	tools, def, cleanup := w.host.AugmentTools(ctx, "worker", base)
+	prepareCtx, cancelPrepare := workerPrepareContext(ctx)
+	defer cancelPrepare()
+	tools, def, cleanup := w.host.AugmentTools(prepareCtx, "worker", base)
 	defer cleanup()
 
 	// 意图是 worker 的【唯一职责、贯穿整个 run 的不变量】→ 连同启动指令、意图锚定的目标资产
@@ -387,7 +393,7 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	// The run-wide intent is not the current tool action. Do not forward it or
 	// inherit a parent run's background into the action reviewer.
 	ctx = intercept.WithReviewContext(ctx, runDir, intercept.ReviewBackground{})
-	overview := renderWorkerGraphOverview(tsx.graphOverviewData())
+	overview := renderWorkerGraphOverview(tsx.workerOverviewData(intent))
 	proxyAddr := w.proxyAddr
 	if w.proxyAddrFn != nil {
 		proxyAddr = w.proxyAddrFn()
@@ -420,7 +426,11 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	system, boundary := deferredSystem(sysBody, def)
 	// 任务级 deadline(经 ctx 注入)夹逼本 run 的墙钟预算 + 决定收尾词(见 taskclock.go)。
 	tc := taskClockFrom(ctx)
-	maxDur, clamped := clampMaxDuration(tc.DeadlineUnix, w.runTimeout)
+	ownBudget := w.runTimeout
+	if remaining, shared := IntentBudgetRemaining(ctx); shared {
+		ownBudget = remaining
+	}
+	maxDur, clamped := workerMaxDuration(tc, ownBudget)
 	settle := w.host.wrapupSettlement("worker", []string{"Bash"})
 	if tc.DeadlineUnix > 0 {
 		settle = w.host.wrapupSettlementForTask("worker", []string{"Bash"}, clamped)
@@ -451,7 +461,8 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 		MaxTurns:   w.maxTurns, // 0 = unlimited (configurable in agent management)
 		// 墙钟预算,轮边界判,不打断半路;0 = 不限。有任务级 deadline 时夹逼到 min(自身预算,
 		// 距 deadline 剩余),让本 run 在任务到点时自然进收尾(见 taskclock.go)。
-		MaxDuration: maxDur,
+		MaxDuration:     maxDur,
+		PrimaryDeadline: primaryDeadline,
 		// 命中预算(轮次 OR 时长)→ SDK 跑一轮收尾(隐藏 Bash),把已识别的写回,避免烂尾。
 		// clamped(被任务 deadline 夹逼)时用 PromptByReason:因超时=任务到点→任务超时词,
 		// 因步数=夹逼窗口内步数先耗尽→回落 per-run 词。非 clamped 维持纯 per-run。
@@ -499,7 +510,9 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 	// restarting from scratch.
 	alreadyRecorded := false
 	if w.tx != nil {
-		_ = s.Resume(opts.SessionID)
+		if err := s.Resume(opts.SessionID); err != nil {
+			return "", tsx.Writes(), fmt.Errorf("resume worker transcript: %w", err)
+		}
 		alreadyRecorded = requestID != "" && hasWorkerChatMessage(s.Messages(), requestID)
 		if len(s.Messages()) > 0 && message == "" {
 			seedUnlockFromHistory(s.Messages(), def.UnlockSkill)

@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/intercept"
 	"github.com/Autumn-27/norma/agentcore"
+	"github.com/Autumn-27/norma/hook"
 	"github.com/Autumn-27/norma/llm"
 	"github.com/Autumn-27/norma/permission"
 	actool "github.com/Autumn-27/norma/tool"
@@ -26,9 +28,10 @@ type Planner struct {
 	findingRecorder   FindingRecorder
 	prov              llm.Provider
 	model             string
-	tx                *transcript.Store                      // raw LLM conversation persistence (nil = off)
-	window            int                                    // context window in tokens (for compaction)
-	windowFn          func() int                             // optional dynamic task-chain minimum
+	tx                *transcript.Store // raw LLM conversation persistence (nil = off)
+	window            int               // context window in tokens (for compaction)
+	windowFn          func() int        // optional dynamic task-chain minimum
+	runTimeout        time.Duration
 	maxTurns          int                                    // max agent turns per run (0 = unlimited)
 	killWork          func(intentID int64) error             // engine callback to terminate a running work (nil = off)
 	steerWork         func(intentID int64, msg string) error // engine callback to steer a running work mid-run (nil = off)
@@ -54,6 +57,8 @@ type Planner struct {
 func NewPlanner(host *Host, prov llm.Provider, model, workDir string, tx *transcript.Store, window, maxTurns int) *Planner {
 	return &Planner{host: host, prov: prov, model: model, workDir: workDir, tx: tx, window: window, maxTurns: maxTurns, todos: map[int64]*actool.TodoStore{}}
 }
+
+func (p *Planner) SetRunTimeout(d time.Duration) { p.runTimeout = d }
 
 func (p *Planner) SetCompactionWindowResolver(fn func() int) { p.windowFn = fn }
 
@@ -345,7 +350,9 @@ const plannerDefaultTmpl = `你是一个网络安全平台授权渗透测试系�
 
 func (host *Host) plannerSystem(goal, dataDir, workDir string) string {
 	body := host.renderSystem("planner", plannerDefaultTmpl, PlannerVars{Goal: goal, DataDir: dataDir, Now: nowStr()})
-	return body + artifactSpec(workDir)
+	return body + `
+
+【不可覆盖的规划规则】目标未达成且没有活跃意图时，继续寻找可执行路线；不得把预算不足、暂无线索或局部缺少凭据当成任务完成。缺凭据只阻塞相关路线，探索其他入口或获取前置。提交前结合资产范围、上游血缘及已执行意图检查重复；重复方向须说明新增证据或实质不同的方法，单纯换词不算新方向。` + artifactSpec(workDir)
 }
 
 // Plan runs one planning round. emit, if non-nil, receives the planner's execution
@@ -399,9 +406,9 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 		sysBody += constraintBlock(ts) // 操作约束(若有)注入系统提示,框定探索边界
 	}
 	system, boundary := deferredSystem(sysBody, def)
-	// planner 无自身墙钟预算;有 deadline 时把 MaxDuration 夹逼到剩余,让在跑的规划轮在
+	// 将自身预算按任务 deadline 夹逼,让在跑的规划轮在
 	// 任务到点时进收尾(因超时→任务超时词,因步数→per-run 词)。
-	maxDur, clamped := clampMaxDuration(tc.DeadlineUnix, 0)
+	maxDur, clamped := clampMaxDuration(tc.DeadlineUnix, p.runTimeout)
 	settle := p.host.wrapupSettlement("planner", nil)
 	if tc.DeadlineUnix > 0 {
 		settle = p.host.wrapupSettlementForTask("planner", nil, clamped)
@@ -410,17 +417,25 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	if p.proxyAddrFn != nil {
 		proxyAddr = p.proxyAddrFn()
 	}
+	hooks := plannerProgressHooks(ts.HasOpenGoal, ts.HasActiveIntent, func(attempt int) {
+		if emit != nil {
+			emit(db.Activity{Worker: "planner", Kind: "text",
+				Summary: fmt.Sprintf("目标未达成且无活跃意图，继续规划（纠偏 %d/2）", attempt)})
+		}
+	})
 	opts := agentcore.Options{
-		Provider:        p.prov,
-		SystemPrompt:    system,
-		DynamicBoundary: boundary,
-		Tools:           append(tools, deepSeekTools(p.webSearch)...),
-		DeferredTools:   def.Deferred,
-		UnlockSet:       def.Unlock,
-		PermissionMode:  permission.ModeBypass,
-		EnableWebFetch:  true, // 走记录代理留痕；载入代理 CA 验证 MITM 重签的 HTTPS 证书
-		WebFetchProxy:   proxyAddr,
-		WebFetchCACert:  p.proxyCACert,
+		Hooks:                    hooks,
+		MaxStopHookContinuations: 2,
+		Provider:                 p.prov,
+		SystemPrompt:             system,
+		DynamicBoundary:          boundary,
+		Tools:                    append(tools, deepSeekTools(p.webSearch)...),
+		DeferredTools:            def.Deferred,
+		UnlockSet:                def.Unlock,
+		PermissionMode:           permission.ModeBypass,
+		EnableWebFetch:           true, // 走记录代理留痕；载入代理 CA 验证 MITM 重签的 HTTPS 证书
+		WebFetchProxy:            proxyAddr,
+		WebFetchCACert:           p.proxyCACert,
 		// 联网搜索(可选)。ddgs 无需 key；brave-free 需 BraveKey；tavily 需 TavilyKey。
 		// WebSearchProxy 是独立出口代理(http/https/socks5)，与记录流量的 MITM 代理无关；空则直连。
 		EnableWebSearch:    p.webSearch.Enabled && p.webSearch.Backend != "deepseek",
@@ -475,4 +490,28 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 			}
 		})
 	return tsx.GoalMet, tsx.Reason, err
+}
+
+// plannerProgressHooks gives a stalled natural stop bounded chances to recover.
+// The harness skips stop hooks during budget settlement.
+func plannerProgressHooks(hasOpenGoal, hasActiveIntent func() (bool, error), onNudge func(int)) *hook.Registry {
+	attempts := 0
+	return hook.NewRegistry().On(hook.Stop, func(ctx context.Context, _ hook.Event) hook.Result {
+		if ctx.Err() != nil || attempts >= 2 {
+			return hook.Result{}
+		}
+		open, err := hasOpenGoal()
+		if err != nil || !open {
+			return hook.Result{}
+		}
+		active, err := hasActiveIntent()
+		if err != nil || active {
+			return hook.Result{}
+		}
+		attempts++
+		if onNudge != nil {
+			onNudge(attempts)
+		}
+		return hook.Result{Decision: "block", AdditionalContext: "目标仍未达成且没有活跃意图。请依据图谱换一条可执行路线或先获取缺失前置，并用 add_intent 提交；复测须说明新证据或新方法，不能只换词。局部缺凭据不阻塞其他路线；不要宣称任务完成。"}
+	})
 }

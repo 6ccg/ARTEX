@@ -549,9 +549,9 @@ func (s *Runtime) runConversation(c *db.Conversation, msg, busyKey string, userM
 // run ends (clearing busyKey). runConversation wraps it in a goroutine for the
 // fire-and-forget chat path; the P3 trigger queue calls it directly so it can wait
 // for completion before starting the next queued fire for the same agent.
-func (s *Runtime) runConversationSync(c *db.Conversation, msg, busyKey string) {
+func (s *Runtime) runConversationSync(c *db.Conversation, msg, busyKey string) bool {
 	ctx, cancel := s.conversationRunContext(c.ID, busyKey)
-	s.runConversationTurn(ctx, cancel, c, msg, busyKey)
+	return s.runConversationTurn(ctx, cancel, c, msg, busyKey)
 }
 
 // Register cancellation before returning 202, so an immediate stop/delete cannot
@@ -566,7 +566,7 @@ func (s *Runtime) conversationRunContext(id int64, busyKey string) (context.Cont
 	return ctx, cancel
 }
 
-func (s *Runtime) runConversationTurn(ctx context.Context, cancel context.CancelCauseFunc, c *db.Conversation, msg, busyKey string) {
+func (s *Runtime) runConversationTurn(ctx context.Context, cancel context.CancelCauseFunc, c *db.Conversation, msg, busyKey string) bool {
 	defer func() {
 		cancel(agent.AbortChatTurnFinished)
 		s.chatMu.Lock()
@@ -577,12 +577,18 @@ func (s *Runtime) runConversationTurn(ctx context.Context, cancel context.Cancel
 	// Only the first turn executes a historical retest. Follow-up conversation
 	// turns may explain the sealed result; the result tool refuses to overwrite it.
 	finishStatus, finishReason := "failed", "Agent 未能启动"
+	// Resolve before changing review or retest state so temporary configuration
+	// changes leave queued work retryable.
+	ca := s.resolveChatAgent(c)
+	if ca == nil {
+		return false
+	}
 	if c.AgentKey == "reporter" {
 		manualReview, err := s.isHistoricalFindingReview(c.ID)
 		if err != nil {
 			finishReason = err.Error()
 			_, _ = s.m.pg.Exec(`UPDATE finding_case_review_runs SET state='failed',error=$2 WHERE conversation_id=$1`, c.ID, finishReason)
-			return
+			return true
 		}
 		if manualReview {
 			ctx = agent.WithFindingCaseReview(ctx)
@@ -615,7 +621,7 @@ func (s *Runtime) runConversationTurn(ctx context.Context, cancel context.Cancel
 			if err := s.m.pg.FailPendingRetestForConversation(c.ID, "复测状态读取失败，请重新发起"); err != nil {
 				log.Printf("[conv %d] seal retest: %v", c.ID, err)
 			}
-			return
+			return true
 		}
 		if r != nil && r.Status == "pending" {
 			defer func() {
@@ -625,26 +631,20 @@ func (s *Runtime) runConversationTurn(ctx context.Context, cancel context.Cancel
 				s.finishRetest(r.ID, finishStatus, finishReason)
 			}()
 			if ctx.Err() != nil {
-				return
+				return true
 			}
 			started, err := s.m.pg.StartFindingRetest(ctx, r.ID)
 			if err != nil {
 				finishReason = err.Error()
-				return
+				return true
 			}
 			if !started {
-				return
+				return true
 			}
 		}
 	}
 	if ctx.Err() != nil {
-		return
-	}
-	// precedence: the conversation agent's own binding → this conversation's pin → global.
-	ca := s.resolveChatAgent(c)
-	if ca == nil {
-		finishReason = s.chatUnavailableReason()
-		return
+		return true
 	}
 	pg := s.m.pg
 	maxTurns := s.agentMaxTurns(c.AgentKey)
@@ -671,6 +671,7 @@ func (s *Runtime) runConversationTurn(ctx context.Context, cancel context.Cancel
 		finishStatus, finishReason = "completed", ""
 	}
 	_ = pg.TouchConversation(c.ID)
+	return true
 }
 
 // triggerBehavior is an agent's cached P3 trigger post-processing策略 (see the
@@ -727,10 +728,15 @@ func (s *Runtime) startTriggeredRun(agentKey, title, message string, taskID int6
 	if agentKey == "reporter" && strings.Contains(message, "update_finding_reproduction") {
 		message = normalizeReporterTriggerMessage(message)
 	}
+	item := triggeredRun{conversationID: conversationID, agentKey: agentKey, title: title, message: message, taskID: taskID, taskDesc: taskDesc, taskGoal: taskGoal, mergeable: mergeable}
+	if err := s.persistTrigger(&item); err != nil {
+		log.Printf("[trigger] persist failed: %v", err)
+		return false
+	}
 	cfg := s.readTriggerBehavior(agentKey) // DB read BEFORE the lock (never under queueMu)
 	s.queueMu.Lock()
 	s.triggerCfg[agentKey] = cfg
-	s.triggerQ[agentKey] = append(s.triggerQ[agentKey], triggeredRun{conversationID: conversationID, agentKey: agentKey, title: title, message: message, taskID: taskID, taskDesc: taskDesc, taskGoal: taskGoal, mergeable: mergeable})
+	s.triggerQ[agentKey] = append(s.triggerQ[agentKey], item)
 	s.pumpLocked(agentKey)
 	s.queueMu.Unlock()
 	return true
@@ -771,14 +777,17 @@ func (s *Runtime) pumpLocked(agentKey string) {
 // runAndPump runs one fire to completion, then decrements the active counter and
 // re-pumps to fill the freed slot (cleaning up the agent's maps when fully idle).
 func (s *Runtime) runAndPump(agentKey string, item triggeredRun) {
-	s.runTriggeredRun(item)
+	done := s.runTriggeredRun(&item)
 	s.queueMu.Lock()
+	if !done {
+		s.triggerQ[agentKey] = append([]triggeredRun{item}, s.triggerQ[agentKey]...)
+	}
 	s.triggerActive[agentKey]--
 	if s.triggerActive[agentKey] <= 0 && len(s.triggerQ[agentKey]) == 0 {
 		delete(s.triggerActive, agentKey)
 		delete(s.triggerQ, agentKey)
 		delete(s.triggerCfg, agentKey)
-	} else {
+	} else if done {
 		s.pumpLocked(agentKey)
 	}
 	s.queueMu.Unlock()
@@ -805,7 +814,13 @@ func (s *Runtime) nextTriggerRun(agentKey string, cfg triggerBehavior) triggered
 	}
 	if cfg.mergeMode == "all" && !hasManual {
 		s.triggerQ[agentKey] = q[:0:0]
-		return mergeAllRuns(q)
+		merged := mergeAllRuns(q)
+		if len(q) > 1 {
+			for _, it := range q {
+				merged.pendingIDs = append(merged.pendingIDs, it.pendingIDs...)
+			}
+		}
+		return merged
 	}
 	// by_task: head + same-task mergeable fires.
 	head := q[0]
@@ -823,7 +838,13 @@ func (s *Runtime) nextTriggerRun(agentKey string, cfg triggerBehavior) triggered
 		}
 	}
 	s.triggerQ[agentKey] = rest
-	return mergeTriggeredRuns(group)
+	merged := mergeTriggeredRuns(group)
+	if len(group) > 1 {
+		for _, it := range group {
+			merged.pendingIDs = append(merged.pendingIDs, it.pendingIDs...)
+		}
+	}
+	return merged
 }
 
 // taskContextHeader renders a task's description/goal once. Same-task fires share
@@ -926,40 +947,85 @@ func mergeAllRuns(items []triggeredRun) triggeredRun {
 // runTriggeredRun creates the conversation for one queued fire, records the human
 // turn, and runs it synchronously (blocks until the run ends). recover keeps a
 // panic from killing the drain loop and wedging the agent's queue.
-func (s *Runtime) runTriggeredRun(item triggeredRun) {
+func (s *Runtime) runTriggeredRun(item *triggeredRun) (done bool) {
+	reservedKey := ""
 	defer func() {
+		if reservedKey != "" {
+			s.chatMu.Lock()
+			delete(s.chatBusy, reservedKey)
+			s.chatMu.Unlock()
+		}
 		if r := recover(); r != nil {
+			log.Printf("[trigger] run for %s panicked: %v", item.agentKey, r)
 			if item.conversationID > 0 {
+				_, _ = s.m.pg.AppendConvActivity(item.conversationID, db.Activity{Worker: item.agentKey,
+					Kind: "text", IsError: true, Summary: "触发任务异常结束，请检查后重新发起", Detail: fmt.Sprint(r)})
 				_, _ = s.m.pg.Exec(`UPDATE finding_case_review_runs SET state='failed',error=$2 WHERE conversation_id=$1`, item.conversationID, fmt.Sprint(r))
 			}
-			log.Printf("[trigger] run for %s panicked: %v", item.agentKey, r)
+			// A panic is a failed attempt, not a temporarily unavailable provider.
+			// Replaying it at the head of a serial queue can repeat side effects forever.
+			done = s.deletePendingTrigger(item.pendingIDs) == nil
 		}
 	}()
-	pg := s.m.pg
-	var c *db.Conversation
-	var err error
-	if item.conversationID > 0 {
-		c, err = pg.GetConversation(item.conversationID)
-		_, _ = pg.Exec(`UPDATE finding_case_review_runs SET state='running' WHERE conversation_id=$1`, item.conversationID)
-	} else {
-		c, err = pg.CreateConversation(item.agentKey, firstLine(item.title, 60), nil)
-	}
-	if err != nil || c == nil {
-		if item.conversationID > 0 {
-			_, _ = pg.Exec(`UPDATE finding_case_review_runs SET state='failed',error='整理会话不可用' WHERE conversation_id=$1`, item.conversationID)
+	reserve := func(id int64) bool {
+		key := s.convBusyKey(id)
+		s.chatMu.Lock()
+		defer s.chatMu.Unlock()
+		if s.chatBusy[key] {
+			return false
 		}
-		log.Printf("[trigger] create conversation for %s failed: %v", item.agentKey, err)
-		return
+		s.chatBusy[key] = true
+		reservedKey = key
+		return true
 	}
-	msg := finalTriggerMessage(item) // prepend the task-context header for single (non-merged) fires
-	if _, err := pg.AppendConvActivity(c.ID, db.Activity{Worker: item.agentKey, Kind: "user", Summary: firstLine(msg, 200), Detail: msg}); err != nil {
-		log.Printf("[trigger] append msg failed: %v", err)
+	if serverContext(s).Err() != nil {
+		return false
 	}
-	busyKey := s.convBusyKey(c.ID)
-	s.chatMu.Lock()
-	s.chatBusy[busyKey] = true
-	s.chatMu.Unlock()
-	s.runConversationSync(c, msg, busyKey)
+	a, err := s.m.pg.GetAgentByKey(item.agentKey)
+	if err != nil {
+		return false
+	}
+	if a == nil {
+		return s.deletePendingTrigger(item.pendingIDs) == nil
+	}
+	if item.conversationID > 0 {
+		c, err := s.m.pg.GetConversation(item.conversationID)
+		if err != nil {
+			return false
+		}
+		if c == nil {
+			return s.deletePendingTrigger(item.pendingIDs) == nil
+		}
+		if !reserve(c.ID) {
+			return false
+		}
+	}
+	if s.resolveChatAgent(&db.Conversation{AgentKey: item.agentKey}) == nil {
+		return false
+	}
+	msg := finalTriggerMessage(*item)
+	c, err := s.bindPendingConversation(item, msg)
+	if err != nil || c == nil {
+		log.Printf("[trigger] bind conversation for %s failed: %v", item.agentKey, err)
+		return false
+	}
+	if reservedKey == "" && !reserve(c.ID) {
+		return false
+	}
+	if item.conversationID > 0 {
+		_, _ = s.m.pg.Exec(`UPDATE finding_case_review_runs SET state='running' WHERE conversation_id=$1`, item.conversationID)
+	}
+	busyKey := reservedKey
+	reservedKey = "" // runConversationTurn now owns releasing the reservation.
+	started := s.runConversationSync(c, msg, busyKey)
+	if !started || serverContext(s).Err() != nil {
+		return false
+	}
+	if err := s.deletePendingTrigger(item.pendingIDs); err != nil {
+		log.Printf("[trigger] delete pending: %v", err)
+		return false
+	}
+	return true
 }
 
 // firstLine returns a single-line, length-capped preview (shared with summaries).

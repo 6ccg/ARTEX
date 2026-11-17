@@ -501,13 +501,11 @@ func (s *Server) reviewFindingCases(w http.ResponseWriter, r *http.Request) {
 		taskContext := taskContexts[taskID]
 		raw, _ := json.Marshal(fids)
 		msg := fmt.Sprintf(findingCaseReviewTaskMessage, raw)
-		item := triggeredRun{agentKey: "reporter", title: "漏洞整理 · task#" + i64s(taskID), message: msg, taskID: taskID, taskDesc: taskContext.taskDesc, taskGoal: taskContext.taskGoal, conversationID: reservation.ConversationID}
-		cfg := s.readTriggerBehavior("reporter")
-		s.queueMu.Lock()
-		s.triggerCfg["reporter"] = cfg
-		s.triggerQ["reporter"] = append(s.triggerQ["reporter"], item)
-		s.pumpLocked("reporter")
-		s.queueMu.Unlock()
+		if !s.StartTriggeredRunWithConversation("reporter", "漏洞整理 · task#"+i64s(taskID), msg, taskID, false, taskContext.taskDesc, taskContext.taskGoal, reservation.ConversationID) {
+			_, _ = s.m.pg.Exec(`UPDATE finding_case_review_runs SET state='failed',error='整理任务入队失败' WHERE conversation_id=$1`, reservation.ConversationID)
+			writeErr(w, 503, "整理任务入队失败")
+			return
+		}
 		runs = append(runs, map[string]any{"conversation_id": reservation.ConversationID, "task_id": i64s(taskID)})
 	}
 	writeJSON(w, 202, map[string]any{"runs": runs})
