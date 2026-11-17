@@ -32,6 +32,7 @@ function fileSize(n: number) {
   return `${(n / 1024 ** 2).toFixed(1)} MiB`;
 }
 const isImage = (path: string) => /\.(png|jpe?g|webp|gif)$/i.test(path);
+const noExpandedDirectories: string[] = [];
 
 export function FilesTab({ task, active }: { task: Task; active: boolean }) {
   const { ui, liveUI, i18n } = useUITranslation();
@@ -41,10 +42,13 @@ export function FilesTab({ task, active }: { task: Task; active: boolean }) {
   const [mode, setMode] = React.useState<"tree" | "recent">("tree");
   const [listings, setListings] = React.useState<Record<string, TaskFileEntry[]>>({});
   const [expanded, setExpanded] = React.useState<string[]>([]);
+  const expandedDirectories = mode === "tree" ? expanded : noExpandedDirectories;
   const [summary, setSummary] = React.useState<TaskFileListing | null>(null);
+  const [rootMissing, setRootMissing] = React.useState(true);
   const [loading, setLoading] = React.useState(false);
   const [error, setError] = React.useState("");
   const [preview, setPreview] = React.useState<{ path: string; file?: WorkspaceFile; error?: string } | null>(null);
+  const listingRequest = React.useRef<AbortController | null>(null);
   const generation = React.useRef(0);
   const previewGeneration = React.useRef(0);
 
@@ -58,21 +62,31 @@ export function FilesTab({ task, active }: { task: Task; active: boolean }) {
 
   const refresh = React.useCallback(async () => {
     const seq = ++generation.current;
+    listingRequest.current?.abort();
+    const controller = new AbortController();
+    listingRequest.current = controller;
     setLoading(true);
     try {
-      const [all, ...dirs] = await Promise.all([
-        api.taskFilesAll(task.id),
-        ...["", ...expanded].map(async (path) => {
+      if (mode === "recent") {
+        const all = await api.taskFilesAll(task.id, controller.signal);
+        if (generation.current !== seq) return;
+        setSummary(all);
+        setRootMissing(all.missing ?? false);
+        setError("");
+        return;
+      }
+      const dirs = await Promise.all(
+        ["", ...expandedDirectories].map(async (path) => {
           try {
-            return { path, result: await api.taskFiles(task.id, path) };
+            return { path, result: await api.taskFiles(task.id, path, controller.signal) };
           } catch (err) {
             if (path === "") throw err;
             return { path, result: null };
           }
         }),
-      ]);
+      );
       if (generation.current !== seq) return;
-      setSummary(all);
+      setRootMissing(dirs[0].result?.missing ?? false);
       setListings(Object.fromEntries(dirs.filter((d) => d.result).map((d) => [d.path, d.result?.entries ?? []])));
       setError(dirs.some((d) => !d.result) ? liveUI("taskFiles.pathGone") : "");
     } catch (err) {
@@ -80,20 +94,22 @@ export function FilesTab({ task, active }: { task: Task; active: boolean }) {
     } finally {
       if (generation.current === seq) setLoading(false);
     }
-  }, [task.id, expanded, liveUI, message]);
+  }, [task.id, mode, expandedDirectories, liveUI, message]);
 
   React.useEffect(() => {
     if (!active) return;
     void refresh();
     return () => {
       generation.current++;
+      listingRequest.current?.abort();
     };
   }, [active, refresh]);
 
   React.useEffect(() => {
     if (!active || task.status !== "running" || task.paused) return;
-    return startPolling(refresh, 5000, 5000);
-  }, [active, task.status, task.paused, refresh]);
+    const interval = mode === "recent" ? 30_000 : 5000;
+    return startPolling(refresh, interval, interval);
+  }, [active, mode, task.status, task.paused, refresh]);
 
   const openPreview = React.useCallback(
     async (path: string) => {
@@ -171,13 +187,13 @@ export function FilesTab({ task, active }: { task: Task; active: boolean }) {
           {ui("taskFiles.recent")}
         </Button>
         <span className="mr-auto text-muted-foreground text-sm">
-          {summary && ui("taskFiles.summary", { count: summary.total, size: fileSize(summary.size) })}
+          {mode === "recent" && summary && ui("taskFiles.summary", { count: summary.total, size: fileSize(summary.size) })}
         </span>
         <Button variant="outline" disabled={loading} onClick={() => void refresh()}>
           <RefreshCwIcon />
           {ui("taskFiles.refresh")}
         </Button>
-        <Button variant="outline" disabled={summary?.missing ?? true} onClick={() => download("", true)}>
+        <Button variant="outline" disabled={rootMissing} onClick={() => download("", true)}>
           <DownloadIcon />
           {ui("taskFiles.archiveAll")}
         </Button>

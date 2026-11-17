@@ -1036,15 +1036,8 @@ func (s *ExplorationStore) NodesByIDs(ids []int64) ([]*Node, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
-	args := make([]any, 0, len(ids)+1)
-	args = append(args, s.expID)
-	marks := make([]string, 0, len(ids))
-	for _, id := range ids {
-		args = append(args, id)
-		marks = append(marks, "$"+fmt.Sprint(len(args)))
-	}
 	rows, err := s.db.Query(`SELECT `+nodeCols+` FROM exploration_nodes
-WHERE exploration_id=$1 AND id IN (`+strings.Join(marks, ",")+`) ORDER BY id`, args...)
+WHERE exploration_id=$1 AND id=ANY($2::bigint[]) ORDER BY id`, s.expID, ids)
 	if err != nil {
 		return nil, err
 	}
