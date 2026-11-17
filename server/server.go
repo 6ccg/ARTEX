@@ -44,7 +44,7 @@ type Server struct {
 	lastCPUAt  time.Time
 
 	mcpStoreOverride mcpStore
-	mcpCreateMu sync.Mutex
+	mcpCreateMu      sync.Mutex
 }
 
 // NewHandler adapts an existing runtime to HTTP. It does not start runtime work.
