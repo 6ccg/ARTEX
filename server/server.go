@@ -485,30 +485,18 @@ func (s *Server) stats(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, out) // no task selected: only global fields
 		return
 	}
-	out["llm_configured"] = s.engine.ReadyFor(t)
+	ready := s.engine.ReadyFor(t)
+	out["llm_configured"] = ready
 
-	st, _ := t.Store.Stats()
-	out["exploration"] = st
+	metrics, _ := t.Store.RuntimeStats()
+	out["exploration"] = metrics.Nodes
 
 	// per-task running state + heartbeat (distinct from "LLM configured").
-	intents, _ := t.Store.ListByKind(db.KindIntent, 100000)
-	inFlight := 0
-	for _, in := range intents {
-		if in.State == "running" {
-			inFlight++
-		}
-	}
-	goals, _ := t.Store.ListByKind(db.KindGoal, 10000)
-	goalsMet := 0
-	for _, g := range goals {
-		if g.State == "met" {
-			goalsMet++
-		}
-	}
+	inFlight := metrics.RunningIntents
 	last := s.engine.LastActivity(t.ID)
 	paused := s.engine.IsPaused(t.ID)
 	activeCalls := s.engine.ActiveLLMCalls(t.ID)
-	running := s.engine.ReadyFor(t) && s.engine.Started(t.ID) && !paused
+	running := ready && s.engine.Started(t.ID) && !paused
 	// A live event-driven engine with no work is healthy idle. Only a persisted
 	// running intent without any corresponding LLM call can be considered stalled.
 	stalled := running && activeCalls == 0 && inFlight > 0 && last > 0 && time.Now().Unix()-last > 120
@@ -534,8 +522,8 @@ func (s *Server) stats(w http.ResponseWriter, r *http.Request) {
 		"llm_in_flight": activeCalls,
 		"last_activity": last,
 		"stalled":       stalled,
-		"goals_total":   len(goals),
-		"goals_met":     goalsMet,
+		"goals_total":   metrics.Goals.Total,
+		"goals_met":     metrics.Goals.Met,
 	}
 	writeJSON(w, 200, out)
 }
@@ -2967,6 +2955,9 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+	}
+	if req.Workers != nil || req.WorkerPools != nil {
+		s.engine.RefreshInheritedWorkers()
 	}
 	if req.ConcurrencyEnabled != nil || req.ConcurrencyLimit != nil {
 		// 部分 PUT:未给的字段用当前值兜底,避免只改一个把另一个重置。

@@ -1289,6 +1289,57 @@ WHERE id=$2 AND exploration_id=$3 AND kind='intent' AND state='open'`, owner, id
 	return n == 1, nil
 }
 
+// ClaimNextIntent selects and claims one available intent in a single round trip.
+// Skip rows being claimed by another transaction instead of loading and retrying
+// the same frontier in every worker. Priority and FIFO order match Frontier.
+func (s *ExplorationStore) ClaimNextIntent(owner string) (*Node, error) {
+	node, err := scanNode(s.db.QueryRow(`UPDATE exploration_nodes SET state='running', owner=$1
+WHERE id=(SELECT id FROM exploration_nodes
+ WHERE exploration_id=$2 AND kind='intent' AND state='open'
+ ORDER BY priority DESC,id ASC LIMIT 1 FOR UPDATE SKIP LOCKED)
+RETURNING `+nodeCols, owner, s.expID))
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	return node, err
+}
+
+type ExplorationRuntimeStats struct {
+	Nodes          map[string]int
+	RunningIntents int
+	Goals          GoalCounts
+}
+
+// RuntimeStats counts on the server without transferring node payloads just to
+// count their states. A single snapshot also keeps the dashboard totals aligned.
+func (s *ExplorationStore) RuntimeStats() (ExplorationRuntimeStats, error) {
+	out := ExplorationRuntimeStats{Nodes: map[string]int{}}
+	rows, err := s.db.Query(`SELECT kind,state,count(*) FROM exploration_nodes
+WHERE exploration_id=$1 GROUP BY kind,state`, s.expID)
+	if err != nil {
+		return out, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var kind, state string
+		var count int
+		if err := rows.Scan(&kind, &state, &count); err != nil {
+			return out, err
+		}
+		out.Nodes[kind] += count
+		if kind == KindIntent && state == "running" {
+			out.RunningIntents += count
+		}
+		if kind == KindGoal {
+			out.Goals.Total += count
+			if state == "met" {
+				out.Goals.Met += count
+			}
+		}
+	}
+	return out, rows.Err()
+}
+
 // Stats returns node counts grouped by kind (for dashboard).
 func (s *ExplorationStore) Stats() (map[string]int, error) {
 	rows, err := s.db.Query(`SELECT kind, count(*) FROM exploration_nodes WHERE exploration_id=$1 GROUP BY kind`, s.expID)

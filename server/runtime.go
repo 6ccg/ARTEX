@@ -515,7 +515,7 @@ func (s *Runtime) settingsPayload() map[string]any {
 		"show_egress_ip":                      s.m.pg.GetBool(settingShowEgressIP, false),
 		"egress_probe_url":                    s.m.EgressProbeURL(),
 		"python_interpreter":                  strings.TrimSpace(pyStored), // 用户/自动设的值(空=用运行时检测)
-		"workers":                             s.m.Workers(),               // 并发工作 agent 数(默认3)；对之后启动的任务生效
+		"workers":                             s.m.Workers(),               // 每任务默认工作并发；保存后同步跟随全局的运行中任务
 		"worker_pools":                        s.m.WorkerPools(),           // 非空时按池顺序绑定 worker 会话
 		"task_concurrency_enabled":            concOn,                      // 任务并发上限开关(默认关)
 		"task_concurrency_limit":              concLimit,                   // 同时运行任务上限(开启后默认5)

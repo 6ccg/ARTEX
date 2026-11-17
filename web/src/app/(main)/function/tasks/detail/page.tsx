@@ -10,6 +10,7 @@ import { toast } from "sonner";
 import { IntelligencePanel } from "@/components/intelligence-panel";
 import { StatusBadge } from "@/components/status-badge";
 import { TaskLLMProfileChain } from "@/components/task-llm-profile-chain";
+import { TaskWorkerCountControl } from "@/components/task-worker-count-control";
 import { TrafficHistory } from "@/components/traffic-history";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import {
@@ -397,6 +398,10 @@ function TaskDetailInner() {
           </code>
           <Separator orientation="vertical" className="mx-1 hidden h-4 sm:block" />
           <TaskLLMControl task={task} profiles={profiles} onUpdated={load} />
+          <TaskWorkerCountControl task={task} onUpdated={(updated) => {
+            setTask((current) => current ? { ...current, worker_count: updated.worker_count } : updated);
+            void load();
+          }} />
           <StatusBadge
             stopReason={task.stop_reason}
             domain={terminal ? "task" : "engine"}

@@ -1527,12 +1527,14 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     const namePresent = has("name") && b.name !== null;
     const remarkPresent = has("remark") && b.remark !== null;
     const pinnedPresent = has("pinned") && b.pinned !== null;
-    if (!namePresent && !remarkPresent && !pinnedPresent && !sharingPresent)
-      throw new Error("至少需要提供 name、pinned、remark 或 share_global_assets");
+    const workerCountPresent = has("worker_count") && b.worker_count !== null;
+    if (!namePresent && !remarkPresent && !pinnedPresent && !sharingPresent && !workerCountPresent)
+      throw new Error("至少需要提供 name、pinned、remark、share_global_assets 或 worker_count");
     let nextName = task.name;
     let nextRemark = task.remark;
     let nextPinned = task.pinned;
     let nextPinnedAt = task.pinned_at;
+    const nextWorkerCount = workerCountPresent ? mockWorkerCount(b.worker_count) : task.worker_count;
     if (namePresent) {
       const name = (b.name as string).trim();
       if (!name) throw new Error("任务名称不能为空");
@@ -1546,6 +1548,7 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
       nextPinnedAt = pinned ? (task.pinned_at ?? new Date().toISOString()) : null;
     }
     if (sharingPresent) task.share_global_assets = b.share_global_assets as boolean;
+    if (workerCountPresent) task.worker_count = nextWorkerCount;
     task.name = nextName;
     task.remark = nextRemark;
     task.pinned = nextPinned;

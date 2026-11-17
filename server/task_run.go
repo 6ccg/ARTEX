@@ -38,6 +38,11 @@ type taskRun struct {
 	slotsMu   sync.Mutex
 	slots     map[string]slotAvailability
 	slotPlans map[string]int64
+
+	// workerPlan is desired capacity; workerLoops also includes draining slots.
+	workersMu   sync.Mutex
+	workerPlan  map[string]WorkerSlot
+	workerLoops map[string]bool
 }
 
 func (e *Engine) taskRun(taskID string) *taskRun {
