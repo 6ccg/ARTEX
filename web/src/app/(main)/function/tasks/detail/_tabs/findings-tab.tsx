@@ -1,4 +1,5 @@
 "use client";
+import { startPolling } from "@/hooks/use-polling";
 import * as React from "react";
 
 import Link from "next/link";
@@ -162,7 +163,7 @@ export function FindingsTab({ taskId }: { taskId: string }) {
   React.useEffect(() => {
     let active = true;
     const load = () => {
-      api
+      return api
         .findings(taskId)
         .then((fs) => {
           if (active) setFindings(fs);
@@ -171,11 +172,10 @@ export function FindingsTab({ taskId }: { taskId: string }) {
           // Keep the last successful snapshot during transient refresh failures.
         });
     };
-    load();
-    const t = setInterval(load, 3000);
+    const stopPolling = startPolling(load, 3000);
     return () => {
       active = false;
-      clearInterval(t);
+      stopPolling();
     };
   }, [taskId]);
 

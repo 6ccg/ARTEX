@@ -2,6 +2,8 @@
 
 import * as React from "react";
 
+import Link from "next/link";
+
 import {
   CameraIcon,
   CpuIcon,
@@ -27,7 +29,7 @@ import { matchesSettingsQuery } from "@/i18n/settings-search";
 import { useLiveTranslation } from "@/i18n/use-live-translation";
 import { api } from "@/lib/api";
 import { CHAT_SEND_MODE_OPTIONS, type ChatSendMode, setChatSendMode, useChatSendMode } from "@/lib/chat-send-mode";
-import type { EgressReport, LLMProfile, ProxyPoolEntry, Settings, WorkerPool } from "@/lib/types";
+import type { EgressReport, ProxyPoolEntry, Settings, WorkerPool } from "@/lib/types";
 
 import { useEgressIp } from "../../_components/egress-ip-banner";
 import { BasicAuthCard } from "./_components/basic-auth-card";
@@ -109,7 +111,6 @@ export default function SystemSettingsPage() {
   const [workers, setWorkers] = React.useState("3");
   const [savingWorkers, setSavingWorkers] = React.useState(false);
   const [workerPools, setWorkerPools] = React.useState<WorkerPool[]>([]);
-  const [llmProfiles, setLlmProfiles] = React.useState<LLMProfile[]>([]);
   // 操作约束注入范围(默认都开)。
   const [injectPlanner, setInjectPlanner] = React.useState(true);
   const [injectWorker, setInjectWorker] = React.useState(true);
@@ -172,56 +173,18 @@ export default function SystemSettingsPage() {
       toast.error(t("settings.workerConfigLoadFailed"));
       return;
     }
+    if (savingWorkers || workerPools.length > 0) return;
     const n = Number(workers);
-    if (workerPools.length > 0) {
-      const total = workerPools.reduce((sum, pool) => sum + Number(pool.workers), 0);
-      if (workerPools.some((pool) => !pool.profile_id)) {
-        toast.error(t("settings.choosePoolProfile"));
-        return;
-      }
-      if (workerPools.some((pool) => !Number.isInteger(Number(pool.workers)) || Number(pool.workers) <= 0)) {
-        toast.error(t("settings.positivePoolWorkers"));
-        return;
-      }
-      if (total > 50) {
-        toast.error(t("settings.workerLimit"));
-        return;
-      }
-      const ids = workerPools.map((pool) => pool.profile_id);
-      if (new Set(ids).size !== ids.length) {
-        toast.error(t("settings.duplicatePoolProfile"));
-        return;
-      }
-      setSavingWorkers(true);
-      api
-        .setSettings({
-          workers: total,
-          worker_pools: workerPools.map((pool) => ({ ...pool, workers: Number(pool.workers) })),
-        })
-        .then((s) => {
-          apply(s);
-          toast.success(t("settings.workerPoolsSaved"));
-        })
-        .catch((e) => toast.error(t("settings.saveFailed", { message: localizedError(e, t) })))
-        .finally(() => setSavingWorkers(false));
-      return;
-    }
     if (!Number.isInteger(n) || n <= 0) {
       toast.error(t("settings.positiveConcurrency"));
       return;
     }
     setSavingWorkers(true);
-    api
-      .setSettings({ workers: n, worker_pools: [] })
-      .then((s) => {
-        apply(s);
-        toast.success(t("settings.workersSaved"));
-      })
-      .catch((e) => toast.error(t("settings.saveFailedPrefix") + localizedError(e, t)))
+    api.setSettings({ workers: n })
+      .then((settings) => { apply(settings); toast.success(t("settings.workersSaved")); })
+      .catch((error) => toast.error(t("settings.saveFailedPrefix") + localizedError(error, t)))
       .finally(() => setSavingWorkers(false));
   };
-
-  const addWorkerPool = () => setWorkerPools((pools) => [...pools, { profile_id: "", workers: 1 }]);
 
   const savePython = () => {
     setSaving(true);
@@ -264,13 +227,6 @@ export default function SystemSettingsPage() {
       })
       .finally(() => setLoaded(true));
   }, [apply, liveT]);
-
-  React.useEffect(() => {
-    api
-      .llmProfiles()
-      .then(setLlmProfiles)
-      .catch(() => setLlmProfiles([]));
-  }, []);
 
   const toggleTraffic = (v: boolean) => {
     setTrafficCapture(v); // optimistic
@@ -1836,94 +1792,6 @@ export default function SystemSettingsPage() {
                 </CardDescription>
               </CardHeader>
               <CardContent className="flex flex-col gap-3">
-                <div className="flex flex-col gap-2 rounded-md border p-3">
-                  <div className="flex items-center justify-between">
-                    <Label className="text-sm">{t("settings.workerPools")}</Label>
-                    <Button
-                      variant="outline"
-                      size="sm"
-                      onClick={addWorkerPool}
-                      disabled={!loaded || !settingsLoaded || savingWorkers}
-                    >
-                      {t("settings.addPool")}
-                    </Button>
-                  </div>
-                  {workerPools.map((pool, index) => {
-                    const selected = llmProfiles.find((profile) => profile.id === pool.profile_id);
-                    const placeholder =
-                      selected?.name ||
-                      (pool.profile_id
-                        ? t("settings.unavailableProfile", { id: pool.profile_id })
-                        : t("settings.chooseProfile"));
-                    return (
-                      // biome-ignore lint/suspicious/noArrayIndexKey: pool rows are edited in place and only deleted.
-                      <div className="flex items-center gap-2" key={`${pool.profile_id}-${index}`}>
-                        <Select
-                          value={pool.profile_id || undefined}
-                          disabled={!settingsLoaded || savingWorkers}
-                          onValueChange={(value) =>
-                            setWorkerPools((current) =>
-                              current.map((item, itemIndex) =>
-                                itemIndex === index ? { ...item, profile_id: value } : item,
-                              ),
-                            )
-                          }
-                        >
-                          <SelectTrigger className="min-w-0 flex-1">
-                            <SelectValue placeholder={placeholder} />
-                          </SelectTrigger>
-                          <SelectContent>
-                            {!selected && pool.profile_id ? (
-                              <SelectItem value={pool.profile_id}>
-                                {t("settings.profilePrefix")}
-                                {pool.profile_id}
-                                {t("settings.profileUnavailableSuffix")}
-                              </SelectItem>
-                            ) : null}
-                            {llmProfiles
-                              .filter((profile) => profile.format !== "jev")
-                              .map((profile) => (
-                                <SelectItem key={profile.id} value={profile.id}>
-                                  {profile.name} · {profile.model}
-                                </SelectItem>
-                              ))}
-                          </SelectContent>
-                        </Select>
-                        <Input
-                          type="number"
-                          min={1}
-                          className="w-24 font-mono text-sm"
-                          value={pool.workers}
-                          disabled={!settingsLoaded || savingWorkers}
-                          onChange={(event) =>
-                            setWorkerPools((current) =>
-                              current.map((item, itemIndex) =>
-                                itemIndex === index ? { ...item, workers: Number(event.target.value) } : item,
-                              ),
-                            )
-                          }
-                        />
-                        <Button
-                          variant="ghost"
-                          size="sm"
-                          disabled={!settingsLoaded || savingWorkers}
-                          onClick={() =>
-                            setWorkerPools((current) => current.filter((_, itemIndex) => itemIndex !== index))
-                          }
-                        >
-                          {t("settings.delete")}
-                        </Button>
-                      </div>
-                    );
-                  })}
-                  {workerPools.length > 0 ? (
-                    <div className="text-muted-foreground text-sm">
-                      {t("settings.workerTotal", {
-                        count: workerPools.reduce((sum, pool) => sum + (Number(pool.workers) || 0), 0),
-                      })}
-                    </div>
-                  ) : null}
-                </div>
                 <div className="flex items-center gap-2">
                   <Input
                     type="number"
@@ -1931,16 +1799,18 @@ export default function SystemSettingsPage() {
                     className="w-32 font-mono text-sm"
                     placeholder="3"
                     value={workers}
-                    disabled={!loaded || !settingsLoaded || savingWorkers || workerPools.length > 0}
+                    disabled={!loaded || !settingsLoaded || savingWorkers}
+                    readOnly={workerPools.length > 0}
                     onChange={(e) => setWorkers(e.target.value)}
                   />
                   {workerPools.length > 0 ? (
-                    <span className="text-muted-foreground text-xs">{t("settings.poolConcurrencyHelp")}</span>
+                    <Link href="/system/llm/#worker-pools" className="text-xs underline">{t("settings.openLLMWorkerPools")}</Link>
                   ) : null}
-                  <Button onClick={saveWorkers} disabled={!loaded || !settingsLoaded || savingWorkers}>
+                  <Button onClick={saveWorkers} disabled={!loaded || !settingsLoaded || savingWorkers || workerPools.length > 0}>
                     {t("settings.save")}
                   </Button>
                 </div>
+                {workerPools.length > 0 ? <p className="text-muted-foreground text-xs">{t("settings.poolManagedInLLM")}</p> : null}
                 {!settingsLoaded && loaded ? (
                   <p className="text-destructive text-xs">{t("settings.workerConfigLockedHelp")}</p>
                 ) : null}

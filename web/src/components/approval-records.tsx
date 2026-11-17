@@ -1,4 +1,5 @@
 "use client";
+import { startPolling } from "@/hooks/use-polling";
 import * as React from "react";
 
 import {
@@ -968,11 +969,10 @@ export function ApprovalRecords({ taskId }: { taskId?: string }) {
   latestLoad.current = load;
 
   React.useEffect(() => {
-    void load();
-    const timer = setInterval(() => void load(), 5000);
+    const stopPolling = startPolling(load, 5000);
     return () => {
       request.current++;
-      clearInterval(timer);
+      stopPolling();
     };
   }, [load]);
 

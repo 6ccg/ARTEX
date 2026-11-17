@@ -1,3 +1,4 @@
+import type { ConversationListPage, ConversationListQuery } from "./types";
 // Real backend client. /api/* is proxied to the Go backend (next.config rewrites).
 // Returns the domain types in lib/types.ts. Shapes match the backend handlers;
 // a few fields the backend serializes differently (e.g. created_at as a unix int)
@@ -25,6 +26,7 @@ import type {
   CompanyScopeMutation,
   CompanyScopeRule,
   Conversation,
+  ConversationStats,
   ConvTokenSummary,
   CoverageAssetRefs,
   CoverageGraphData,
@@ -483,7 +485,13 @@ export const api = {
   taskCategories: () => get<{ categories: TaskCategory[] }>("/task-categories").then((r) => arr(r.categories)),
   updateTask: (
     id: string,
-    input: { name?: string; pinned?: boolean; remark?: string; share_global_assets?: boolean },
+    input: {
+      name?: string;
+      pinned?: boolean;
+      remark?: string;
+      share_global_assets?: boolean;
+      worker_count?: number;
+    },
   ) => patch<Task>(`/tasks/${id}`, input),
   renameTask: (id: string, name: string) => patch<Task>(`/tasks/${id}`, { name }),
   pinTask: (id: string, pinned: boolean) => patch<Task>(`/tasks/${id}`, { pinned }),
@@ -996,7 +1004,24 @@ export const api = {
     get<ConvTokenSummary[]>("/tokens/conversations")
       .then(arr)
       .catch(() => [] as ConvTokenSummary[]),
-  explorationGraph: (task?: string) => get<{ nodes: TaskNode[]; edges: Edge[] }>(`/exploration/graph${tq(task)}`),
+  explorationGraph: async (task?: string) => {
+    const nodes: TaskNode[] = [];
+    const edges = new Map<string, Edge>();
+    let cursor = 0;
+    for (;;) {
+      const query = new URLSearchParams({ after: String(cursor), limit: "500" });
+      if (task) query.set("task", task);
+      const page = await get<{ nodes: TaskNode[]; edges: Edge[]; next_cursor: number; has_more: boolean }>(
+        `/exploration/graph?${query}`,
+      );
+      nodes.push(...(page.nodes ?? []));
+      for (const edge of page.edges ?? []) edges.set(`${edge.src}:${edge.rel}:${edge.dst}`, edge);
+      if (!page.has_more) break;
+      if (page.next_cursor <= cursor) throw new Error("Graph cursor did not advance");
+      cursor = page.next_cursor;
+    }
+    return { nodes, edges: [...edges.values()] };
+  },
   // 播报板:服务端按创建顺序分页的探索节点(默认最新在前)。
   explorationNodes: (task: string, query: ExplorationNodeQuery = {}) => {
     const q = new URLSearchParams();
@@ -1087,6 +1112,8 @@ export const api = {
       respMax?: string;
       sort?: string;
       order?: string;
+      view?: "routes" | "requests";
+      route?: string;
     } = {},
   ) =>
     get<TrafficResp>(
@@ -1101,7 +1128,9 @@ export const api = {
         (opts.respMin ? `&resp_min=${encodeURIComponent(opts.respMin)}` : "") +
         (opts.respMax ? `&resp_max=${encodeURIComponent(opts.respMax)}` : "") +
         (opts.sort ? `&sort=${encodeURIComponent(opts.sort)}` : "") +
-        (opts.order ? `&order=${encodeURIComponent(opts.order)}` : ""),
+        (opts.order ? `&order=${encodeURIComponent(opts.order)}` : "") +
+        (opts.view ? `&view=${opts.view}` : "") +
+        (opts.route ? `&route=${encodeURIComponent(opts.route)}` : ""),
     ),
   trafficExchange: (id: string) => get<TrafficDetail>(`/traffic/exchange?id=${encodeURIComponent(id)}`),
   trafficHosts: (taskId?: string) =>
@@ -1389,7 +1418,15 @@ export const api = {
   deleteAgent: (key: string) => del<{ deleted: string }>(`/agents/${key}`),
 
   // ---- conversations (chat page) ----
-  conversations: () => get<{ conversations: Conversation[] }>("/conversations").then((r) => arr(r.conversations)),
+  conversations: (options: ConversationListQuery = {}) =>
+    get<ConversationListPage>(
+      `/conversations?${new URLSearchParams(Object.entries(options).map(([key, value]) => [key, String(value)]))}`,
+    ),
+  conversationIDs: (options: ConversationListQuery) =>
+    get<{ ids: number[] }>(
+      `/conversations?${new URLSearchParams([...Object.entries(options).map(([key, value]) => [key, String(value)]), ["view", "ids"]])}`,
+    ).then((page) => page.ids),
+  getConversation: (id: number) => get<Conversation>(`/conversations/${id}`),
   createConversation: (agent_key: string, title = "", llm_profile_id?: number | null) =>
     post<Conversation>("/conversations", { agent_key, title, llm_profile_id: llm_profile_id ?? null }),
   updateConversation: (id: number, input: { title?: string; pinned?: boolean }) =>
@@ -1403,17 +1440,23 @@ export const api = {
     post<{ items: { id: number; ok: boolean; error?: string }[] }>("/conversations/delete/batch", { ids }),
   // Incremental tail: steps after `since` (id ASC) — live poll + post-send fetch.
   conversationMessages: (id: number, since = 0) =>
-    get<{ items: Activity[]; cursor: number; running: boolean }>(`/conversations/${id}/messages?since=${since}`).then(
-      (r) => ({ items: arr(r.items), cursor: r.cursor ?? 0, running: !!r.running }),
-    ),
+    get<{ items: Activity[]; cursor: number; running: boolean; stats?: ConversationStats }>(
+      `/conversations/${id}/messages?since=${since}`,
+    ).then((r) => ({ items: arr(r.items), cursor: r.cursor ?? 0, running: !!r.running, stats: r.stats })),
   // Reverse pagination: the latest `limit` steps (before=0) or the page of older
   // steps ending before id `before`. hasMore = still-older steps exist.
   conversationHistory: (id: number, before = 0, limit = 200) => {
     const q = new URLSearchParams({ limit: String(limit) });
     if (before > 0) q.set("before", String(before));
-    return get<{ items: Activity[]; cursor: number; running: boolean; hasMore: boolean }>(
+    return get<{ items: Activity[]; cursor: number; running: boolean; hasMore: boolean; stats?: ConversationStats }>(
       `/conversations/${id}/messages?${q.toString()}`,
-    ).then((r) => ({ items: arr(r.items), cursor: r.cursor ?? 0, running: !!r.running, hasMore: !!r.hasMore }));
+    ).then((r) => ({
+      items: arr(r.items),
+      cursor: r.cursor ?? 0,
+      running: !!r.running,
+      hasMore: !!r.hasMore,
+      stats: r.stats,
+    }));
   },
   conversationMsgDetail: (id: number, seq: number) =>
     get<{ detail: string }>(`/conversations/${id}/messages/${seq}`).then((r) => r.detail ?? ""),

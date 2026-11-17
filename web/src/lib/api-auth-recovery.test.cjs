@@ -12,30 +12,56 @@ const compiled = ts.transpileModule(fs.readFileSync(path.join(__dirname, "api.ts
 function client(fetch) {
   const exports = {};
   const state = { token: "original-admin-token", reloads: 0, requests: [], streams: [] };
-  const location = { href: "http://localhost/function/tasks/?page=2", hostname: "localhost", reload: () => state.reloads++ };
+  const location = {
+    href: "http://localhost/function/tasks/?page=2",
+    hostname: "localhost",
+    reload: () => state.reloads++,
+  };
   const document = { cookie: "artex_token=original-admin-token" };
   class EventSource {
-    constructor(url, options) { this.url = url; this.options = options; this.listeners = {}; state.streams.push(this); }
-    addEventListener(name, listener) { this.listeners[name] = listener; }
+    constructor(url, options) {
+      this.url = url;
+      this.options = options;
+      this.listeners = {};
+      state.streams.push(this);
+    }
+    addEventListener(name, listener) {
+      this.listeners[name] = listener;
+    }
   }
   vm.runInNewContext(compiled, {
-    exports, URL, URLSearchParams, FormData, EventSource,
+    exports,
+    URL,
+    URLSearchParams,
+    FormData,
+    EventSource,
     process: { env: { NODE_ENV: "production" } },
-    window: { location }, document,
-    localStorage: { getItem: () => state.token, removeItem: () => { state.token = null; } },
+    window: { location },
+    document,
+    localStorage: {
+      getItem: () => state.token,
+      removeItem: () => {
+        state.token = null;
+      },
+    },
     require: (id) => {
       if (id === "@/lib/mock/enabled") return { MOCK: false };
       if (id === "@/lib/mock/handler") return { mockHandle: () => assert.fail("unexpected mock request") };
       throw new Error(`Unexpected import: ${id}`);
     },
-    fetch: async (...args) => { state.requests.push(args); return fetch(...args); },
+    fetch: async (...args) => {
+      state.requests.push(args);
+      return fetch(...args);
+    },
   });
   return { ...exports, state, location, document };
 }
 
-const gateFailure = () => new Response('{"error":"请先完成 HTTP Basic Auth 验证","code":"basic_auth_required"}', {
-  status: 401, headers: { "X-Artex-Auth": "basic" },
-});
+const gateFailure = () =>
+  new Response('{"error":"请先完成 HTTP Basic Auth 验证","code":"basic_auth_required"}', {
+    status: 401,
+    headers: { "X-Artex-Auth": "basic" },
+  });
 
 function assertSessionPreserved(c) {
   assert.equal(c.state.token, "original-admin-token");
@@ -53,8 +79,13 @@ test("expired Basic gate reloads the current tab and preserves the admin session
 
 test("concurrent gate failures reload once and stop new polling requests", async () => {
   let release;
-  const pending = new Promise((resolve) => { release = resolve; });
-  const c = client(async () => { await pending; return gateFailure(); });
+  const pending = new Promise((resolve) => {
+    release = resolve;
+  });
+  const c = client(async () => {
+    await pending;
+    return gateFailure();
+  });
   const requests = [c.http("/version"), c.http("/tasks"), c.http("/settings")];
   release();
   const results = await Promise.allSettled(requests);
@@ -67,9 +98,14 @@ test("concurrent gate failures reload once and stop new polling requests", async
 
 test("a late admin 401 cannot clear the token once gate recovery has started", async () => {
   let release;
-  const late = new Promise((resolve) => { release = resolve; });
+  const late = new Promise((resolve) => {
+    release = resolve;
+  });
   const c = client(async (url) => {
-    if (url === "/api/tasks") { await late; return new Response("expired", { status: 401 }); }
+    if (url === "/api/tasks") {
+      await late;
+      return new Response("expired", { status: 401 });
+    }
     return gateFailure();
   });
   const staleRequest = c.http("/tasks");
@@ -132,7 +168,9 @@ test("SSE failures probe the same-origin gate once for concurrent streams", asyn
 test("ordinary SSE disconnects and network errors do not reload the page", async () => {
   for (const fetch of [
     async () => new Response('{"initialized":true}'),
-    async () => { throw new TypeError("network unavailable"); },
+    async () => {
+      throw new TypeError("network unavailable");
+    },
   ]) {
     const c = client(fetch);
     const source = c.openSSE("/api/logs/stream");

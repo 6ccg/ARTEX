@@ -33,6 +33,7 @@ import type {
   TaskTemplate,
   TrafficEvidenceRole,
   TrafficEvidenceSnapshot,
+  TrafficRouteGroup,
 } from "../types";
 import { MAX_TASK_REMARK_RUNES, MAX_TASK_WORKER_COUNT } from "../types";
 import * as D from "./data";
@@ -1527,12 +1528,14 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     const namePresent = has("name") && b.name !== null;
     const remarkPresent = has("remark") && b.remark !== null;
     const pinnedPresent = has("pinned") && b.pinned !== null;
-    if (!namePresent && !remarkPresent && !pinnedPresent && !sharingPresent)
-      throw new Error("至少需要提供 name、pinned、remark 或 share_global_assets");
+    const workerCountPresent = has("worker_count") && b.worker_count !== null;
+    if (!namePresent && !remarkPresent && !pinnedPresent && !sharingPresent && !workerCountPresent)
+      throw new Error("至少需要提供 name、pinned、remark、share_global_assets 或 worker_count");
     let nextName = task.name;
     let nextRemark = task.remark;
     let nextPinned = task.pinned;
     let nextPinnedAt = task.pinned_at;
+    const nextWorkerCount = workerCountPresent ? mockWorkerCount(b.worker_count) : task.worker_count;
     if (namePresent) {
       const name = (b.name as string).trim();
       if (!name) throw new Error("任务名称不能为空");
@@ -1546,6 +1549,7 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
       nextPinnedAt = pinned ? (task.pinned_at ?? new Date().toISOString()) : null;
     }
     if (sharingPresent) task.share_global_assets = b.share_global_assets as boolean;
+    if (workerCountPresent) task.worker_count = nextWorkerCount;
     task.name = nextName;
     task.remark = nextRemark;
     task.pinned = nextPinned;
@@ -2453,7 +2457,50 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   if (path === "/traffic" && m === "DELETE") return { deleted: 0 };
   if (path === "/traffic/hosts" && m === "DELETE") return { deleted: (b.hosts as unknown[])?.length ?? 0 };
   if (path === "/traffic/hosts") return { hosts: D.trafficHosts };
-  if (path === "/traffic") return D.traffic;
+  if (path === "/traffic") {
+    const page = Math.max(0, Number(q.get("page")) || 0);
+    const size = Math.min(500, Math.max(1, Number(q.get("size")) || 100));
+    const routeURL = (url: string) => url.split(/[?#]/, 1)[0];
+    const contains = (value: string, key: string) => value.toLowerCase().includes((q.get(key) ?? "").toLowerCase());
+    const status = q.get("status") ?? "";
+    const matches = (D.traffic.exchanges ?? []).filter((item) =>
+      contains(item.host, "host") && contains(item.url, "q") && contains(new URL(item.url).pathname, "path") &&
+      (!q.get("method") || item.method === q.get("method")) &&
+      (!q.get("route") || routeURL(item.url) === q.get("route")) &&
+      (!status || status === "all" || (status.endsWith("xx")
+        ? Math.floor(item.status / 100) === Number(status[0]) : item.status === Number(status))) &&
+      (!q.get("resp_min") || item.resp_len >= Number(q.get("resp_min"))) &&
+      (!q.get("resp_max") || item.resp_len <= Number(q.get("resp_max"))),
+    );
+    const direction = q.get("order") === "asc" ? 1 : -1;
+    const meta = { ...D.traffic, page, size, matched_count: matches.length };
+    if (q.get("view") === "routes") {
+      const grouped = new Map<string, TrafficRouteGroup>();
+      for (const item of matches) {
+        const url = routeURL(item.url);
+        const id = `${item.method} ${url}`;
+        const ts = Date.parse(item.ts) / 1000;
+        const group = grouped.get(id) ?? {
+          id, url, host: item.host, method: item.method, count: 0,
+          first_ts: ts, last_ts: ts, resp_len: 0, statuses: {},
+        };
+        group.count++;
+        group.first_ts = Math.min(group.first_ts, ts);
+        group.last_ts = Math.max(group.last_ts, ts);
+        group.resp_len += item.resp_len;
+        group.statuses[item.status] = (group.statuses[item.status] ?? 0) + 1;
+        grouped.set(id, group);
+      }
+      const value = (g: TrafficRouteGroup) => q.get("sort") === "resp_len" ? g.resp_len
+        : q.get("sort") === "status" ? Math.max(...Object.keys(g.statuses).map(Number)) : g.last_ts;
+      const groups = [...grouped.values()].sort((a, b) => direction * (value(a) - value(b)) || a.id.localeCompare(b.id));
+      return { ...meta, exchanges: [], groups: groups.slice(page * size, (page + 1) * size), total: groups.length };
+    }
+    const value = (item: (typeof matches)[number]) => q.get("sort") === "resp_len" ? item.resp_len
+      : q.get("sort") === "status" ? item.status : Date.parse(item.ts);
+    matches.sort((a, b) => direction * (value(a) - value(b)) || a.id.localeCompare(b.id));
+    return { ...meta, total: matches.length, exchanges: matches.slice(page * size, (page + 1) * size) };
+  }
   if (path === "/traffic/exchange") return D.trafficDetail;
   if (path === "/settings" && m === "GET") return D.settings;
   if (path === "/settings" && m === "PUT") {
@@ -2582,16 +2629,51 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   // ── conversations ──
   if (path === "/conversations" && m === "GET") {
     sortMockConversations();
-    return {
-      conversations: structuredClone(
-        mockConversations.map((conversation) => ({
-          ...conversation,
-          running: mockRetests.some(
-            (item) => item.conversation_id === conversation.id && ["pending", "running"].includes(item.status),
-          ),
-        })),
+    const all = mockConversations.map((conversation) => ({
+      ...conversation,
+      running: mockRetests.some(
+        (item) => item.conversation_id === conversation.id && ["pending", "running"].includes(item.status),
       ),
+    }));
+    const filtered = all.filter(
+      (item) =>
+        (!q.get("agent") || item.agent_key === q.get("agent")) &&
+        (q.get("scope") === "automation"
+          ? item.source === "automation"
+          : q.get("scope") === "manual"
+            ? item.source !== "automation" || item.pinned || !!item.pinned_at || item.running
+            : true) &&
+        `${item.title} #${item.id} ${item.source_task_id ?? ""}`
+          .toLocaleLowerCase()
+          .includes((q.get("q") ?? "").toLocaleLowerCase()),
+    );
+    if (q.get("view") === "ids") return { ids: filtered.map((item) => item.id) };
+    const groups: Record<string, { total: number; running: number }> = {};
+    const agents: Record<string, number> = {};
+    for (const item of all) agents[item.agent_key] = (agents[item.agent_key] ?? 0) + 1;
+    for (const item of filtered) {
+      if (item.pinned || item.pinned_at) continue;
+      const key = item.source === "automation" ? `task:${item.source_task_id ?? 0}` : item.agent_key;
+      const group = groups[key] ?? { total: 0, running: 0 };
+      groups[key] = group;
+      group.total++;
+      if (item.running) group.running++;
+    }
+    const offset = Math.max(0, Number(q.get("offset")) || 0);
+    const limit = Math.max(1, Number(q.get("limit")) || 100);
+    return {
+      conversations: structuredClone(filtered.slice(offset, offset + limit)),
+      total: filtered.length,
+      all_total: all.length,
+      groups,
+      agents,
+      running: all.some((item) => item.running),
     };
+  }
+  if (seg[0] === "conversations" && seg.length === 2 && m === "GET") {
+    const conversation = mockConversations.find((item) => item.id === Number(seg[1]));
+    if (!conversation) throw new Error("404 conversation not found");
+    return structuredClone(conversation);
   }
   if (path === "/conversations" && m === "POST") {
     const now = new Date().toISOString();

@@ -1,10 +1,12 @@
 "use client";
 import * as React from "react";
+import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useUITranslation } from "@/i18n/use-ui-translation";
-import { apiFetch, openSSE } from "@/lib/api";
+import { http, openSSE } from "@/lib/api";
+import { appendLiveLog, prependLogHistory } from "@/lib/log-window";
 import { MOCK } from "@/lib/mock/enabled";
 import type { LogLine } from "@/lib/types";
 import { cn } from "@/lib/utils";
@@ -82,6 +84,17 @@ export default function LogsPage() {
   const [paused, setPaused] = React.useState(false);
   const [loadingHistory, setLoadingHistory] = React.useState(false);
   const [hasMore, setHasMore] = React.useState(false);
+  const liveLines = React.useRef<LogLine[]>([]);
+  const viewport = React.useRef<HTMLDivElement>(null);
+  const restoreScroll = React.useRef<{ key: string; top: number } | null>(null);
+  const historyLoading = React.useRef(false);
+  React.useLayoutEffect(() => {
+    if (lines.length && restoreScroll.current && viewport.current) {
+      const anchor = viewport.current.querySelector(`[data-log-key="${restoreScroll.current.key}"]`);
+      if (anchor) viewport.current.scrollTop += anchor.getBoundingClientRect().top - restoreScroll.current.top;
+      restoreScroll.current = null;
+    }
+  }, [lines]);
   const bottom = React.useRef<HTMLDivElement>(null);
   const stick = React.useRef(true);
   const pausedRef = React.useRef(false);
@@ -100,15 +113,16 @@ export default function LogsPage() {
   // DB-restored history from the last 100 rows written before restart).
   React.useEffect(() => {
     if (MOCK) {
+      liveLines.current = MOCK_LOGS;
       setLines(MOCK_LOGS);
       return;
     }
     const es = openSSE("/api/logs/stream?since=0");
     es.onmessage = (e) => {
-      if (pausedRef.current) return;
       try {
         const l = JSON.parse(e.data) as LogLine;
-        setLines((prev) => (prev.some((x) => x.seq === l.seq) ? prev : [...prev, l].slice(-3000)));
+        liveLines.current = appendLiveLog(liveLines.current, l);
+        if (!pausedRef.current) setLines(liveLines.current);
       } catch {
         /* ignore malformed frame */
       }
@@ -118,39 +132,43 @@ export default function LogsPage() {
 
   // Mark "has more" once we have any db_id in view.
   React.useEffect(() => {
-    if (minDbId > 1) setHasMore(true);
-  }, [minDbId]);
+    if (!paused && minDbId > 1) setHasMore(true);
+  }, [minDbId, paused]);
 
   async function loadOlderHistory() {
-    if (loadingHistory) return;
+    if (historyLoading.current) return;
+    historyLoading.current = true;
+    pausedRef.current = true;
+    setPaused(true);
+    stick.current = false;
     setLoadingHistory(true);
     try {
       const params = minDbId > 0 ? `?before=${minDbId}&limit=200` : `?limit=200`;
-      const res = await apiFetch(`/api/logs/history${params}`);
-      if (!res.ok) return;
-      const data = (await res.json()) as { items: LogLine[]; has_more: boolean };
+      const data = await http<{ items: LogLine[]; has_more: boolean }>(`/logs/history${params}`);
       if (data.items?.length) {
         // Assign synthetic seq numbers below current minimum to keep dedup working.
+        if (viewport.current) {
+          const top = viewport.current.getBoundingClientRect().top;
+          const anchor = [...viewport.current.querySelectorAll<HTMLElement>("[data-log-key]")].find(
+            (row) => row.getBoundingClientRect().bottom > top,
+          );
+          if (anchor)
+            restoreScroll.current = { key: anchor.dataset.logKey ?? "", top: anchor.getBoundingClientRect().top };
+        }
         setLines((prev) => {
           const minSeq = prev.reduce((m, l) => Math.min(m, l.seq ?? 0), 0);
           const older = data.items.map((l, i) => ({
             ...l,
             seq: minSeq - data.items.length + i,
           }));
-          // Prepend, dedup by db_id, cap at 5000.
-          const merged = [...older, ...prev];
-          const seen = new Set<number>();
-          const deduped = merged.filter((l) => {
-            if (!l.db_id) return true;
-            if (seen.has(l.db_id)) return false;
-            seen.add(l.db_id);
-            return true;
-          });
-          return deduped.slice(-5000);
+          return prependLogHistory(prev, older);
         });
       }
       setHasMore(data.has_more ?? false);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : ui("auth.backendUnavailable"));
     } finally {
+      historyLoading.current = false;
       setLoadingHistory(false);
     }
   }
@@ -165,7 +183,7 @@ export default function LogsPage() {
   }, [lines, q, level]);
 
   React.useEffect(() => {
-    if (stick.current && !paused) bottom.current?.scrollIntoView();
+    if (filtered.length && stick.current && !paused) bottom.current?.scrollIntoView();
   }, [filtered, paused]);
 
   const counts = React.useMemo(() => {
@@ -209,11 +227,31 @@ export default function LogsPage() {
             size="sm"
             variant={paused ? "default" : "outline"}
             className="h-8"
-            onClick={() => setPaused((p) => !p)}
+            disabled={loadingHistory}
+            onClick={() => {
+              const next = !paused;
+              pausedRef.current = next;
+              setPaused(next);
+              if (!next) {
+                stick.current = true;
+                setLines(liveLines.current);
+                setHasMore(false);
+              }
+            }}
           >
             {paused ? ui("screen.eb0c326b60ae89") : ui("screen.8d12fc0d4eb260")}
           </Button>
-          <Button size="sm" variant="outline" className="h-8" onClick={() => setLines([])}>
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-8"
+            disabled={loadingHistory}
+            onClick={() => {
+              liveLines.current = [];
+              setLines([]);
+              setHasMore(false);
+            }}
+          >
             {ui("screen.1ef3de06b32e52")}
           </Button>
           <span className="ml-auto text-xs text-muted-foreground">
@@ -229,6 +267,7 @@ export default function LogsPage() {
         </div>
 
         <div
+          ref={viewport}
           onScroll={(e) => {
             const el = e.currentTarget;
             stick.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
@@ -255,7 +294,11 @@ export default function LogsPage() {
               const body =
                 l.tag && l.text.startsWith("[" + l.tag + "]") ? l.text.slice(l.tag.length + 2).trimStart() : l.text;
               return (
-                <div key={l.seq} className="flex items-start gap-2 px-1 py-0.5 hover:bg-muted/40">
+                <div
+                  key={l.seq}
+                  data-log-key={l.db_id ? `db${l.db_id}` : `seq${l.seq}`}
+                  className="flex items-start gap-2 px-1 py-0.5 hover:bg-muted/40"
+                >
                   <span className={cn("mt-1.5 size-1.5 shrink-0 rounded-full", levelDot[l.level])} />
                   <span className="shrink-0 tabular-nums text-muted-foreground">{fmtTime(l.ts)}</span>
                   {l.tag && (

@@ -2,8 +2,12 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"testing"
+
+	"github.com/Autumn-27/artex/db"
 )
 
 func TestConversationListRunningState(t *testing.T) {
@@ -60,4 +64,27 @@ func TestConversationListRunningState(t *testing.T) {
 	clear(s.chatBusy)
 	s.chatMu.Unlock()
 	check(map[int64]bool{ids[0]: false, ids[1]: false, ids[2]: false})
+}
+
+func TestConversationDeepLinkRetainsLatestOutcome(t *testing.T) {
+	s, _ := newRetestServer(t)
+	conversation, err := s.m.pg.CreateAutomationConversation("auto", "deep link", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.m.pg.DeleteConversation(conversation.ID)
+	if _, err := s.m.pg.AppendConvActivity(conversation.ID, db.Activity{Kind: "result", IsError: true}); err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/api/conversations/%d", conversation.ID), nil)
+	r.SetPathValue("id", fmt.Sprint(conversation.ID))
+	w := httptest.NewRecorder()
+	s.pgGetConversation(w, r)
+	var item conversationListItem
+	if err := json.Unmarshal(w.Body.Bytes(), &item); err != nil {
+		t.Fatal(err)
+	}
+	if w.Code != 200 || item.ID != conversation.ID || item.Outcome != "failed" {
+		t.Fatalf("deep link status=%d item=%+v", w.Code, item)
+	}
 }

@@ -19,111 +19,11 @@ import { Textarea } from "@/components/ui/textarea";
 import { useUITranslation } from "@/i18n/use-ui-translation";
 import { api } from "@/lib/api";
 import type { Agent, Tool } from "@/lib/types";
+import { applyRows, isSchemaObject, type ParamRow, toRows } from "@/lib/tool-schema";
 
 // Traffic tools are host tools gated by the global 流量捕获 switch: bindable, but
 // only usable when capture is on. Keep in sync with traffic.SeedToolMetas.
 const TRAFFIC_TOOL_KEYS = new Set(["traffic_search", "traffic_get"]);
-
-// paramRows flattens schema.properties into an ordered row list for editing.
-// name/type/required are read-only (welded to the Go handler); description/default
-// are editable. Non-scalar params (array/object) can't carry an editable default.
-// parentKey is set for rows that live inside an array param's items.properties.
-type ParamRow = {
-  name: string;
-  type: string;
-  required: boolean;
-  description: string;
-  defaultStr: string; // "" = no default declared
-  scalar: boolean;
-  parentKey?: string; // set when this is a sub-field of an array param's items
-};
-
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function toRows(schema: Record<string, any>): ParamRow[] {
-  const props = (schema?.properties ?? {}) as Record<string, Record<string, unknown>>;
-  const required = new Set<string>((schema?.required as string[]) ?? []);
-  const rows: ParamRow[] = [];
-  for (const [name, p] of Object.entries(props)) {
-    const type = String(p?.type ?? "");
-    const hasDefault = p != null && "default" in p && (p as Record<string, unknown>).default != null;
-    rows.push({
-      name,
-      type,
-      required: required.has(name),
-      description: String(p?.description ?? ""),
-      defaultStr: hasDefault ? String((p as Record<string, unknown>).default) : "",
-      scalar: ["string", "integer", "number", "boolean"].includes(type),
-    });
-    // Expand items.properties for array params so sub-fields are editable.
-    if (type === "array") {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const itemProps = (p as any)?.items?.properties as Record<string, Record<string, unknown>> | undefined;
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const itemRequired = new Set<string>(((p as any)?.items?.required as string[]) ?? []);
-      if (itemProps) {
-        for (const [subName, subP] of Object.entries(itemProps)) {
-          const subType = String((subP as Record<string, unknown>)?.type ?? "");
-          const subHasDefault = subP != null && "default" in subP && subP.default != null;
-          rows.push({
-            name: subName,
-            type: subType,
-            required: itemRequired.has(subName),
-            description: String(subP?.description ?? ""),
-            defaultStr: subHasDefault ? String(subP.default) : "",
-            scalar: ["string", "integer", "number", "boolean"].includes(subType),
-            parentKey: name,
-          });
-        }
-      }
-    }
-  }
-  return rows;
-}
-
-// coerceDefault turns the edited default string back into a typed JSON value, or
-// undefined to drop the "default" key entirely.
-function coerceDefault(type: string, raw: string): unknown {
-  const s = raw.trim();
-  if (s === "") return undefined;
-  if (type === "integer" || type === "number") {
-    const n = Number(s);
-    return Number.isNaN(n) ? undefined : n;
-  }
-  if (type === "boolean") return s === "true";
-  return raw;
-}
-
-// applyRows writes edited rows back into a deep-copied schema (structure untouched).
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function applyRows(schema: Record<string, any>, rows: ParamRow[]): Record<string, any> {
-  const next = structuredClone(schema ?? {});
-  const props = (next.properties ?? {}) as Record<string, Record<string, unknown>>;
-  for (const r of rows) {
-    if (r.parentKey) {
-      // Sub-field of an array param's items.properties
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const parent = props[r.parentKey] as any;
-      const subP = parent?.items?.properties?.[r.name] as Record<string, unknown> | undefined;
-      if (!subP) continue;
-      subP.description = r.description;
-      if (r.scalar) {
-        const dv = coerceDefault(r.type, r.defaultStr);
-        if (dv === undefined) delete subP.default;
-        else subP.default = dv;
-      }
-    } else {
-      const p = props[r.name];
-      if (!p) continue;
-      p.description = r.description;
-      if (r.scalar) {
-        const dv = coerceDefault(r.type, r.defaultStr);
-        if (dv === undefined) delete p.default;
-        else p.default = dv;
-      }
-    }
-  }
-  return next;
-}
 
 // ToolEditor is the full edit form for one tool, rendered inside the drawer.
 function ToolEditor({
@@ -195,11 +95,12 @@ function ToolEditor({
         {/* binding + switch */}
         <div className="flex flex-wrap items-center gap-x-6 gap-y-3">
           <div className="grid gap-1.5">
-            <Label className="text-muted-foreground text-xs">{ui("screen.d2a8ed3e865d05")}</Label>
+            <p className="text-muted-foreground text-xs">{ui("screen.d2a8ed3e865d05")}</p>
             <div className="flex flex-wrap gap-3">
               {agents.map((ag) => (
-                <label key={ag.key} className="flex items-center gap-2 text-sm">
+                <label key={ag.key} htmlFor={`tool-${tool.key}-agent-${ag.key}`} className="flex items-center gap-2 text-sm">
                   <Checkbox
+                    id={`tool-${tool.key}-agent-${ag.key}`}
                     checked={bound.includes(ag.key)}
                     disabled={trafficGated}
                     onCheckedChange={() => toggleAgent(ag.key)}
@@ -374,11 +275,11 @@ export default function ToolsPage() {
     api
       .agents()
       .then(setAgents)
-      .catch(() => {});
+      .catch(() => undefined);
     api
       .settings()
       .then((s) => setCaptureOn(!!s.traffic_capture))
-      .catch(() => {});
+      .catch(() => undefined);
   }, [reload]);
 
   const [query, setQuery] = React.useState("");
@@ -655,7 +556,12 @@ function CustomToolDialog({
     let schema: Record<string, unknown> = {};
     if (schemaText.trim()) {
       try {
-        schema = JSON.parse(schemaText);
+        const parsed: unknown = JSON.parse(schemaText);
+        if (!isSchemaObject(parsed)) {
+          toast.error(ui("error.tool_schema_object_required"));
+          return;
+        }
+        schema = parsed;
       } catch {
         toast.error(ui("screen.bab199cfb603cf"));
         return;
@@ -866,15 +772,17 @@ function CustomToolDialog({
               </div>
               <div className="flex items-center gap-4">
                 <div className="grid gap-1.5">
-                  <Label className="text-xs">{ui("screen.17b9f1c37b2057")}</Label>
+                  <Label htmlFor="custom-tool-proxy" className="text-xs">{ui("screen.17b9f1c37b2057")}</Label>
                   <Input
+                    id="custom-tool-proxy"
                     className="font-mono text-xs w-56"
                     value={ex.proxy}
                     onChange={(e) => setEx({ ...ex, proxy: e.target.value })}
                   />
                 </div>
-                <label className="mt-4 flex items-center gap-2 text-sm">
+                <label htmlFor="custom-tool-recording" className="mt-4 flex items-center gap-2 text-sm">
                   <Checkbox
+                    id="custom-tool-recording"
                     checked={ex.use_recording_proxy}
                     onCheckedChange={(v) => setEx({ ...ex, use_recording_proxy: !!v })}
                   />
@@ -887,8 +795,9 @@ function CustomToolDialog({
           {kind !== "shell" && (
             <div className="flex items-center gap-3">
               <div className="grid gap-1.5">
-                <Label className="text-xs">{ui("screen.38b6f0e56d09c4")}</Label>
+                <Label htmlFor="custom-tool-timeout" className="text-xs">{ui("screen.38b6f0e56d09c4")}</Label>
                 <Input
+                  id="custom-tool-timeout"
                   type="number"
                   className="w-32"
                   value={ex.timeout_ms}
@@ -900,11 +809,12 @@ function CustomToolDialog({
 
           {kind !== "shell" && (
             <div className="grid gap-1.5">
-              <Label className="text-xs">
+              <Label htmlFor="custom-tool-schema" className="text-xs">
                 {ui("screen.7ff6a7d0a41f31")}
                 {kind === "http" ? ui("screen.46f4df9c0d2da9") : ui("screen.84780d91a21684")}
               </Label>
               <Textarea
+                id="custom-tool-schema"
                 className="font-mono text-xs"
                 rows={4}
                 value={schemaText}
@@ -915,11 +825,11 @@ function CustomToolDialog({
           )}
 
           <div className="grid gap-1.5">
-            <Label className="text-muted-foreground text-xs">{ui("screen.7bb739274d9847")}</Label>
+            <p className="text-muted-foreground text-xs">{ui("screen.7bb739274d9847")}</p>
             <div className="flex flex-wrap gap-3">
               {agents.map((a) => (
-                <label key={a.key} className="flex items-center gap-2 text-sm">
-                  <Checkbox checked={bound.includes(a.key)} onCheckedChange={() => toggleAgent(a.key)} />
+                <label key={a.key} htmlFor={`custom-tool-agent-${a.key}`} className="flex items-center gap-2 text-sm">
+                  <Checkbox id={`custom-tool-agent-${a.key}`} checked={bound.includes(a.key)} onCheckedChange={() => toggleAgent(a.key)} />
                   {a.name}
                   <span className="text-muted-foreground font-mono text-xs">{a.key}</span>
                 </label>
@@ -928,12 +838,12 @@ function CustomToolDialog({
           </div>
 
           <div className="flex items-center gap-6">
-            <label className="flex items-center gap-2 text-sm">
-              <Switch checked={enabled} onCheckedChange={setEnabled} /> {ui("screen.f4f0ead1116b5b")}
+            <label htmlFor="custom-tool-enabled" className="flex items-center gap-2 text-sm">
+              <Switch id="custom-tool-enabled" checked={enabled} onCheckedChange={setEnabled} /> {ui("screen.f4f0ead1116b5b")}
             </label>
             {kind !== "shell" && (
-              <label className="flex items-center gap-2 text-sm">
-                <Switch checked={deferred} onCheckedChange={setDeferred} /> {ui("screen.73edf6b3638e54")}
+              <label htmlFor="custom-tool-deferred" className="flex items-center gap-2 text-sm">
+                <Switch id="custom-tool-deferred" checked={deferred} onCheckedChange={setDeferred} /> {ui("screen.73edf6b3638e54")}
               </label>
             )}
           </div>

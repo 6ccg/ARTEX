@@ -508,11 +508,6 @@ func (e *Engine) ReadyFor(t *Task) bool {
 // but no-op until an LLM is configured (so a task created while idle picks up
 // automatically once LLM is set from the UI).
 func (e *Engine) Run(ctx context.Context, t *Task) {
-	slots, err := workerSlotsForTask(t, e.m.WorkerPools(), e.m.Workers())
-	if err != nil {
-		log.Printf("[engine] task %s worker pool invalid, using legacy workers: %v", t.ID, err)
-		slots, _ = ExpandWorkerSlots(nil, workerCountForTask(t, e.m.Workers()))
-	}
 	e.deleteMu.RLock()
 	if e.closing.Load() || e.IsDeleting(t.ID) {
 		e.deleteMu.RUnlock()
@@ -525,20 +520,12 @@ func (e *Engine) Run(ctx context.Context, t *Task) {
 	}
 	// Include this setup call: StopTask must not drop its owner while the final
 	// activity/intent read below is still using it.
-	rt := e.registerTaskRoutines(ctx, t.ID, 2+len(slots))
+	rt := e.registerTaskRoutines(ctx, t.ID, 2)
 	defer rt.wg.Done()
-	plan := make(map[string]int64, len(slots))
-	for _, slot := range slots {
-		plan[slot.Name] = slot.ProfileID
-	}
-	e.setSlotPlan(t.ID, plan)
+	e.refreshTaskWorkersLocked(t, rt)
 	e.deleteMu.RUnlock()
 	e.touch(t.ID)
 	runTaskRoutine(rt, func(loopCtx context.Context) { e.plannerLoop(loopCtx, t) })
-	for _, slot := range slots {
-		slot := slot
-		runTaskRoutine(rt, func(loopCtx context.Context) { e.workerLoop(loopCtx, t, slot) })
-	}
 	e.startDeadlineCoordinator(ctx, t) // 任务级超时定时器(仅 timeout>0;去重)
 	// 仅在「完全没有活动意图(open+running)」时才 kick 首轮规划。带种子意图的任务:种子已
 	// 是 open,或已被上面刚起的 worker 抢先 claim 成 running——两种都算「有活干」,一律跳过
@@ -553,20 +540,21 @@ func (e *Engine) Run(ctx context.Context, t *Task) {
 // workerSlotsForTask preserves an explicit task concurrency override. Tasks
 // using the global default inherit its model pools and their pinned profiles.
 func workerSlotsForTask(t *Task, pools []WorkerPool, global int) ([]WorkerSlot, error) {
-	if t != nil && t.WorkerCount > 0 {
-		return ExpandWorkerSlots(nil, workerCountForTask(t, global))
+	if t != nil {
+		if n := t.lifecycleSnapshot().WorkerCount; n > 0 {
+			return ExpandWorkerSlots(nil, min(n, db.MaxTaskWorkerCount))
+		}
 	}
 	return ExpandWorkerSlots(pools, global)
 }
 
 func workerCountForTask(t *Task, global int) int {
-	if t != nil && t.WorkerCount > 0 {
+	if t != nil {
 		// Direct database edits can bypass validation; cap those values so the
 		// engine never starts more than the supported per-task worker count.
-		if t.WorkerCount > db.MaxTaskWorkerCount {
-			return db.MaxTaskWorkerCount
+		if n := t.lifecycleSnapshot().WorkerCount; n > 0 {
+			return min(n, db.MaxTaskWorkerCount)
 		}
-		return t.WorkerCount
 	}
 	return global
 }
@@ -722,12 +710,37 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 }
 
 func (e *Engine) workerLoop(ctx context.Context, t *Task, slot WorkerSlot) {
-	name := slot.Name
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		default:
+		}
+		var enabled bool
+		slot, enabled = e.nextWorkerSlot(t.ID, slot)
+		if !enabled {
+			return
+		}
+		if e.IsPaused(t.ID) {
+			if sleepCtx(ctx, 1000*time.Millisecond) {
+				return
+			}
+			continue // user-paused: don't claim/execute intents
+		}
+		if e.IsDeleting(t.ID) {
+			return
+		}
+		if e.isSettling(t.ID) {
+			if sleepCtx(ctx, 1000*time.Millisecond) {
+				return
+			}
+			continue // 任务超时收尾中:不再领新意图(在跑的自行收尾,协调器等其 drain)
+		}
+		if isTerminalStatus(e.m.TaskStatus(t.ID)) {
+			if sleepCtx(ctx, 1000*time.Millisecond) {
+				return
+			}
+			continue // 任务已终态(done/failed/timeout):停止领取遗留意图,别在完成后空跑 frontier
 		}
 		var worker *agent.Worker
 		var resolveErr error
@@ -753,31 +766,10 @@ func (e *Engine) workerLoop(ctx context.Context, t *Task, slot WorkerSlot) {
 			}
 			continue
 		}
-		if e.IsPaused(t.ID) {
-			if sleepCtx(ctx, 1000*time.Millisecond) {
-				return
-			}
-			continue // user-paused: don't claim/execute intents
-		}
-		if e.IsDeleting(t.ID) {
-			return
-		}
-		if e.isSettling(t.ID) {
-			if sleepCtx(ctx, 1000*time.Millisecond) {
-				return
-			}
-			continue // 任务超时收尾中:不再领新意图(在跑的自行收尾,协调器等其 drain)
-		}
-		if isTerminalStatus(e.m.TaskStatus(t.ID)) {
-			if sleepCtx(ctx, 1000*time.Millisecond) {
-				return
-			}
-			continue // 任务已终态(done/failed/timeout):停止领取遗留意图,别在完成后空跑 frontier
-		}
 		if !e.beginTaskOperation(t.ID) {
 			return
 		}
-		claimed := e.runWorkerStep(ctx, t, name, worker)
+		claimed := e.runWorkerStep(ctx, t, slot, worker)
 		e.decInflight(t.ID)
 		if !claimed && sleepCtx(ctx, 800*time.Millisecond) {
 			return
@@ -788,8 +780,9 @@ func (e *Engine) workerLoop(ctx context.Context, t *Task, slot WorkerSlot) {
 // runWorkerStep claims one intent from the frontier and fully settles it via
 // runIntent. Returns false when nothing was claimable. The pool worker loop is its
 // only caller.
-func (e *Engine) runWorkerStep(ctx context.Context, t *Task, name string, worker *agent.Worker) bool {
-	intent := e.claimNext(t, name)
+func (e *Engine) runWorkerStep(ctx context.Context, t *Task, slot WorkerSlot, worker *agent.Worker) bool {
+	name := slot.Name
+	intent := e.claimWorkerIntent(t, slot)
 	if intent == nil {
 		return false
 	}
@@ -1118,11 +1111,6 @@ func sleepCtx(ctx context.Context, d time.Duration) (done bool) {
 }
 
 func (e *Engine) claimNext(t *Task, name string) *db.Node {
-	fr, _ := t.Store.Frontier(20)
-	for _, in := range fr {
-		if ok, _ := t.Store.ClaimIntent(in.ID, name); ok {
-			return in
-		}
-	}
-	return nil
+	intent, _ := t.Store.ClaimNextIntent(name)
+	return intent
 }

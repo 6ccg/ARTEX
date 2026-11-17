@@ -1,4 +1,5 @@
 "use client";
+import { startPolling } from "@/hooks/use-polling";
 
 import * as React from "react";
 
@@ -91,10 +92,7 @@ export function FilesTab({ task, active }: { task: Task; active: boolean }) {
 
   React.useEffect(() => {
     if (!active || task.status !== "running" || task.paused) return;
-    const timer = setInterval(() => {
-      if (document.visibilityState === "visible") void refresh();
-    }, 5000);
-    return () => clearInterval(timer);
+    return startPolling(refresh, 5000, 5000);
   }, [active, task.status, task.paused, refresh]);
 
   const openPreview = React.useCallback(

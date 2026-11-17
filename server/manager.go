@@ -99,6 +99,7 @@ type Task struct {
 // updateLifecycle instead of reading or writing the corresponding Task fields
 // directly after the task has been published by Manager.
 type taskLifecycleState struct {
+	WorkerCount         int
 	ShareGlobalAssets   bool
 	Name                string
 	Remark              string
@@ -140,6 +141,7 @@ func (t *Task) lifecycleSnapshot() taskLifecycleState {
 
 func (t *Task) lifecycleSnapshotLocked() taskLifecycleState {
 	return taskLifecycleState{
+		WorkerCount:       t.WorkerCount,
 		ShareGlobalAssets: t.ShareGlobalAssets,
 		Name:              t.Name,
 		Remark:            t.Remark,
@@ -171,6 +173,7 @@ func (t *Task) updateLifecycle(update func(*taskLifecycleState)) {
 	t.lifecycleMu.Lock()
 	state := t.lifecycleSnapshotLocked()
 	update(&state)
+	t.WorkerCount = state.WorkerCount
 	t.ShareGlobalAssets = state.ShareGlobalAssets
 	t.Name = state.Name
 	t.Remark = state.Remark
@@ -479,8 +482,7 @@ func (m *Manager) SetConcurrency(enabled bool, limit int) error {
 	return m.pg.SetSetting(settingConcurrencyOn, strconv.FormatBool(enabled))
 }
 
-// Workers returns the configured concurrent work-agent count (default 3). Read
-// per-task at engine.Run, so a change applies to tasks started afterwards.
+// Workers returns the configured concurrent work-agent count (default 3).
 func (m *Manager) Workers() int {
 	v, ok, err := m.pg.GetSetting(settingWorkers)
 	if err != nil || !ok {
@@ -1309,6 +1311,7 @@ func (m *Manager) UpdateTaskMetadata(taskID string, patch pgdb.TaskPatch) (*Task
 		return nil, nil
 	}
 	task.updateLifecycle(func(state *taskLifecycleState) {
+		state.WorkerCount = updated.WorkerCount
 		state.ShareGlobalAssets = updated.ShareGlobalAssets
 		state.Name = updated.Name
 		state.Remark = updated.Remark

@@ -79,7 +79,7 @@ func (s *Runtime) bindPendingConversation(item *triggeredRun, msg string) (*db.C
 	defer tx.Rollback()
 	id := item.conversationID
 	if id == 0 {
-		err = tx.QueryRow(`INSERT INTO conversations(agent_key,title,llm_profile_id) VALUES($1,$2,NULL) RETURNING id`, item.agentKey, firstLine(item.title, 60)).Scan(&id)
+		err = tx.QueryRow(`INSERT INTO conversations(agent_key,title,llm_profile_id,source,source_task_id) VALUES($1,$2,NULL,'automation',NULLIF($3,0)) RETURNING id`, item.agentKey, firstLine(item.title, 180), item.taskID).Scan(&id)
 		if err != nil {
 			return nil, err
 		}

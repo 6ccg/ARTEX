@@ -63,20 +63,21 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { type UITranslate, useUITranslation } from "@/i18n/use-ui-translation";
 import { api } from "@/lib/api";
 import { parseCompanyScopeText } from "@/lib/company-scope";
-import type { Asset, Company, CompanyScopeRule } from "@/lib/types";
+import type { Asset, Company, CompanyScopeRule, Task } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 const METHOD_COLOR: Record<string, string> = {
-  GET: "bg-emerald-100 text-emerald-700",
-  POST: "bg-blue-100 text-blue-700",
-  PUT: "bg-amber-100 text-amber-700",
-  PATCH: "bg-orange-100 text-orange-700",
-  DELETE: "bg-red-100 text-red-700",
-  HEAD: "bg-purple-100 text-purple-700",
-  OPTIONS: "bg-slate-100 text-slate-600",
+  GET: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400",
+  POST: "bg-blue-500/15 text-blue-700 dark:text-blue-400",
+  PUT: "bg-amber-500/15 text-amber-700 dark:text-amber-400",
+  PATCH: "bg-orange-500/15 text-orange-700 dark:text-orange-400",
+  DELETE: "bg-red-500/15 text-red-700 dark:text-red-400",
+  HEAD: "bg-purple-500/15 text-purple-700 dark:text-purple-400",
+  OPTIONS: "bg-slate-500/15 text-slate-600 dark:text-slate-300",
 };
 
 function MethodBadge({ method }: { method: string }) {
+  const { ui } = useUITranslation();
   const m = method.toUpperCase();
   return (
     <span
@@ -85,7 +86,7 @@ function MethodBadge({ method }: { method: string }) {
         METHOD_COLOR[m] ?? "bg-muted text-muted-foreground",
       )}
     >
-      {m || "—"}
+      {m && m !== "UNKNOWN" ? m : ui("opt.unknownMethod")}
     </span>
   );
 }
@@ -147,6 +148,9 @@ function AssetsContent() {
   const [rows, setRows] = React.useState<Asset[]>([]);
   const [total, setTotal] = React.useState(0);
   const [companies, setCompanies] = React.useState<Company[]>([]);
+  const [tasks, setTasks] = React.useState<Task[]>([]);
+  const [companyFilter, setCompanyFilter] = React.useState("all");
+  const [taskFilter, setTaskFilter] = React.useState("all");
   const [counts, setCounts] = React.useState<Record<string, number>>({});
   const [tab, setTab] = React.useState("company");
   const [query, setQuery] = React.useState("");
@@ -170,8 +174,12 @@ function AssetsContent() {
   const [companyDeleteAssets, setCompanyDeleteAssets] = React.useState(false);
   const [companyDeleting, setCompanyDeleting] = React.useState(false);
 
-  // Companies + per-type counts (tab badges) — loaded on demand, no background polling.
+  // Companies + tasks + per-type counts (tab badges) — loaded on demand, no background polling.
   const loadMeta = React.useCallback(() => {
+    void api
+      .tasks()
+      .then((result) => setTasks(result.tasks))
+      .catch(() => undefined);
     api
       .companies()
       .then(setCompanies)
@@ -276,16 +284,25 @@ function AssetsContent() {
   }, [tab, assetTarget]);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: these controls intentionally reset server pagination.
-  React.useEffect(() => setPage(0), [tab, size, query]);
+  React.useEffect(() => {
+    setPage(0);
+    setSelected(new Set());
+  }, [tab, size, query, companyFilter, taskFilter]);
 
-  const dslMode = query.trim() !== "";
+  const dslMode = query.trim() !== "" || companyFilter !== "all" || taskFilter !== "all";
 
   // Server-side paginated page loader for the active data tab (company tab excluded).
   // biome-ignore lint/correctness/useExhaustiveDependencies: refreshKey is an explicit manual-reload trigger.
   React.useEffect(() => {
     if (tab === "company") return;
     const request = ++assetsRequestRef.current;
-    const dsl = query.trim();
+    const dsl = [
+      query.trim() ? `(${query.trim()})` : "",
+      companyFilter !== "all" ? `company_id==${companyFilter}` : "",
+      taskFilter !== "all" ? `task_id==${taskFilter}` : "",
+    ]
+      .filter(Boolean)
+      .join(" AND ");
     setLoading(true);
     const offset = page * size;
     const run = async () => {
@@ -309,12 +326,12 @@ function AssetsContent() {
         }
       }
     };
-    const tid = setTimeout(run, dsl ? 400 : 0);
+    const tid = setTimeout(run, query.trim() ? 400 : 0);
     return () => {
       clearTimeout(tid);
       if (assetsRequestRef.current === request) assetsRequestRef.current++;
     };
-  }, [tab, page, size, query, refreshKey]);
+  }, [tab, page, size, query, refreshKey, companyFilter, taskFilter]);
 
   React.useEffect(() => {
     if (tab === "company") return;
@@ -339,13 +356,49 @@ function AssetsContent() {
   const slice = <T,>(list: T[]) => list;
 
   const searchBox = (
-    <AssetDslSearch
-      query={query}
-      onChange={setQuery}
-      loading={loading}
-      error={dslError}
-      count={dslMode ? total : undefined}
-    />
+    <div className="flex flex-col gap-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <Select value={companyFilter} onValueChange={setCompanyFilter}>
+          <SelectTrigger size="sm" className="w-56" aria-label={ui("opt.companyFilter")}>
+            <SelectValue placeholder={ui("opt.companyFilter")} />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectGroup>
+              <SelectItem value="all">{ui("opt.allCompanies")}</SelectItem>
+              <SelectItem value="0">{ui("opt.unassigned")}</SelectItem>
+              {companies.map((c) => (
+                <SelectItem key={c.id} value={String(c.id)}>
+                  {c.name}
+                </SelectItem>
+              ))}
+            </SelectGroup>
+          </SelectContent>
+        </Select>
+        <Select value={taskFilter} onValueChange={setTaskFilter}>
+          <SelectTrigger size="sm" className="w-60" aria-label={ui("opt.taskFilter")}>
+            <SelectValue placeholder={ui("opt.taskFilter")} />
+          </SelectTrigger>
+          <SelectContent>
+            <SelectGroup>
+              <SelectItem value="all">{ui("opt.allTasks")}</SelectItem>
+              {tasks.map((task) => (
+                <SelectItem key={task.id} value={String(task.id)}>
+                  {task.name || task.description || `#${task.id}`}
+                </SelectItem>
+              ))}
+            </SelectGroup>
+          </SelectContent>
+        </Select>
+        <span className="text-muted-foreground text-xs">{ui("opt.assetCountHint")}</span>
+      </div>
+      <AssetDslSearch
+        query={query}
+        onChange={setQuery}
+        loading={loading}
+        error={dslError}
+        count={dslMode ? total : undefined}
+      />
+    </div>
   );
 
   return (
@@ -384,9 +437,8 @@ function AssetsContent() {
           <h1 className="text-xl font-semibold tracking-tight">{ui("screen.5f45bb826b168f")}</h1>
         </div>
         <div className="flex items-center gap-3">
-          <span className="text-sm text-muted-foreground">
-            {ui("screen.76e547a8fa5463")}
-            <span className="tabular-nums">{totalAssets}</span> {ui("screen.a5670ed30b06da")}
+          <span className="text-sm text-muted-foreground tabular-nums">
+            {ui("opt.assetObjects", { count: totalAssets })}
           </span>
           {tab !== "company" ? (
             <Button
@@ -716,9 +768,10 @@ function AssetsContent() {
                     href={a.url}
                     target="_blank"
                     rel="noreferrer"
+                    title={a.url}
                     className="text-blue-600 hover:underline dark:text-blue-400"
                   >
-                    {a.domain || a.url}
+                    {a.url}
                   </a>
                 );
               } else if (a.domain) {
@@ -734,7 +787,7 @@ function AssetsContent() {
                       {svc || "—"}
                     </Badge>
                   </TableCell>
-                  <TableCell className="max-w-[14rem] truncate font-mono text-xs" title={a.domain || a.url}>
+                  <TableCell className="max-w-[14rem] truncate font-mono text-xs" title={isHttp && a.url ? a.url : a.domain || a.url}>
                     {domainCell}
                   </TableCell>
                   <TableCell className="font-mono text-xs">{a.ip || "—"}</TableCell>
@@ -817,7 +870,7 @@ function AssetsContent() {
                   <Chips
                     items={(a.params ?? []).map((p) => {
                       const item = p as Record<string, string>;
-                      return item.name ? `${item.name}(${item.location || "?"})` : "?";
+                      return item.name ? `${item.name}(${item.location || item.in || "?"})` : "?";
                     })}
                     mono
                   />

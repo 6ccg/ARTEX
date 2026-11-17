@@ -1,6 +1,9 @@
 "use client";
 
 import * as React from "react";
+import { startPolling, usePolling } from "@/hooks/use-polling";
+import { reconcileList } from "@/lib/list-snapshot";
+import { matchesTaskQuery } from "@/lib/task-search";
 
 import Link from "next/link";
 
@@ -437,14 +440,7 @@ export default function TasksPage() {
         String(t.category_id) !== categoryFilter
       )
         return false;
-      if (!q) return true;
-      return (
-        (t.name ?? "").toLowerCase().includes(q) ||
-        (t.category_name ?? "").toLowerCase().includes(q) ||
-        t.description.toLowerCase().includes(q) ||
-        t.goal.toLowerCase().includes(q) ||
-        t.id.toLowerCase().includes(q)
-      );
+      return matchesTaskQuery(t, q);
     });
   }, [tasks, query, statusFilter, categoryFilter]);
 
@@ -524,24 +520,14 @@ export default function TasksPage() {
     [pageIds],
   );
 
-  // lastRef holds the previous poll's serialized payload: the list is re-fetched every
-  // POLL_MS but usually comes back unchanged, and setTasks on an identical payload would
-  // re-render the whole page for nothing. Bail out when it matches.
-  const lastRef = React.useRef<string>("");
-
-  const load = React.useCallback(() => {
-    api
-      .tasks()
-      .then((r) => {
-        const next = r.tasks.map((t) => (t.id === r.active ? { ...t, active: true } : t));
-        const sig = JSON.stringify(next);
-        if (sig === lastRef.current) return;
-        lastRef.current = sig;
-        setTasks(next);
-      })
-      .catch(() => {
-        // Polling is best-effort; the next interval retries automatically.
-      });
+  const load = React.useCallback(async () => {
+    try {
+      const result = await api.tasks();
+      const next = result.tasks.map((task) => task.id === result.active ? { ...task, active: true } : task);
+      setTasks((current) => reconcileList(current, next, (task) => task.id));
+    } catch {
+      // Keep the previous task snapshot until the next successful poll.
+    }
   }, []);
 
   const loadCategories = React.useCallback(() => {
@@ -556,17 +542,12 @@ export default function TasksPage() {
       });
   }, []);
 
-  React.useEffect(() => {
-    load();
-    loadCategories();
-    const i = setInterval(load, POLL_MS);
-    return () => clearInterval(i);
-  }, [load, loadCategories]);
+  usePolling(load, activeTab === "current" ? POLL_MS : null);
+  React.useEffect(() => { loadCategories(); }, [loadCategories]);
 
   const refreshCategoriesAndTasks = React.useCallback(() => {
-    lastRef.current = "";
     loadCategories();
-    load();
+    void load();
   }, [load, loadCategories]);
 
   const applyTaskCategoryMove = React.useCallback(
@@ -581,7 +562,6 @@ export default function TasksPage() {
               }
             : task,
         );
-        lastRef.current = JSON.stringify(next);
         return next;
       });
       loadCategories();
@@ -602,9 +582,7 @@ export default function TasksPage() {
   // tick every second so running tasks' 运行时长 counts up live.
   React.useEffect(() => {
     if (!hasRunning) return;
-    setNowSec(Math.floor(Date.now() / 1000));
-    const i = setInterval(() => setNowSec(Math.floor(Date.now() / 1000)), 1000);
-    return () => clearInterval(i);
+    return startPolling(() => { setNowSec(Math.floor(Date.now() / 1000)); }, 1000);
   }, [hasRunning]);
 
   const deleteTask = React.useCallback(
@@ -618,7 +596,7 @@ export default function TasksPage() {
         } else {
           toast.success(deleteSummary(result, liveT));
         }
-        load();
+        void load();
       } catch (e) {
         toast.error(liveT("taskUI.deleteError", { message: taskError(e, liveT) }));
         throw e;
@@ -628,8 +606,6 @@ export default function TasksPage() {
   );
 
   // controlTask 是行内暂停/继续:批量走 controlTasksBatch,单行走单任务接口,省去
-  // 「先勾选再点批量」。清空 lastRef 让下一次轮询即使负载相同也照单接收,否则状态
-  // 回写会被去重挡掉、按钮看起来没反应。
   const controlTask = React.useCallback(
     async (id: string, action: "pause" | "resume") => {
       try {
@@ -648,8 +624,7 @@ export default function TasksPage() {
         );
       } finally {
         // 无论成败都刷新:失败多半是状态已变化,重新拉取才能让按钮回到正确形态。
-        lastRef.current = "";
-        load();
+        void load();
       }
     },
     [load, liveT],
@@ -661,8 +636,7 @@ export default function TasksPage() {
       setTasks((current) =>
         current.map((entry) => (entry.id === task.id ? { ...entry, remark: updated.remark } : entry)),
       );
-      lastRef.current = "";
-      load();
+      void load();
     },
     [load],
   );
@@ -672,8 +646,7 @@ export default function TasksPage() {
       try {
         await api.renameTask(task.id, name);
         toast.success(liveT("taskUI.taskRenamed", { id: task.id }));
-        lastRef.current = "";
-        load();
+        void load();
       } catch (error) {
         toast.error(liveT("taskUI.renameFailed", { message: taskError(error, liveT) }));
         throw error;
@@ -690,8 +663,7 @@ export default function TasksPage() {
         toast.success(
           pinned ? liveT("taskUI.taskUnpinned", { id: task.id }) : liveT("taskUI.taskPinned", { id: task.id }),
         );
-        lastRef.current = "";
-        load();
+        void load();
       } catch (error) {
         toast.error(
           liveT("taskUI.actionFailed", {
@@ -718,8 +690,7 @@ export default function TasksPage() {
           ),
         );
         toast.success(liveT(enabled ? "taskUI.globalAssetsDisabled" : "taskUI.globalAssetsEnabled", { id: task.id }));
-        lastRef.current = "";
-        load();
+        void load();
       } catch (error) {
         toast.error(liveT("taskUI.settingFailed", { message: taskError(error, liveT) }));
       }
@@ -733,8 +704,7 @@ export default function TasksPage() {
         await api.archiveTask(task.id);
         toast.success(liveT("taskUI.taskArchiveQueued", { id: task.id }));
         setActiveTab("archived");
-        lastRef.current = "";
-        load();
+        void load();
       } catch (error) {
         toast.error(liveT("taskUI.archiveError", { message: taskError(error, liveT) }));
         throw error;
@@ -805,7 +775,7 @@ export default function TasksPage() {
           }),
         );
       }
-      load();
+      void load();
     },
     [load, liveT],
   );
@@ -848,8 +818,7 @@ export default function TasksPage() {
     }
     setSelectedIds(new Set());
     setActiveTab("archived");
-    lastRef.current = "";
-    load();
+    void load();
   }, [archivableTaskIDs, load, liveT]);
 
   const controlSelectedTasks = React.useCallback(
@@ -889,8 +858,7 @@ export default function TasksPage() {
             }),
           );
         }
-        lastRef.current = "";
-        load();
+        void load();
       } catch (error) {
         toast.error(
           liveT("taskUI.actionFailed", {
@@ -2114,11 +2082,7 @@ function TaskArchivesPanel({ onChanged }: { onChanged: () => void }) {
     }
   }, [onChanged, page, pageSize, query, stateFilter, liveT]);
 
-  React.useEffect(() => {
-    void load();
-    const timer = setInterval(() => void load(), 2_000);
-    return () => clearInterval(timer);
-  }, [load]);
+  usePolling(load, 2_000);
 
   const selectable = React.useMemo(
     () => archives.filter((archive) => !ARCHIVE_PROCESSING_STATES.has(archive.state)),

@@ -2,6 +2,8 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -61,37 +63,81 @@ func TestInheritedIntentResultOnlyAllowsHistory(t *testing.T) {
 	}
 }
 
-func TestInheritedGraphSnapshotFiltersLiveIntentsAndEdges(t *testing.T) {
-	nodes := []*db.Node{
-		{ID: 1, Kind: db.KindFact, State: "confirmed"},
-		{ID: 2, Kind: db.KindIntent, State: "running"},
-		{ID: 3, Kind: db.KindIntent, State: "done"},
-		{ID: 4, Kind: db.KindFinding, State: "confirmed"},
+func TestInheritedGraphPagesFilterLiveIntentsAndEdges(t *testing.T) {
+	m := newTestManager(t)
+	source, err := m.CreateTask("graph source", "", nil, 0, 0)
+	if err != nil {
+		t.Fatal(err)
 	}
-	edges := []db.Edge{
-		{From: 1, Rel: db.RelDerivedFrom, To: 2},
-		{From: 1, Rel: db.RelDerivedFrom, To: 3},
-		{From: 3, Rel: db.RelYields, To: 4},
+	child, err := m.CreateTaskWithOptions("graph child", "", db.TaskCreateOptions{SourceTaskIDs: []int64{mustTaskID(t, source.ID)}})
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	gotNodes, gotEdges := inheritedGraphSnapshot(nodes, edges, 77)
-	if len(gotNodes) != 3 {
-		t.Fatalf("expected fact, terminal intent and finding; got %+v", gotNodes)
-	}
-	for _, node := range gotNodes {
-		if node.ID == 2 {
-			t.Fatal("running inherited intent leaked into graph snapshot")
+	defer m.DeleteTask(source.ID, DeleteTaskOptions{})
+	defer m.DeleteTask(child.ID, DeleteTaskOptions{})
+	nodes := []struct{ kind, state string }{{db.KindFact, "confirmed"}, {db.KindIntent, "running"}, {db.KindIntent, "done"}, {db.KindFinding, "confirmed"}}
+	ids := []int64{}
+	for _, node := range nodes {
+		id, err := source.Store.AddNode(node.kind, map[string]any{}, 0, node.state, "worker", nil)
+		if err != nil {
+			t.Fatal(err)
 		}
-		if !node.Inherited || node.SourceTaskID != 77 {
-			t.Fatalf("source provenance missing: %+v", node)
+		ids = append(ids, id)
+	}
+	for _, edge := range []db.Edge{{From: ids[0], Rel: db.RelDerivedFrom, To: ids[1]}, {From: ids[0], Rel: db.RelDerivedFrom, To: ids[2]}, {From: ids[2], Rel: db.RelYields, To: ids[3]}} {
+		if err := source.Store.Link(edge.From, edge.Rel, edge.To); err != nil {
+			t.Fatal(err)
 		}
 	}
-	if len(gotEdges) != 2 {
-		t.Fatalf("edge referencing hidden live intent was not removed: %+v", gotEdges)
+	s := &Server{Runtime: &Runtime{m: m}}
+	seen := map[string]TaskNodeDTO{}
+	edges := map[EdgeDTO]bool{}
+	cursor := int64(0)
+	for {
+		w := httptest.NewRecorder()
+		s.explorationGraph(w, httptest.NewRequest("GET", fmt.Sprintf("/api/exploration/graph?task=%s&after=%d&limit=1", child.ID, cursor), nil))
+		if w.Code != 200 {
+			t.Fatal(w.Body.String())
+		}
+		var page struct {
+			Nodes  []TaskNodeDTO
+			Edges  []EdgeDTO
+			Cursor int64 `json:"next_cursor"`
+			More   bool  `json:"has_more"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &page); err != nil {
+			t.Fatal(err)
+		}
+		for _, node := range page.Nodes {
+			seen[node.ID] = node
+		}
+		for _, edge := range page.Edges {
+			edges[edge] = true
+		}
+		if !page.More {
+			break
+		}
+		if page.Cursor <= cursor {
+			t.Fatal("cursor did not advance")
+		}
+		cursor = page.Cursor
 	}
-	for _, edge := range gotEdges {
-		if edge.From == 2 || edge.To == 2 {
-			t.Fatalf("live intent id leaked through edge: %+v", edge)
+	hidden := fmt.Sprint(ids[1])
+	if _, ok := seen[hidden]; ok {
+		t.Fatal("live source intent leaked")
+	}
+	for _, id := range []int64{ids[0], ids[2], ids[3]} {
+		node, ok := seen[fmt.Sprint(id)]
+		if !ok || !node.Inherited || node.SourceTaskID != source.ID {
+			t.Fatalf("missing source node/provenance: %+v", node)
+		}
+	}
+	if len(edges) != 2 {
+		t.Fatalf("lost visible cross-page edge: %+v", edges)
+	}
+	for edge := range edges {
+		if edge.Src == hidden || edge.Dst == hidden {
+			t.Fatalf("hidden source edge leaked: %+v", edge)
 		}
 	}
 }

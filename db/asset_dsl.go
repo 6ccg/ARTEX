@@ -328,6 +328,12 @@ func (b *whereBuilder) buildLeaf(e Expr) (string, error) {
 		if err != nil {
 			return "", fmt.Errorf("company_id 需要整数值: %s", e.Value)
 		}
+		if n == 0 {
+			if e.Op == "!=" {
+				return "company_id IS NOT NULL", nil
+			}
+			return "company_id IS NULL", nil
+		}
 		return "company_id = " + b.next(n), nil
 	}
 

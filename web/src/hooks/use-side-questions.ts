@@ -1,4 +1,5 @@
 "use client";
+import { startPolling } from "@/hooks/use-polling";
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
@@ -123,9 +124,7 @@ export function useSideQuestions(parent: string | null) {
 
   useEffect(() => {
     if (!open || !parent) return;
-    void load();
-    const timer = setInterval(() => void load(), 2000);
-    return () => clearInterval(timer);
+    return startPolling(load, 2000);
   }, [open, parent, load]);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: Reconnect after a clear attempt invalidates older callbacks.

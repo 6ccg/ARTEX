@@ -170,7 +170,7 @@ func taskDTO(t *Task, status string) TaskDTO {
 		CompanyIDs:         lifecycle.CompanyIDs,
 		CoverageEnabled:    t.CoverageEnabled,
 		ShareGlobalAssets:  lifecycle.ShareGlobalAssets,
-		WorkerCount:        t.WorkerCount,
+		WorkerCount:        lifecycle.WorkerCount,
 
 		NoResultSeconds:     t.NoResultSeconds,
 		NoResultMinFindings: t.NoResultMinFindings,

@@ -1,5 +1,7 @@
 "use client";
 import * as React from "react";
+import { startPolling, usePolling } from "@/hooks/use-polling";
+import { sameSnapshot } from "@/lib/list-snapshot";
 
 import Link from "next/link";
 
@@ -190,7 +192,6 @@ export default function FindingsPage() {
   React.useEffect(() => {
     let disposed = false;
     let failed = false;
-    let timer: ReturnType<typeof setTimeout>;
     async function refreshRetests() {
       const version = retestRefreshVersion.current;
       try {
@@ -201,14 +202,12 @@ export default function FindingsPage() {
       } catch (error) {
         if (!disposed && !failed) toast.error(liveUI("screen.34d011b1c81f43", { v0: (error as Error).message }));
         failed = true;
-      } finally {
-        if (!disposed) timer = setTimeout(() => void refreshRetests(), 3000);
       }
     }
-    void refreshRetests();
+    const stopPolling = startPolling(refreshRetests, 3000);
     return () => {
       disposed = true;
-      clearTimeout(timer);
+      stopPolling();
     };
   }, [liveUI]);
 
@@ -599,29 +598,28 @@ export default function FindingsPage() {
     void loadAssetTree();
   }, [activeRetestFingerprint, loadAssetTree, preferencesHydrated, view]);
 
-  // 只轮询当前视图:平铺视图刷当前页,分组视图刷组头与每个已展开的组(其分页彼此独立)。
-  // 资产视图只查一次(见下面的 return),它的左树是导航结构,没必要每 5 秒重算。
-  // 等偏好水合后再发首个请求,否则会先按默认视图/筛选白拉一次。
   React.useEffect(() => {
-    if (!preferencesHydrated) return;
-    void activeRetestFingerprint; // 包括不定时轮询的资产视图，也在复测结束后刷新处置状态。
-    const refresh = () => {
-      if (view === "flat" || view === "asset") {
-        if (!flatStateRef.current.loading) void loadFlat();
-        return;
-      }
-      void refreshGroups();
+    if (!preferencesHydrated || view !== "asset") return;
+    void activeRetestFingerprint;
+    void loadFlat();
+  }, [activeRetestFingerprint, loadFlat, preferencesHydrated, view]);
+
+  const refreshVisibleList = React.useCallback(async () => {
+    void activeRetestFingerprint;
+    if (view === "flat") {
+      if (!flatStateRef.current.loading) await loadFlat();
+    } else if (view === "grouped") {
+      const requests = [refreshGroups()];
       for (const key of expandedGroupsRef.current) {
         if (!visibleGroupKeysRef.current.has(key)) continue;
         const state = groupFindingsRef.current[key];
-        if (state?.loaded && !state.loading) void loadGroup(key, state.page, state.pageSize);
+        if (state?.loaded && !state.loading) requests.push(loadGroup(key, state.page, state.pageSize));
       }
-    };
-    refresh();
-    if (view === "asset") return;
-    const timer = setInterval(refresh, 5000);
-    return () => clearInterval(timer);
-  }, [activeRetestFingerprint, loadFlat, loadGroup, preferencesHydrated, refreshGroups, view]);
+      await Promise.all(requests);
+    }
+  }, [activeRetestFingerprint, loadFlat, loadGroup, refreshGroups, view]);
+
+  usePolling(refreshVisibleList, preferencesHydrated && (view === "flat" || view === "grouped") ? 5000 : null);
 
   React.useEffect(() => {
     const lastPage = Math.max(1, Math.ceil(groupTotal / pageSize));
@@ -643,29 +641,20 @@ export default function FindingsPage() {
   activeStatsFingerprint.current = statsFingerprint;
   const statsRequest = React.useRef(0);
   const refreshStats = React.useCallback(async () => {
+    void activeRetestFingerprint;
     if (activeStatsFingerprint.current !== statsFingerprint) return;
     const request = ++statsRequest.current;
     try {
       const result = await api.findingStats(statsQuery);
       if (request !== statsRequest.current || activeStatsFingerprint.current !== statsFingerprint) return;
-      setStats(result);
+      setStats((current) => (sameSnapshot(current, result) ? current : result));
       setStatsLoaded(true);
     } catch {
       // Retain the previous snapshot during transient refresh failures.
     }
-  }, [statsQuery, statsFingerprint]);
+  }, [statsQuery, statsFingerprint, activeRetestFingerprint]);
 
-  // Counts use the current filters and asset subtree, independently of pagination.
-  React.useEffect(() => {
-    if (!preferencesHydrated) return;
-    void activeRetestFingerprint;
-    void refreshStats();
-    const t = setInterval(() => void refreshStats(), 5000);
-    return () => {
-      statsRequest.current++;
-      clearInterval(t);
-    };
-  }, [preferencesHydrated, refreshStats, activeRetestFingerprint]);
+  usePolling(refreshStats, preferencesHydrated ? 5000 : null);
 
   React.useEffect(() => {
     if (!statsLoaded) return;

@@ -194,6 +194,69 @@ func parseURL(raw string) (domain string, port int, serviceName string) {
 	return
 }
 
+// HTTPServiceURL identifies the listening website, independently of a request's
+// path/query. Paths belong to endpoint assets; captures keep individual requests.
+func HTTPServiceURL(raw string) (string, error) {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil {
+		return "", err
+	}
+	u.Scheme = strings.ToLower(u.Scheme)
+	if u.Hostname() == "" || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil {
+		return "", fmt.Errorf("HTTP service requires an http(s) URL with a host")
+	}
+	u.Scheme = strings.ToLower(u.Scheme)
+	host := strings.ToLower(u.Hostname())
+	port := u.Port()
+	if (u.Scheme == "http" && port == "80") || (u.Scheme == "https" && port == "443") {
+		port = ""
+	}
+	if port != "" {
+		host = net.JoinHostPort(host, port)
+	} else if strings.Contains(host, ":") {
+		host = "[" + host + "]"
+	}
+	return u.Scheme + "://" + host, nil
+}
+
+func endpointIdentity(raw string, params []map[string]any) (string, []map[string]any, error) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return "", nil, err
+	}
+	base, err := HTTPServiceURL(raw)
+	if err != nil {
+		return "", nil, err
+	}
+	path := u.EscapedPath()
+	if path == "/" {
+		path = ""
+	}
+	if u.RawQuery != "" {
+		byKey := map[string]map[string]any{}
+		for name, values := range u.Query() {
+			item := map[string]any{"name": name, "location": "query"}
+			if len(values) > 0 {
+				item["value"] = values[0]
+			}
+			byKey["query:"+name] = item
+		}
+		for _, p := range params {
+			byKey[fmt.Sprint(p["location"])+":"+fmt.Sprint(p["name"])] = p
+		}
+		keys := make([]string, 0, len(byKey))
+		for key := range byKey {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		params = nil
+		for _, key := range keys {
+			params = append(params, byKey[key])
+		}
+	}
+	return base + path, params, nil
+}
+
 func marshalJSONBArray(items []map[string]any) (string, error) {
 	if len(items) == 0 {
 		return "{}", nil
@@ -256,6 +319,9 @@ func (s *AssetStore) UpsertRootDomain(req UpsertRootDomainReq) (int64, error) {
 	domain := DomainKey(req.Domain)
 	if domain == "" {
 		return 0, fmt.Errorf("domain is required")
+	}
+	if net.ParseIP(domain) != nil {
+		return 0, fmt.Errorf("IP addresses must use type=ip, not root_domain")
 	}
 	if s.tx == nil {
 		return s.withCompanyScopeMutation(func(scoped *AssetStore) (int64, error) {
@@ -461,6 +527,9 @@ func (s *AssetStore) UpsertSubdomain(req UpsertSubdomainReq) (id int64, err erro
 	if domain == "" {
 		return 0, fmt.Errorf("domain is required")
 	}
+	if net.ParseIP(domain) != nil {
+		return 0, fmt.Errorf("IP addresses must use type=ip, not subdomain")
+	}
 	if s.tx == nil {
 		return s.withCompanyScopeMutation(func(scoped *AssetStore) (int64, error) {
 			return scoped.UpsertSubdomain(req)
@@ -468,7 +537,7 @@ func (s *AssetStore) UpsertSubdomain(req UpsertSubdomainReq) (id int64, err erro
 	}
 
 	rootDomain, _ := RootDomain(domain)
-	if rootDomain == "" {
+	if rootDomain == "" && net.ParseIP(domain) == nil {
 		rootDomain = domain
 	}
 
@@ -707,10 +776,20 @@ func (s *AssetStore) UpsertHTTPService(req UpsertHTTPServiceReq) (int64, error) 
 			return scoped.UpsertHTTPService(req)
 		})
 	}
-	normURL := normalizeURL(req.URL)
+	normURL, err := HTTPServiceURL(req.URL)
+	if err != nil {
+		return 0, err
+	}
+	// Keep an explicitly supplied path as an endpoint without inventing a method.
+	if _, err := s.httpServiceEndpoint(req.URL, req.TaskID); err != nil {
+		return 0, err
+	}
 	domain, port, serviceName := parseURL(normURL)
+	if net.ParseIP(domain) != nil && req.IP == "" {
+		req.IP = domain
+	}
 	rootDomain, _ := RootDomain(domain)
-	if rootDomain == "" {
+	if rootDomain == "" && net.ParseIP(domain) == nil {
 		rootDomain = domain
 	}
 
@@ -861,7 +940,7 @@ func (s *AssetStore) UpsertOtherService(req UpsertOtherServiceReq) (int64, error
 	var rootDomain string
 	if domain != "" {
 		rootDomain, _ = RootDomain(domain)
-		if rootDomain == "" {
+		if rootDomain == "" && net.ParseIP(domain) == nil {
 			rootDomain = domain
 		}
 	}
@@ -958,12 +1037,40 @@ RETURNING id), linked AS (
 // root_domain and (when it's a real subdomain, not the apex or an IP) subdomain
 // asset — so those asset types stay populated and can anchor task scope. Best-effort.
 func (s *AssetStore) linkHostAssets(domain, rootDomain string, taskID int64) {
-	if rootDomain != "" {
+	if ip := net.ParseIP(domain); ip != nil {
+		_, _ = s.UpsertIP(UpsertIPReq{IP: ip.String(), TaskID: taskID})
+		return
+	}
+	if rootDomain != "" && net.ParseIP(rootDomain) == nil {
 		_, _ = s.UpsertRootDomain(UpsertRootDomainReq{Domain: rootDomain, TaskID: taskID})
 	}
 	if domain != "" && domain != rootDomain && net.ParseIP(domain) == nil {
 		_, _ = s.UpsertSubdomain(UpsertSubdomainReq{Domain: domain, TaskID: taskID})
 	}
+}
+
+func (s *AssetStore) httpServiceEndpoint(raw string, taskID int64) (int64, error) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return 0, err
+	}
+	if (u.Path == "" || u.Path == "/") && u.RawQuery == "" {
+		return 0, nil
+	}
+	endpointURL, _, err := endpointIdentity(raw, nil)
+	if err != nil {
+		return 0, err
+	}
+	var id int64
+	var method string
+	err = s.tx.QueryRow(`SELECT id,COALESCE(method,'') FROM assets WHERE type='endpoint' AND url=$1 ORDER BY id LIMIT 1`, endpointURL).Scan(&id, &method)
+	if err == nil {
+		return s.UpsertEndpoint(UpsertEndpointReq{URL: raw, Method: method, TaskID: taskID})
+	}
+	if err != sql.ErrNoRows {
+		return 0, err
+	}
+	return s.UpsertEndpoint(UpsertEndpointReq{URL: raw, Method: "UNKNOWN", TaskID: taskID})
 }
 
 // =====================================================================
@@ -997,10 +1104,14 @@ func (s *AssetStore) UpsertEndpoint(req UpsertEndpointReq) (int64, error) {
 		})
 	}
 	method := strings.ToUpper(req.Method)
-	normURL := normalizeURL(req.URL)
+	normURL, params, err := endpointIdentity(req.URL, req.Params)
+	if err != nil {
+		return 0, err
+	}
+	req.Params = params
 	domain, port, _ := parseURL(normURL)
 	rootDomain, _ := RootDomain(domain)
-	if rootDomain == "" {
+	if rootDomain == "" && net.ParseIP(domain) == nil {
 		rootDomain = domain
 	}
 

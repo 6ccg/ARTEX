@@ -467,7 +467,16 @@ func (sc *Scheduler) fireToolCallsOne(triggers []*db.AgentTrigger) {
 			if !containsFold(tr.ToolNames, e.Tool) {
 				continue
 			}
-			if !sc.s.StartTriggeredRun(tr.AgentKey, fmt.Sprintf("工具触发 · %s · task#%d", e.Tool, e.TaskID), tr.ToolCallMessage+msgCtx, e.TaskID, true, e.TaskDesc, e.TaskGoal) {
+			title := fmt.Sprintf("工具触发 · %s · task#%d", e.Tool, e.TaskID)
+			if e.Tool == "report_finding" {
+				var input struct {
+					Name string `json:"name"`
+				}
+				if json.Unmarshal([]byte(e.ToolInput), &input) == nil && strings.TrimSpace(input.Name) != "" {
+					title = input.Name
+				}
+			}
+			if !sc.s.StartTriggeredRun(tr.AgentKey, title, tr.ToolCallMessage+msgCtx, e.TaskID, true, e.TaskDesc, e.TaskGoal) {
 				return
 			}
 		}

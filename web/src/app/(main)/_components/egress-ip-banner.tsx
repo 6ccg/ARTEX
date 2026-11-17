@@ -6,6 +6,7 @@ import type { TFunction } from "i18next";
 import { Globe2Icon, Loader2Icon, RefreshCwIcon, XIcon } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
+import { usePolling } from "@/hooks/use-polling";
 import { useLiveTranslation } from "@/i18n/use-live-translation";
 import { api } from "@/lib/api";
 import type { EgressCheck, EgressReport } from "@/lib/types";
@@ -29,25 +30,33 @@ export function EgressIpProvider({ children }: { children: React.ReactNode }) {
   const [error, setError] = React.useState<string | null>(null);
   const [isLoading, setIsLoading] = React.useState(false);
   const probeSequence = React.useRef(0);
+  const inFlight = React.useRef<{ sequence: number; promise: Promise<EgressReport> } | null>(null);
 
-  const probeForProxy = React.useCallback(async (globalProxy: string) => {
+  // Include the settings read in single-flight protection: manual and scheduled
+  // refreshes share one request, even while the configured proxy is being read.
+  const probeEgress = React.useCallback((): Promise<EgressReport> => {
+    if (inFlight.current?.sequence === probeSequence.current) return inFlight.current.promise;
     const sequence = ++probeSequence.current;
     setError(null);
     setIsLoading(true);
-    try {
-      const nextReport = await api.testEgressProxy({ global_proxy: globalProxy });
-      if (sequence === probeSequence.current) setReport(nextReport);
-      return nextReport;
-    } catch (cause) {
-      const message = cause instanceof Error ? cause.message : "settings.unknownError";
-      if (sequence === probeSequence.current) {
-        setReport(null);
-        setError(message);
+    const promise = (async () => {
+      try {
+        const settings = await api.settings();
+        if (sequence !== probeSequence.current) throw new Error("settings.noProbeResult");
+        const nextReport = await api.testEgressProxy({ global_proxy: settings.global_proxy ?? "" });
+        if (sequence === probeSequence.current) setReport(nextReport);
+        return nextReport;
+      } catch (cause) {
+        const message = cause instanceof Error ? cause.message : "settings.unknownError";
+        if (sequence === probeSequence.current) setError(message);
+        throw cause;
+      } finally {
+        if (sequence === probeSequence.current) setIsLoading(false);
+        if (inFlight.current?.sequence === sequence) inFlight.current = null;
       }
-      throw cause;
-    } finally {
-      if (sequence === probeSequence.current) setIsLoading(false);
-    }
+    })();
+    inFlight.current = { sequence, promise };
+    return promise;
   }, []);
 
   React.useEffect(() => {
@@ -57,51 +66,30 @@ export function EgressIpProvider({ children }: { children: React.ReactNode }) {
       .then((settings) => {
         if (cancelled) return;
         const nextEnabled = !!settings.show_egress_ip;
-        const nextProxy = settings.global_proxy ?? "";
         setEnabledState(nextEnabled);
-        if (nextEnabled) void probeForProxy(nextProxy);
       })
       .catch(() => undefined);
     return () => {
       cancelled = true;
+      probeSequence.current += 1;
     };
-  }, [probeForProxy]);
+  }, []);
 
-  React.useEffect(() => {
-    if (!enabled) return;
-    const timer = window.setInterval(() => {
-      void api
-        .settings()
-        .then((settings) => probeForProxy(settings.global_proxy ?? ""))
-        .catch(() => undefined);
-    }, 10000);
-    return () => window.clearInterval(timer);
-  }, [enabled, probeForProxy]);
+  usePolling(probeEgress, enabled ? 60_000 : null);
 
   const setEnabled = React.useCallback(
     async (nextEnabled: boolean) => {
       const settings = await api.setSettings({ show_egress_ip: nextEnabled });
-      const nextProxy = settings.global_proxy ?? "";
-      setEnabledState(nextEnabled);
-      if (nextEnabled) {
-        await probeForProxy(nextProxy);
-      } else {
+      setEnabledState(!!settings.show_egress_ip);
+      if (!nextEnabled) {
         probeSequence.current += 1;
         setIsLoading(false);
         setReport(null);
         setError(null);
       }
     },
-    [probeForProxy],
+    [],
   );
-
-  // Refresh from settings first so a proxy saved on the settings page is always
-  // the one used for the navbar probe.
-  const probeEgress = React.useCallback(async () => {
-    const settings = await api.settings();
-    const nextProxy = settings.global_proxy ?? "";
-    return probeForProxy(nextProxy);
-  }, [probeForProxy]);
 
   const dismiss = React.useCallback(() => setEnabled(false), [setEnabled]);
 
@@ -151,11 +139,11 @@ export function EgressIpNavbar() {
   return (
     <div className="flex min-w-0 items-center justify-center gap-2 text-xs" role="status" aria-live="polite">
       <Globe2Icon className="size-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
-      {isLoading ? (
+      {isLoading && !report ? (
         <span className="flex items-center gap-1 text-muted-foreground">
           <Loader2Icon className="size-3 animate-spin" aria-hidden="true" /> {t("settings.probingIp")}
         </span>
-      ) : error ? (
+      ) : error && !report ? (
         <span className="truncate text-destructive" title={t(error, { defaultValue: error })}>
           {t("settings.probeFailedPrefix")}
           {t(error, { defaultValue: error })}
@@ -165,6 +153,7 @@ export function EgressIpNavbar() {
           <IpValue label={t("settings.directIp")} check={direct} />
           <IpValue label={t("settings.proxyIPv4")} check={global} />
           {ipv6 && <IpValue label={t("settings.proxyIPv6")} check={ipv6} />}
+          {error && <span className="text-destructive" title={t(error, { defaultValue: error })}>{t("settings.probeFailed")}</span>}
         </div>
       ) : (
         <span className="text-muted-foreground">{t("settings.noEgressResults")}</span>
@@ -173,7 +162,7 @@ export function EgressIpNavbar() {
         type="button"
         variant="ghost"
         size="icon-sm"
-        onClick={() => void probeEgress()}
+        onClick={() => void probeEgress().catch(() => undefined)}
         disabled={isLoading}
         aria-label={t("settings.refreshEgress")}
       >
@@ -183,7 +172,7 @@ export function EgressIpNavbar() {
         type="button"
         variant="ghost"
         size="icon-sm"
-        onClick={() => void dismiss()}
+        onClick={() => void dismiss().catch(() => undefined)}
         aria-label={t("settings.hideEgress")}
       >
         <XIcon className="size-3.5" aria-hidden="true" />

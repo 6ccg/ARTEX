@@ -1,12 +1,16 @@
 "use client";
 
 import * as React from "react";
+import type { ConversationListPage } from "@/lib/types";
+import Link from "next/link";
 
 import {
+  ArrowDownIcon,
   ArrowUpIcon,
   Bot,
   ChevronDownIcon,
   ChevronRightIcon,
+  ExternalLinkIcon,
   ListChecksIcon,
   Loader2Icon,
   MoreHorizontalIcon,
@@ -15,6 +19,7 @@ import {
   PinIcon,
   PinOffIcon,
   PlusIcon,
+  SearchIcon,
   Square,
   Trash2Icon,
   XIcon,
@@ -48,6 +53,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { Input } from "@/components/ui/input";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -58,10 +64,11 @@ import { localizedError } from "@/i18n/errors";
 import { useLiveTranslation } from "@/i18n/use-live-translation";
 import { mergeActivities } from "@/lib/activity-merge";
 import { api } from "@/lib/api";
+import { reconcileList, sameSnapshot } from "@/lib/list-snapshot";
 import { shouldSubmitOnKey, useChatSendMode } from "@/lib/chat-send-mode";
 import { getLocalStorageValue, setLocalStorageValue } from "@/lib/local-storage.client";
 import { isBtwCommand } from "@/lib/side-questions";
-import type { Activity, Agent, ChatAttachment, Conversation, LLMProfile } from "@/lib/types";
+import type { Activity, Agent, ChatAttachment, Conversation, ConversationStats, LLMProfile } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 // fmtBytes renders a human file size for attachment chips (mirrors transcript.tsx).
@@ -104,29 +111,45 @@ function conversationIsPinned(conversation: Conversation): boolean {
 }
 
 // AgentGroup is one collapsible section of the left rail: all unpinned
-// conversations of a single agent, newest activity first.
+// conversations of a single agent (or originating automation task), newest activity first.
 interface AgentGroup {
   key: string;
   name: string;
   conversations: Conversation[];
   runningCount: number;
+  totalCount?: number;
+  sourceTaskId?: number;
 }
 
-// groupByAgent buckets conversations by agent, preserving the incoming order
-// both inside a group and across groups. The server already sorts by updated_at
-// DESC, so first-appearance order == most-recently-active group first.
-function groupByAgent(conversations: Conversation[], agentByKey: Map<string, Agent>): AgentGroup[] {
+// groupByAgent buckets conversations by agent (or originating task for automations),
+// preserving the incoming order both inside a group and across groups. The server
+// already sorts by updated_at DESC, so first-appearance order == most-recently-active group first.
+function groupByAgent(
+  conversations: Conversation[],
+  agentByKey: Map<string, Agent>,
+  translate: (key: string) => string,
+  executionName?: (task?: number) => string,
+): AgentGroup[] {
   const groups = new Map<string, AgentGroup>();
   for (const conversation of conversations) {
-    let group = groups.get(conversation.agent_key);
+    const isAutomationGroup = conversation.source === "automation" && Boolean(executionName);
+    const key = isAutomationGroup ? `task:${conversation.source_task_id ?? 0}` : conversation.agent_key;
+    let group = groups.get(key);
     if (!group) {
+      const agent = agentByKey.get(conversation.agent_key);
       group = {
-        key: conversation.agent_key,
-        name: agentByKey.get(conversation.agent_key)?.name || conversation.agent_key,
+        key,
+        name:
+          isAutomationGroup && executionName
+            ? executionName(conversation.source_task_id)
+            : agent
+              ? agentDisplayName(agent, translate)
+              : conversation.agent_key,
         conversations: [],
         runningCount: 0,
+        sourceTaskId: isAutomationGroup && conversation.source_task_id ? conversation.source_task_id : undefined,
       };
-      groups.set(conversation.agent_key, group);
+      groups.set(key, group);
     }
     group.conversations.push(conversation);
     if (conversation.running) group.runningCount++;
@@ -526,14 +549,13 @@ function ChatView({
   onTitleMaybeChanged: () => void;
   onConvUpdated: () => void;
 }) {
-  const { t: translate } = useLiveTranslation();
+  const { t: translate, liveT } = useLiveTranslation();
   const approvalFocus = useApprovalFocus({ conversationId: conv.id });
   const [messages, setMessages] = React.useState<Activity[]>([]);
   const [running, setRunning] = React.useState(false);
   const [input, setInput] = React.useState(initial?.input ?? "");
   const [sending, setSending] = React.useState(false);
   const [stopping, setStopping] = React.useState(false);
-  // 方式1 文件上传:已上传的附件(落到 sessions/conv-<id>/uploads/),随下条消息一起发。
   const [attachments, setAttachments] = React.useState<ChatAttachment[]>(initial?.attachments ?? []);
   const [uploading, setUploading] = React.useState(false);
   const cursorRef = React.useRef(0); // newest loaded id — incremental-tail anchor
@@ -541,7 +563,12 @@ function ChatView({
   const hasMoreRef = React.useRef(false); // older history remains above the loaded window
   const loadingMoreRef = React.useRef(false); // guard: one scroll-up load at a time
   const [historyLoaded, setHistoryLoaded] = React.useState(false);
-  const [hasMore, setHasMore] = React.useState(false); // drives the "load earlier" hint
+  const [historyError, setHistoryError] = React.useState("");
+  const [historyRetry, setHistoryRetry] = React.useState(0);
+  const [loadingEarlier, setLoadingEarlier] = React.useState(false);
+  const [stats, setStats] = React.useState<ConversationStats>();
+  const [awayFromBottom, setAwayFromBottom] = React.useState(false);
+  const [hasMore, setHasMore] = React.useState(false); // drives the "load earlier" control
   const agent = agents.find((a) => a.key === conv.agent_key);
   const currentProfileId = conv.llm_profile_id ?? null;
   const side = useSideQuestions(`/api/conversations/${conv.id}`);
@@ -568,10 +595,8 @@ function ChatView({
   }, [messages]);
 
   // reset + load whenever the selected conversation changes. Load only the LATEST
-  // page on open — a long thread's final answer sits at the very end, so the newest
-  // page shows it immediately (issue #3: opening/refresh used to load the oldest
-  // page, so the completed result was missing until another message advanced the
-  // cursor). Older history streams in on scroll-up (loadEarlier below).
+  // page on open — older history streams in on scroll-up or button click (loadEarlier below).
+  // biome-ignore lint/correctness/useExhaustiveDependencies: historyRetry explicitly retries the same initial history request.
   React.useEffect(() => {
     cursorRef.current = 0;
     earliestRef.current = 0;
@@ -579,13 +604,17 @@ function ChatView({
     setHasMore(false);
     setMessages([]);
     setHistoryLoaded(false);
+    setHistoryError("");
+    setStats(undefined);
     setRunning(false);
+    setAwayFromBottom(false);
     let live = true;
     api
       .conversationHistory(conv.id, 0, HISTORY_PAGE)
       .then((r) => {
         if (!live) return;
         setMessages((current) => mergeActivities(r.items, current));
+        setStats(r.stats);
         cursorRef.current = Math.max(cursorRef.current, r.cursor);
         earliestRef.current = r.items.length ? r.items[0].seq : 0;
         hasMoreRef.current = r.hasMore;
@@ -593,15 +622,16 @@ function ChatView({
         setRunning((current) => current || r.running);
         setHistoryLoaded(true);
       })
-      .catch(() => {
-        // A source link can retry history through its locator; ordinary chats
-        // retain the existing usable empty state on a transient failure.
-        if (live) setHistoryLoaded(true);
+      .catch((error) => {
+        if (live) {
+          setHistoryLoaded(true);
+          setHistoryError(localizedError(error, liveT));
+        }
       });
     return () => {
       live = false;
     };
-  }, [conv.id]);
+  }, [conv.id, historyRetry, liveT]);
 
   // A trigger or another tab may start a turn while this conversation is open.
   // A false list snapshot must not stop the tail before its final messages load.
@@ -623,6 +653,7 @@ function ChatView({
           setMessages((prev) => mergeActivities(prev, r.items));
         }
         cursorRef.current = Math.max(cursorRef.current, r.cursor);
+        if (r.stats) setStats(r.stats);
         keepPolling = r.running;
         setRunning(r.running);
         if (!r.running) onTitleMaybeChanged(); // first-turn auto-title landed
@@ -661,17 +692,17 @@ function ChatView({
   // ---- transcript auto-scroll (open → bottom; stick to bottom unless scrolled up) ----
   const contentRef = React.useRef<HTMLDivElement | null>(null);
   const atBottomRef = React.useRef(true);
-  const viewport = React.useCallback(
-    () => (contentRef.current?.closest('[data-slot="scroll-area-viewport"]') as HTMLElement | null) ?? null,
-    [],
-  );
-  // Scroll-up loads one older page and prepends it, preserving the visual position
-  // so the view doesn't jump (record height/offset before, restore the delta after).
+  const viewportRef = React.useRef<HTMLDivElement>(null);
+  const viewport = React.useCallback(() => viewportRef.current, []);
+  // Scroll-up or explicit button click loads one older page and prepends it,
+  // preserving the visual position so the view doesn't jump.
   const loadEarlier = React.useCallback(async () => {
     if (loadingMoreRef.current || !hasMoreRef.current) return;
     const vp = viewport();
     if (!vp) return;
     loadingMoreRef.current = true;
+    setLoadingEarlier(true);
+    setHistoryError("");
     const prevH = vp.scrollHeight;
     const prevTop = vp.scrollTop;
     try {
@@ -686,18 +717,20 @@ function ChatView({
         const v = viewport();
         if (v) v.scrollTop = prevTop + (v.scrollHeight - prevH);
       });
-    } catch {
-      /* transient — a later scroll retries */
+    } catch (error) {
+      setHistoryError(localizedError(error, liveT));
     } finally {
       loadingMoreRef.current = false;
+      setLoadingEarlier(false);
     }
-  }, [conv.id, viewport]);
+  }, [conv.id, liveT, viewport]);
   React.useEffect(() => {
     const vp = viewport();
     if (!vp) return;
     const onScroll = () => {
       if (approvalFocus.state && !focusHistory.ready) return;
       atBottomRef.current = vp.scrollTop + vp.clientHeight >= vp.scrollHeight - 60;
+      setAwayFromBottom(!atBottomRef.current);
       if (vp.scrollTop <= 80) void loadEarlier(); // near top → pull an older page
     };
     vp.addEventListener("scroll", onScroll, { passive: true });
@@ -719,17 +752,36 @@ function ChatView({
     const vp = viewport();
     if (vp) vp.scrollTop = vp.scrollHeight;
   }, [messages, running, viewport, approvalFocus.state]);
+  // Re-pin to bottom when lazy details expand while user is already at the bottom.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: conv.id intentionally rebinds ResizeObserver per conversation.
+  React.useEffect(() => {
+    const el = contentRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(() => {
+      if (approvalFocus.state || !atBottomRef.current) return;
+      const vp = viewport();
+      if (vp) vp.scrollTop = vp.scrollHeight;
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, [conv.id, viewport, approvalFocus.state]);
 
-  // Per-conversation token total, live — same accounting as the main-agent
-  // console: completed runs' `result` sum + the in-progress run's latest `usage`.
+  // Per-conversation token total: prefer server-computed thread stats (includes
+  // older unloaded pages), falling back to loaded messages when stats are absent.
   const tokenTotal = React.useMemo(() => {
+    if (stats) {
+      const i = stats.input_tokens ?? 0;
+      const o = stats.output_tokens ?? 0;
+      const cr = stats.cache_read_tokens ?? 0;
+      return { i, o, cr, turns: stats.turns ?? 0, any: i + o + cr > 0 };
+    }
     let i = 0,
       o = 0,
       cr = 0;
     let li = 0,
       lo = 0,
       lcr = 0;
-    let turns = 0; // agent 循环轮次 = 模型调用次数（每次一条 kind='usage'）
+    let turns = 0;
     for (const a of messages) {
       if (a.kind === "result") {
         i += a.input_tokens ?? 0;
@@ -747,7 +799,7 @@ function ChatView({
       O = o + lo,
       CR = cr + lcr;
     return { i: I, o: O, cr: CR, turns, any: I + O + CR > 0 };
-  }, [messages]);
+  }, [stats, messages]);
 
   // pickFiles uploads into this conversation's session dir (sessions/conv-<id>/
   // uploads/) and queues the returned metadata to send with the next message.
@@ -801,18 +853,20 @@ function ChatView({
     }
   }
 
+  const displayName = agent ? agentDisplayName(agent, translate) : conv.agent_key;
+
   return (
     <SideQuestionWorkspace
       side={side}
-      label={agent?.name ?? conv.agent_key}
+      label={displayName}
       composerLayout="inline"
       noSnapshotHint={translate("overview.sideQuestionUnavailable")}
       emptyDescription={translate("overview.sideQuestionHelp")}
     >
-      {/* header: which agent + live + token meta */}
+      {/* header: which agent + live/outcome + originating task link + token meta */}
       <div className="flex min-w-0 flex-wrap items-center gap-2 border-b px-4 py-2.5">
         <Bot className="text-muted-foreground size-4 shrink-0" />
-        <span className="min-w-0 max-w-48 truncate text-sm font-medium">{agent?.name ?? conv.agent_key}</span>
+        <span className="min-w-0 max-w-48 truncate text-sm font-medium">{displayName}</span>
         <span className="text-muted-foreground hidden shrink-0 font-mono text-xs sm:inline">{conv.agent_key}</span>
         {agent && !agent.builtin && (
           <Badge variant="outline" className="shrink-0 px-1.5 py-0 text-[10px]">
@@ -822,12 +876,35 @@ function ChatView({
         {agent?.description && (
           <span className="text-muted-foreground min-w-0 truncate text-xs">{agent.description}</span>
         )}
-        {running && <LiveBadge />}
+        {running ? (
+          <LiveBadge />
+        ) : conv.source === "automation" && conv.outcome ? (
+          <Badge
+            variant="secondary"
+            className={cn(
+              "shrink-0 px-1.5 py-0 text-[10px]",
+              conv.outcome === "completed"
+                ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400"
+                : "bg-amber-500/15 text-amber-700 dark:text-amber-400",
+            )}
+          >
+            {translate(`opt.execution.${conv.outcome}`)}
+          </Badge>
+        ) : null}
+        {conv.source_task_id ? (
+          <Link
+            href={`/function/tasks/detail?id=${conv.source_task_id}`}
+            className="text-primary hover:underline inline-flex shrink-0 items-center gap-1 text-xs font-medium"
+          >
+            {translate("opt.taskExecutions", { id: conv.source_task_id })}
+            <ExternalLinkIcon className="size-3" />
+          </Link>
+        ) : null}
         <SideQuestionButton side={side} />
         <div className="text-muted-foreground ml-auto flex min-w-0 max-w-full items-center justify-end gap-x-3 gap-y-1 text-xs max-sm:w-full max-sm:flex-wrap">
           {tokenTotal.turns > 0 && (
-            <span title={translate("overview.roundsHint")} className="tabular-nums">
-              {translate("overview.rounds", { count: tokenTotal.turns })}
+            <span title={translate("opt.threadTotals")} className="tabular-nums">
+              {translate("opt.modelCalls", { count: tokenTotal.turns })}
             </span>
           )}
           {tokenTotal.any && (
@@ -841,18 +918,39 @@ function ChatView({
       <ApprovalExecutionFocus focus={approvalFocus} history={focusHistory} />
 
       {/* messages */}
-      <ScrollArea type="auto" className="min-h-0 min-w-0 flex-1 [&_[data-slot=scroll-area-viewport]>div]:block!">
+      <ScrollArea viewportRef={viewportRef} type="auto" className="min-h-0 min-w-0 flex-1">
         <div className="min-w-0 max-w-full px-4 py-3" ref={contentRef}>
+          {historyError ? (
+            <div className="mb-2 flex items-center gap-2 text-sm text-destructive">
+              <span className="min-w-0 flex-1">{historyError}</span>
+              <Button
+                type="button"
+                size="sm"
+                variant="ghost"
+                onClick={() => (messages.length ? void loadEarlier() : setHistoryRetry((x) => x + 1))}
+              >
+                {translate("common.retry")}
+              </Button>
+            </div>
+          ) : null}
           {messages.length === 0 && !running ? (
             <div className="text-muted-foreground py-10 text-center text-sm">
-              {translate("overview.startChat", { name: agent?.name ?? conv.agent_key })}
+              {translate("overview.startChat", { name: displayName })}
             </div>
           ) : (
             <>
               {hasMore && (
-                <div className="text-muted-foreground/70 pb-2 text-center text-[11px]">
-                  {translate("overview.olderMessages")}
-                </div>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="sm"
+                  className="text-muted-foreground mb-2 w-full text-xs"
+                  disabled={loadingEarlier}
+                  onClick={() => void loadEarlier()}
+                >
+                  {loadingEarlier && <Loader2Icon className="size-3.5 animate-spin" />}
+                  {translate("opt.loadEarlier")}
+                </Button>
               )}
               <Transcript
                 activity={messages}
@@ -865,6 +963,28 @@ function ChatView({
           )}
         </div>
       </ScrollArea>
+
+      {awayFromBottom && (
+        <div className="flex justify-center border-t px-4 py-1">
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            className="h-7 gap-1 text-xs"
+            onClick={() => {
+              const vp = viewport();
+              if (vp) {
+                atBottomRef.current = true;
+                vp.scrollTop = vp.scrollHeight;
+                setAwayFromBottom(false);
+              }
+            }}
+          >
+            <ArrowDownIcon className="size-3" />
+            {translate("opt.latest")}
+          </Button>
+        </div>
+      )}
 
       <Composer
         value={input}
@@ -935,6 +1055,7 @@ const ConversationItem = React.memo(function ConversationItem({
   const renameInputRef = React.useRef<HTMLInputElement>(null);
   const cancelRenameRef = React.useRef(false);
   const pinned = conversationIsPinned(conv);
+  const displayTitle = conv.title || translate("overview.newConversation");
 
   React.useEffect(() => {
     if (!renaming) return;
@@ -955,7 +1076,7 @@ const ConversationItem = React.memo(function ConversationItem({
           checked={selectedForDelete}
           onCheckedChange={(checked) => onSelectedForDeleteChange(conv.id, checked === true)}
           aria-label={translate("overview.selectConversation", {
-            title: conv.title || translate("overview.newConversation"),
+            title: displayTitle,
           })}
           className="ml-1 shrink-0"
         />
@@ -988,11 +1109,23 @@ const ConversationItem = React.memo(function ConversationItem({
         >
           <div className="flex min-w-0 items-center gap-1.5">
             {pinned && <PinIcon className="text-primary size-3 shrink-0" aria-label={translate("overview.pinned")} />}
-            <div className="truncate text-sm">{conv.title || translate("overview.newConversation")}</div>
+            <div className="truncate text-sm">{displayTitle}</div>
             {conv.running ? (
               <Badge variant="secondary" className="shrink-0 gap-1" title={translate("overview.agentRunning")}>
                 <Spinner className="size-3" aria-hidden="true" />
                 {translate("overview.running")}
+              </Badge>
+            ) : conv.source === "automation" && conv.outcome ? (
+              <Badge
+                variant="secondary"
+                className={cn(
+                  "shrink-0 px-1.5 py-0 text-[10px]",
+                  conv.outcome === "completed"
+                    ? "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400"
+                    : "bg-amber-500/15 text-amber-700 dark:text-amber-400",
+                )}
+              >
+                {translate(`opt.execution.${conv.outcome}`)}
               </Badge>
             ) : null}
           </div>
@@ -1000,7 +1133,7 @@ const ConversationItem = React.memo(function ConversationItem({
             {showAgent && (
               <>
                 <Bot className="size-3 shrink-0" />
-                <span className="min-w-0 truncate">{agent?.name ?? conv.agent_key}</span>
+                <span className="min-w-0 truncate">{agent ? agentDisplayName(agent, translate) : conv.agent_key}</span>
                 <span className="shrink-0">·</span>
               </>
             )}
@@ -1023,7 +1156,7 @@ const ConversationItem = React.memo(function ConversationItem({
             size="icon-sm"
             className="text-muted-foreground shrink-0"
             aria-label={translate("overview.manageConversation", {
-              title: conv.title || translate("overview.newConversation"),
+              title: displayTitle,
             })}
           >
             <MoreHorizontalIcon />
@@ -1053,7 +1186,7 @@ const ConversationItem = React.memo(function ConversationItem({
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>
-              {translate("overview.deleteConversation", { title: conv.title || translate("overview.newConversation") })}
+              {translate("overview.deleteConversation", { title: displayTitle })}
             </AlertDialogTitle>
             <AlertDialogDescription>{translate("overview.irreversible")}</AlertDialogDescription>
           </AlertDialogHeader>
@@ -1067,8 +1200,8 @@ const ConversationItem = React.memo(function ConversationItem({
   );
 });
 
-// AgentGroupHeader is the sticky, clickable divider above one agent's rows:
-// collapse chevron, agent name, a running marker, and the row count.
+// AgentGroupHeader is the sticky, clickable divider above one agent's (or task's) rows:
+// collapse chevron, group name, optional originating task link, running marker, and row count.
 function AgentGroupHeader({
   group,
   collapsed,
@@ -1082,37 +1215,53 @@ function AgentGroupHeader({
 }) {
   const { t: translate } = useLiveTranslation();
   return (
-    <button
-      type="button"
-      onClick={() => onToggle(group.key)}
-      aria-expanded={!collapsed}
-      title={
-        collapsed
-          ? translate("overview.expandGroup", { name: group.name })
-          : translate("overview.collapseGroup", { name: group.name })
-      }
-      className={cn(
-        "sticky top-0 z-10 flex min-w-0 items-center gap-1.5 rounded-md bg-card px-1.5 py-1 text-left font-medium text-[11px] transition-colors hover:bg-accent/50",
-        collapsed && hasActive ? "text-foreground" : "text-muted-foreground",
-      )}
-    >
-      <ChevronRightIcon className={cn("size-3 shrink-0 transition-transform", !collapsed && "rotate-90")} />
-      <Bot className="size-3 shrink-0" />
-      <span className="min-w-0 flex-1 truncate">{group.name}</span>
-      {collapsed && hasActive && (
-        <span
-          className="size-1.5 shrink-0 rounded-full bg-primary"
-          title={translate("overview.activeConversationGroup")}
-        />
-      )}
-      {group.runningCount > 0 && (
-        <Spinner
-          className="size-3 shrink-0"
-          aria-label={translate("overview.runningConversations", { count: group.runningCount })}
-        />
-      )}
-      <span className="shrink-0 tabular-nums opacity-60">{group.conversations.length}</span>
-    </button>
+    <div className="bg-card sticky top-0 z-10 flex min-w-0 items-center gap-0.5 rounded-md">
+      <button
+        type="button"
+        onClick={() => onToggle(group.key)}
+        aria-expanded={!collapsed}
+        title={
+          collapsed
+            ? translate("overview.expandGroup", { name: group.name })
+            : translate("overview.collapseGroup", { name: group.name })
+        }
+        className={cn(
+          "flex min-w-0 flex-1 items-center gap-1.5 rounded-md px-1.5 py-1 text-left text-[11px] font-medium transition-colors hover:bg-accent/50",
+          collapsed && hasActive ? "text-foreground" : "text-muted-foreground",
+        )}
+      >
+        <ChevronRightIcon className={cn("size-3 shrink-0 transition-transform", !collapsed && "rotate-90")} />
+        <Bot className="size-3 shrink-0" />
+        <span className="min-w-0 flex-1 truncate">{group.name}</span>
+        {collapsed && hasActive && (
+          <span
+            className="bg-primary size-1.5 shrink-0 rounded-full"
+            title={translate("overview.activeConversationGroup")}
+          />
+        )}
+        {group.runningCount > 0 && (
+          <Spinner
+            className="size-3 shrink-0"
+            aria-label={translate("overview.runningConversations", { count: group.runningCount })}
+          />
+        )}
+        <span className="shrink-0 tabular-nums opacity-60">
+          {group.totalCount && group.totalCount !== group.conversations.length
+            ? `${group.conversations.length}/${group.totalCount}`
+            : group.conversations.length}
+        </span>
+      </button>
+      {group.sourceTaskId ? (
+        <Link
+          href={`/function/tasks/detail?id=${group.sourceTaskId}`}
+          title={group.name}
+          aria-label={group.name}
+          className="text-muted-foreground hover:text-foreground hover:bg-accent/50 inline-flex size-6 shrink-0 items-center justify-center rounded-md transition-colors"
+        >
+          <ExternalLinkIcon className="size-3" />
+        </Link>
+      ) : null}
+    </div>
   );
 }
 
@@ -1125,6 +1274,10 @@ export default function ChatPage() {
   const [selectedId, setSelectedId] = React.useState<number | null>(null);
   const [sourceRequested, setSourceRequested] = React.useState(false);
   const [convsLoaded, setConvsLoaded] = React.useState(false);
+  const [listScope, setListScope] = React.useState<"manual" | "automation" | "all">("manual");
+  const [search, setSearch] = React.useState("");
+  const listLoadedRef = React.useRef(false);
+  const runningListRef = React.useRef(false);
   const selectConversation = React.useCallback(
     (id: number | null) => {
       if (id !== selectedId) {
@@ -1141,9 +1294,6 @@ export default function ChatPage() {
   const [renamingId, setRenamingId] = React.useState<number | null>(null);
   const [renameText, setRenameText] = React.useState("");
   const [selectedConversationIds, setSelectedConversationIds] = React.useState<Set<number>>(() => new Set());
-  // selectionMode gates the multi-select UI: off by default (clean list, no
-  // checkboxes); the header "多选" button turns it on, "完成" turns it off and
-  // clears the selection.
   const [selectionMode, setSelectionMode] = React.useState(false);
   const [bulkDeleteOpen, setBulkDeleteOpen] = React.useState(false);
   const [bulkDeleting, setBulkDeleting] = React.useState(false);
@@ -1158,19 +1308,99 @@ export default function ChatPage() {
     Record<number, { input?: string; attachments?: ChatAttachment[] }>
   >({});
 
-  const conversationListSeq = React.useRef(0);
-  const reloadConvs = React.useCallback(async () => {
-    const seq = ++conversationListSeq.current;
-    try {
-      const items = await api.conversations();
-      if (seq === conversationListSeq.current) {
-        setConvs(items);
-        setConvsLoaded(true);
-      }
-    } catch {
-      // Preserve the selected transcript and list on a transient poll failure.
+  const [listMeta, setListMeta] = React.useState<ConversationListPage | null>(null);
+  const [searchQuery, setSearchQuery] = React.useState("");
+  const [selectedFallback, setSelectedFallback] = React.useState<Conversation | null>(null);
+  const selectionFilterRef = React.useRef("");
+  const selectedIdRef = React.useRef(selectedId);
+  selectedIdRef.current = selectedId;
+  selectionFilterRef.current = JSON.stringify([listScope, agentFilter, searchQuery]);
+  React.useEffect(() => {
+    const timer = setTimeout(() => {
+      setSearchQuery(search.trim());
+      setVisibleConversationCount(CONVERSATION_LIST_PAGE);
+      setSelectedConversationIds(new Set());
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [search]);
+  React.useEffect(() => {
+    if (selectedId === null) {
+      setSelectedFallback(null);
+      return;
     }
+    let live = true;
+    api
+      .getConversation(selectedId)
+      .then((conversation) => {
+        if (live) setSelectedFallback(conversation);
+      })
+      .catch(() => {
+        if (live) setSelectedFallback(null);
+      });
+    return () => {
+      live = false;
+    };
+  }, [selectedId]);
+  React.useEffect(() => {
+    const id = Number(new URLSearchParams(window.location.search).get("c"));
+    let live = true;
+    if (id > 0)
+      void api
+        .getConversation(id)
+        .then((conversation) => {
+          if (live && conversation.source === "automation") setListScope("automation");
+        })
+        .catch(() => undefined);
+    return () => {
+      live = false;
+    };
   }, []);
+  const conversationListSeq = React.useRef(0);
+  const statsCache = React.useRef({ key: "", until: 0 });
+  const reloadConvs = React.useCallback(
+    async (refreshStats = true) => {
+      const seq = ++conversationListSeq.current;
+      try {
+        const key = JSON.stringify([listScope, agentFilter, searchQuery]);
+        const includeStats = refreshStats || statsCache.current.key !== key || Date.now() >= statsCache.current.until;
+        const page = await api.conversations({
+          scope: listScope,
+          agent: agentFilter ?? "",
+          q: searchQuery,
+          limit: visibleConversationCount,
+          stats: includeStats ? 1 : 0,
+        });
+        const items = page.conversations;
+        if (seq === conversationListSeq.current) {
+          runningListRef.current = page.running;
+          if (includeStats) {
+            setListMeta((current) => (sameSnapshot(current, page) ? current : page));
+            statsCache.current = { key, until: Date.now() + 30000 };
+          }
+          if (!listLoadedRef.current) {
+            const id = Number(new URLSearchParams(window.location.search).get("c"));
+            if (items.some((c) => c.id === id && c.source === "automation")) setListScope("automation");
+            listLoadedRef.current = true;
+          }
+          setConvs((current) => reconcileList(current, items, (conversation) => String(conversation.id)));
+          setConvsLoaded(true);
+          const id = selectedIdRef.current;
+          if (id !== null) {
+            const loaded = items.find((conversation) => conversation.id === id);
+            if (loaded) setSelectedFallback(loaded);
+            else if (refreshStats) {
+              const conversation = await api.getConversation(id);
+              if (seq === conversationListSeq.current && selectedIdRef.current === id)
+                setSelectedFallback(conversation);
+            }
+          }
+        }
+      } catch {
+        // Preserve the selected transcript and list on a transient poll failure.
+      }
+    },
+    [listScope, agentFilter, searchQuery, visibleConversationCount],
+  );
   React.useEffect(() => {
     api
       .agents()
@@ -1187,30 +1417,35 @@ export default function ChatPage() {
   }, []);
 
   // One list poll supplies runtime state for all sidebar rows, including the
-  // unselected ones. Await completion so slow requests do not overlap.
+  // unselected ones. Await completion so slow requests do not overlap, and back
+  // off to 10s when idle or skip while hidden.
   React.useEffect(() => {
     let disposed = false;
+    let inFlight = false;
     let timer: ReturnType<typeof setTimeout>;
     async function poll() {
-      await reloadConvs();
-      if (!disposed) timer = setTimeout(() => void poll(), 2000);
+      if (disposed || inFlight || document.hidden) return;
+      inFlight = true;
+      try {
+        await reloadConvs(false);
+      } finally {
+        inFlight = false;
+        if (!disposed && !document.hidden) timer = setTimeout(() => void poll(), runningListRef.current ? 2000 : 10000);
+      }
     }
+    const onVisibilityChange = () => {
+      clearTimeout(timer);
+      if (!document.hidden && !disposed) void poll();
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
     void poll();
     return () => {
       disposed = true;
       conversationListSeq.current++;
       clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
     };
   }, [reloadConvs]);
-
-  React.useEffect(() => {
-    setSelectedConversationIds((current) => {
-      if (current.size === 0) return current;
-      const live = new Set(convs.map((conversation) => conversation.id));
-      const next = new Set([...current].filter((id) => live.has(id)));
-      return next.size === current.size ? current : next;
-    });
-  }, [convs]);
 
   React.useEffect(() => {
     const raw = getLocalStorageValue(COLLAPSED_AGENTS_KEY);
@@ -1243,10 +1478,7 @@ export default function ChatPage() {
     const id = c ? Number(c) : NaN;
     if (Number.isFinite(id)) setSelectedId(id);
   }, []);
-  // Mirror the current selection into the URL (replaceState → no history spam). A
-  // selectedId with no matching conversation (e.g. a stale ?c=, or a just-created
-  // one before reloadConvs lands) simply renders the draft view — harmless — so we
-  // deliberately do NOT auto-clear it here (that raced new-conversation creation).
+  // Mirror the current selection into the URL (replaceState → no history spam).
   React.useEffect(() => {
     const url = new URL(window.location.href);
     if (selectedId != null) url.searchParams.set("c", String(selectedId));
@@ -1254,50 +1486,71 @@ export default function ChatPage() {
     window.history.replaceState(null, "", url);
   }, [selectedId]);
 
-  const selected = React.useMemo(() => convs.find((c) => c.id === selectedId) ?? null, [convs, selectedId]);
-  const agentByKey = React.useMemo(() => new Map(agents.map((agent) => [agent.key, agent])), [agents]);
-  const filteredConversations = React.useMemo(
-    () => (agentFilter === null ? convs : convs.filter((conversation) => conversation.agent_key === agentFilter)),
-    [convs, agentFilter],
+  const selected = React.useMemo(
+    () => convs.find((c) => c.id === selectedId) ?? (selectedFallback?.id === selectedId ? selectedFallback : null),
+    [convs, selectedId, selectedFallback],
   );
+  const agentByKey = React.useMemo(() => new Map(agents.map((agent) => [agent.key, agent])), [agents]);
+  const filteredConversations = convs;
   const visibleConversations = React.useMemo(
     () => filteredConversations.slice(0, visibleConversationCount),
     [filteredConversations, visibleConversationCount],
   );
   // Pinned rows stay a flat block above the groups (server order = pinned_at DESC);
-  // everything else is bucketed per agent, most-recently-active agent first.
+  // everything else is bucketed per agent (or originating task for automations).
   const pinnedConversations = React.useMemo(
     () => visibleConversations.filter(conversationIsPinned),
     [visibleConversations],
   );
-  const agentGroups = React.useMemo(
-    () =>
+  const agentGroups = React.useMemo(() => {
+    const label = (task?: number) =>
+      task ? translate("opt.taskExecutions", { id: task }) : translate("opt.otherExecutions");
+    const totals = new Map(
       groupByAgent(
-        visibleConversations.filter((c) => !conversationIsPinned(c)),
+        filteredConversations.filter((c) => !conversationIsPinned(c)),
         agentByKey,
-      ),
-    [visibleConversations, agentByKey],
-  );
-  // conversation agents: custom agents + conversational built-ins (role=assistant,
-  // e.g. Auto / 渗透测试). The orchestration built-ins (goals/planner/mainagent/worker)
-  // are task-specific and stay hidden from the chat page.
+        translate,
+        label,
+      ).map((group) => [group.key, group]),
+    );
+    return groupByAgent(
+      visibleConversations.filter((c) => !conversationIsPinned(c)),
+      agentByKey,
+      translate,
+      label,
+    ).map((group) => ({
+      ...group,
+      totalCount: listMeta?.groups[group.key]?.total ?? totals.get(group.key)?.conversations.length,
+      runningCount: listMeta?.groups[group.key]?.running ?? totals.get(group.key)?.runningCount ?? group.runningCount,
+    }));
+  }, [visibleConversations, filteredConversations, agentByKey, translate, listMeta]);
+  // conversation agents: custom agents + conversational built-ins (role=assistant).
+  // The orchestration built-ins (goals/planner/mainagent/worker) are task-specific.
   const chatAgents = React.useMemo(() => agents.filter((a) => !a.builtin || a.role === "assistant"), [agents]);
   const agentFilterOptions = React.useMemo(() => {
-    const counts = new Map<string, number>();
-    for (const conversation of convs) {
-      counts.set(conversation.agent_key, (counts.get(conversation.agent_key) ?? 0) + 1);
-    }
+    const counts = new Map<string, number>(Object.entries(listMeta?.agents ?? {}));
+    if (!listMeta)
+      for (const conversation of convs) {
+        counts.set(conversation.agent_key, (counts.get(conversation.agent_key) ?? 0) + 1);
+      }
     // Include historical sources even if their Agent has since been disabled or deleted.
     const keys = new Set([...chatAgents.map((agent) => agent.key), ...counts.keys()]);
     if (agentFilter !== null) keys.add(agentFilter);
     return [...keys]
       .map((key) => ({ key, name: agentByKey.get(key)?.name || key, count: counts.get(key) ?? 0 }))
       .sort((a, b) => a.name.localeCompare(b.name, "zh-CN"));
-  }, [convs, chatAgents, agentByKey, agentFilter]);
-  const conversationCountLabel =
-    agentFilter === null
-      ? translate("overview.totalConversations", { count: convs.length })
-      : translate("overview.filteredConversations", { visible: filteredConversations.length, total: convs.length });
+  }, [convs, chatAgents, agentByKey, agentFilter, listMeta]);
+  const conversationCountLabel = translate("opt.listCount", {
+    count: listMeta?.total ?? filteredConversations.length,
+    total: listMeta?.all_total ?? convs.length,
+  });
+
+  function changeListScope(value: "manual" | "automation" | "all") {
+    setListScope(value);
+    setVisibleConversationCount(CONVERSATION_LIST_PAGE);
+    setSelectedConversationIds(new Set());
+    setRenamingId(null);
+  }
 
   function changeAgentFilter(key: string | null) {
     setAgentFilter(key);
@@ -1309,7 +1562,7 @@ export default function ChatPage() {
 
   const selectedConversationCount = selectedConversationIds.size;
   const allConversationsSelected =
-    filteredConversations.length > 0 && selectedConversationCount === filteredConversations.length;
+    filteredConversations.length > 0 && selectedConversationCount === (listMeta?.total ?? filteredConversations.length);
   const someConversationsSelected = selectedConversationCount > 0 && !allConversationsSelected;
   let conversationHeaderChecked: boolean | "indeterminate" = false;
   if (allConversationsSelected) conversationHeaderChecked = true;
@@ -1325,9 +1578,17 @@ export default function ChatPage() {
   }, []);
 
   function toggleAllConversations(checked: boolean) {
-    setSelectedConversationIds(
-      checked ? new Set(filteredConversations.map((conversation) => conversation.id)) : new Set(),
-    );
+    if (!checked) {
+      setSelectedConversationIds(new Set());
+      return;
+    }
+    const filter = selectionFilterRef.current;
+    void api
+      .conversationIDs({ scope: listScope, agent: agentFilter ?? "", q: searchQuery })
+      .then((ids) => {
+        if (selectionFilterRef.current === filter) setSelectedConversationIds(new Set(ids));
+      })
+      .catch((error) => toast.error(localizedError(error, translate)));
   }
 
   function exitSelectionMode() {
@@ -1378,8 +1639,8 @@ export default function ChatPage() {
       if (failed.length > 0) {
         const details = failed
           .slice(0, 3)
-          .map((item) => `#${item.id}（${item.error}）`)
-          .join("；");
+          .map((item) => `#${item.id}\uff08${item.error}\uff09`)
+          .join("\uff1b");
         toast.error(
           translate("overview.conversationsDeleteFailed", {
             count: failed.length,
@@ -1452,6 +1713,59 @@ export default function ChatPage() {
               <PlusIcon />
               {translate("overview.createConversation")}
             </Button>
+            <fieldset
+              aria-label={translate("opt.conversationScope")}
+              className="m-0 grid min-w-0 grid-cols-3 gap-0.5 rounded-md border-0 bg-muted p-0.5 text-muted-foreground text-xs"
+            >
+              {(
+                [
+                  ["manual", translate("opt.chats")],
+                  ["automation", translate("opt.executions")],
+                  ["all", translate("common.all")],
+                ] as const
+              ).map(([value, label]) => (
+                <button
+                  key={value}
+                  type="button"
+                  aria-pressed={listScope === value}
+                  onClick={() => changeListScope(value)}
+                  className={cn(
+                    "truncate rounded-sm px-1.5 py-1 font-medium transition-colors",
+                    listScope === value ? "bg-background text-foreground shadow-xs" : "hover:text-foreground",
+                  )}
+                >
+                  {label}
+                </button>
+              ))}
+            </fieldset>
+            <div className="relative">
+              <SearchIcon className="text-muted-foreground pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2" />
+              <Input
+                value={search}
+                onChange={(e) => {
+                  setSearch(e.target.value);
+                  setVisibleConversationCount(CONVERSATION_LIST_PAGE);
+                  setSelectedConversationIds(new Set());
+                }}
+                placeholder={translate("opt.conversationSearch")}
+                aria-label={translate("opt.conversationSearch")}
+                className="h-8 pr-7 pl-8 text-xs"
+              />
+              {search && (
+                <button
+                  type="button"
+                  aria-label={translate("common.close")}
+                  onClick={() => {
+                    setSearch("");
+                    setVisibleConversationCount(CONVERSATION_LIST_PAGE);
+                    setSelectedConversationIds(new Set());
+                  }}
+                  className="text-muted-foreground hover:text-foreground absolute top-1/2 right-2 -translate-y-1/2"
+                >
+                  <XIcon className="size-3.5" />
+                </button>
+              )}
+            </div>
             <Select
               value={agentFilter === null ? "all" : `agent:${agentFilter}`}
               onValueChange={(value) => changeAgentFilter(value === "all" ? null : value.slice(6))}
@@ -1472,7 +1786,7 @@ export default function ChatPage() {
                 </SelectGroup>
               </SelectContent>
             </Select>
-            {convs.length > 0 &&
+            {(listMeta?.all_total ?? convs.length) > 0 &&
               (selectionMode ? (
                 <div className="flex items-center gap-2 px-1">
                   <Checkbox
@@ -1520,7 +1834,7 @@ export default function ChatPage() {
               ))}
           </div>
           <ScrollArea
-            key={agentFilter === null ? "all" : `agent:${agentFilter}`}
+            key={`${listScope}:${agentFilter ?? "all"}:${search}`}
             type="auto"
             className="min-h-0 min-w-0 flex-1 [&_[data-slot=scroll-area-viewport]>div]:block!"
           >
@@ -1568,7 +1882,7 @@ export default function ChatPage() {
                           key={c.id}
                           conv={c}
                           agent={agentByKey.get(c.agent_key)}
-                          showAgent={false}
+                          showAgent={group.key.startsWith("task:")}
                           active={selectedId === c.id}
                           renaming={renamingId === c.id}
                           renameText={renamingId === c.id ? renameText : ""}
@@ -1587,7 +1901,7 @@ export default function ChatPage() {
                   </React.Fragment>
                 );
               })}
-              {visibleConversationCount < filteredConversations.length && (
+              {visibleConversationCount < (listMeta?.total ?? filteredConversations.length) && (
                 <Button
                   type="button"
                   variant="ghost"
@@ -1623,6 +1937,7 @@ export default function ChatPage() {
               agents={chatAgents}
               profiles={profiles}
               onStarted={(c, pending) => {
+                if (listScope === "automation") setListScope("manual");
                 if (agentFilter !== null && agentFilter !== c.agent_key) changeAgentFilter(null);
                 // Insert the new conversation immediately so `selected` resolves to
                 // it on this render (switching to ChatView right away, before the

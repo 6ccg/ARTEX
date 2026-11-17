@@ -307,6 +307,7 @@ func (s *Server) Handler() http.Handler {
 	// Agents
 	// conversations (chat page)
 	mux.HandleFunc("GET /api/conversations", s.pgListConversations)
+	mux.HandleFunc("GET /api/conversations/{id}", s.pgGetConversation)
 	mux.HandleFunc("POST /api/conversations", s.pgCreateConversation)
 	mux.HandleFunc("POST /api/conversations/delete/batch", s.pgDeleteConversationsBatch)
 	mux.HandleFunc("PATCH /api/conversations/{id}", s.pgRenameConversation)
@@ -485,30 +486,18 @@ func (s *Server) stats(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, out) // no task selected: only global fields
 		return
 	}
-	out["llm_configured"] = s.engine.ReadyFor(t)
+	ready := s.engine.ReadyFor(t)
+	out["llm_configured"] = ready
 
-	st, _ := t.Store.Stats()
-	out["exploration"] = st
+	metrics, _ := t.Store.RuntimeStats()
+	out["exploration"] = metrics.Nodes
 
 	// per-task running state + heartbeat (distinct from "LLM configured").
-	intents, _ := t.Store.ListByKind(db.KindIntent, 100000)
-	inFlight := 0
-	for _, in := range intents {
-		if in.State == "running" {
-			inFlight++
-		}
-	}
-	goals, _ := t.Store.ListByKind(db.KindGoal, 10000)
-	goalsMet := 0
-	for _, g := range goals {
-		if g.State == "met" {
-			goalsMet++
-		}
-	}
+	inFlight := metrics.RunningIntents
 	last := s.engine.LastActivity(t.ID)
 	paused := s.engine.IsPaused(t.ID)
 	activeCalls := s.engine.ActiveLLMCalls(t.ID)
-	running := s.engine.ReadyFor(t) && s.engine.Started(t.ID) && !paused
+	running := ready && s.engine.Started(t.ID) && !paused
 	// A live event-driven engine with no work is healthy idle. Only a persisted
 	// running intent without any corresponding LLM call can be considered stalled.
 	stalled := running && activeCalls == 0 && inFlight > 0 && last > 0 && time.Now().Unix()-last > 120
@@ -534,8 +523,8 @@ func (s *Server) stats(w http.ResponseWriter, r *http.Request) {
 		"llm_in_flight": activeCalls,
 		"last_activity": last,
 		"stalled":       stalled,
-		"goals_total":   len(goals),
-		"goals_met":     goalsMet,
+		"goals_total":   metrics.Goals.Total,
+		"goals_met":     metrics.Goals.Met,
 	}
 	writeJSON(w, 200, out)
 }
@@ -1894,34 +1883,6 @@ func inheritedIntentResult(state string) bool {
 	}
 }
 
-// inheritedGraphSnapshot exposes immutable source-task history without leaking
-// work that is still open or running. Edges are filtered with the nodes so the
-// response cannot contain dangling ids that reveal hidden live intent topology.
-func inheritedGraphSnapshot(nodes []*db.Node, edges []db.Edge, sourceTaskID int64) ([]*db.Node, []db.Edge) {
-	visible := make(map[int64]struct{}, len(nodes))
-	filteredNodes := make([]*db.Node, 0, len(nodes))
-	for _, node := range nodes {
-		if node == nil || (node.Kind == db.KindIntent && !inheritedIntentResult(node.State)) {
-			continue
-		}
-		node.SourceTaskID = sourceTaskID
-		node.Inherited = true
-		visible[node.ID] = struct{}{}
-		filteredNodes = append(filteredNodes, node)
-	}
-	filteredEdges := make([]db.Edge, 0, len(edges))
-	for _, edge := range edges {
-		if _, ok := visible[edge.From]; !ok {
-			continue
-		}
-		if _, ok := visible[edge.To]; !ok {
-			continue
-		}
-		filteredEdges = append(filteredEdges, edge)
-	}
-	return filteredNodes, filteredEdges
-}
-
 // taskIntentHistoryPage returns one newest-first page for an exploration.
 // A source may have many open/running intents, so keep paging until enough
 // historical results are collected instead of leaking its frontier into the UI.
@@ -1955,44 +1916,70 @@ func taskIntentHistoryPage(store *db.ExplorationStore, before int64, limit int, 
 	}
 }
 
-// explorationGraph returns the whole exploration chain (task graph) as nodes+edges.
+// explorationGraph pages the exploration chain, including historical sources.
 func (s *Server) explorationGraph(w http.ResponseWriter, r *http.Request) {
 	t := s.m.ResolveTask(r.URL.Query().Get("task"))
 	if t == nil {
 		writeJSON(w, 200, map[string]any{"nodes": []any{}, "edges": []any{}})
 		return
 	}
-	nodes, err := t.Store.Nodes(2000)
-	if err != nil {
-		writeErr(w, 500, err.Error())
-		return
+	after := int64(atoiDefault(r.URL.Query().Get("after"), 0))
+	size := min(500, max(1, atoiDefault(r.URL.Query().Get("limit"), 500)))
+	type graphSource struct {
+		store  *db.ExplorationStore
+		taskID int64
 	}
-	edges, err := t.Store.Edges(5000)
-	if err != nil {
-		writeErr(w, 500, err.Error())
-		return
-	}
+	stores := []graphSource{{store: t.Store}}
 	sources, err := t.Store.DirectSourceStores()
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
 	}
 	for _, source := range sources {
-		sourceNodes, nodeErr := source.Store.Nodes(2000)
-		if nodeErr != nil {
-			writeErr(w, 500, nodeErr.Error())
-			return
-		}
-		sourceEdges, edgeErr := source.Store.Edges(5000)
-		if edgeErr != nil {
-			writeErr(w, 500, edgeErr.Error())
-			return
-		}
-		sourceNodes, sourceEdges = inheritedGraphSnapshot(sourceNodes, sourceEdges, source.Task.TaskID)
-		nodes = append(nodes, sourceNodes...)
-		edges = append(edges, sourceEdges...)
+		stores = append(stores, graphSource{source.Store, source.Task.TaskID})
 	}
-	writeJSON(w, 200, map[string]any{"nodes": taskNodeDTOs(nodes), "edges": edgeDTOs(edges)})
+	nodes := []*db.Node{}
+	more := false
+	for _, source := range stores {
+		page, next, err := source.store.GraphNodePage(after, size, source.taskID > 0)
+		if err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		for _, node := range page {
+			if source.taskID > 0 {
+				node.Inherited = true
+				node.SourceTaskID = source.taskID
+			}
+		}
+		nodes = append(nodes, page...)
+		more = more || next
+	}
+	sort.Slice(nodes, func(i, j int) bool { return nodes[i].ID < nodes[j].ID })
+	if len(nodes) > size {
+		nodes = nodes[:size]
+		more = true
+	}
+	edges := []db.Edge{}
+	for _, source := range stores {
+		ids := []int64{}
+		for _, node := range nodes {
+			if node.SourceTaskID == source.taskID {
+				ids = append(ids, node.ID)
+			}
+		}
+		page, err := source.store.GraphPageEdges(ids, source.taskID > 0)
+		if err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		edges = append(edges, page...)
+	}
+	cursor := after
+	if len(nodes) > 0 {
+		cursor = nodes[len(nodes)-1].ID
+	}
+	writeJSON(w, 200, map[string]any{"nodes": taskNodeDTOs(nodes), "edges": edgeDTOs(edges), "next_cursor": cursor, "has_more": more})
 }
 
 // explorationNodes serves the 播报板: this task's own exploration nodes as a
@@ -2127,6 +2114,8 @@ func parseActivitySession(sess string) (db.ActivitySessionFilter, bool) {
 			return db.ActivitySessionFilter{}, false
 		}
 		return db.ActivitySessionFilter{Main: true, MainSeg: &seg}, true
+	case sess == "system":
+		return db.ActivitySessionFilter{System: true}, true
 	case sess == "plan":
 		return db.ActivitySessionFilter{Worker: "planner"}, true
 	case strings.HasPrefix(sess, "intent:"):
@@ -2451,66 +2440,72 @@ func (s *Server) streamActivity(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 	w.Header().Set("X-Accel-Buffering", "no") // disable proxy buffering
 
-	// Subscribe BEFORE replaying history so events in between aren't lost; dedup the
-	// overlap by skipping channel events whose id was already replayed.
+	// Subscribe before reading history so a concurrent commit schedules another tail.
 	ch, unsub := s.engine.Broadcaster().Subscribe(t.ID)
 	defer unsub()
 
 	// Emit a standard SSE id: line so the browser echoes it as Last-Event-ID on
 	// auto-reconnect (see cursor precedence above).
-	sendSSE := func(a db.Activity) {
-		b, _ := json.Marshal(activityDTO(a))
-		fmt.Fprintf(w, "id: %d\ndata: %s\n\n", a.ID, b)
-		flusher.Flush()
-	}
-
-	// Compensate the DB backlog after `since` in batches until caught up. This is the
-	// gap between the history snapshot and the live tail — NOT the first-page history
-	// (that's the /activity/history endpoint). A long task can have far more than one
-	// batch, so loop instead of a single fixed read; on a query error log it and close
-	// so the client reconnects and retries from its last id (broadcast is lossy — the
-	// DB is the source of truth). The Broadcaster keeps buffering live events meanwhile;
-	// the id<=since skip below drops any that this replay already covered.
-	const replayBatch = 500
-	for {
-		items, cursor, err := t.Store.ActivityList(intentPtr, since, replayBatch)
+	sendSSE := func(a db.Activity) error {
+		b, err := json.Marshal(activityDTO(a))
 		if err != nil {
-			log.Printf("[activity/stream] task=%s replay since=%d: %v", t.ID, since, err)
-			return
+			return err
 		}
-		for _, a := range items {
-			sendSSE(a)
-		}
-		if cursor > since {
-			since = cursor
-		}
-		if len(items) < replayBatch {
-			break
+		_, err = fmt.Fprintf(w, "id: %d\ndata: %s\n\n", a.ID, b)
+		return err
+	}
+
+	// Replay and live notifications share one ordered database cursor. A query/write
+	// failure closes the connection so the browser retries from its last received ID.
+	const replayBatch = 500
+	ctx := r.Context()
+	tail := func() bool {
+		for {
+			if ctx.Err() != nil {
+				return false
+			}
+			items, cursor, err := t.Store.ActivityList(intentPtr, since, replayBatch)
+			if err != nil {
+				log.Printf("[activity/stream] task=%s since=%d: %v", t.ID, since, err)
+				return false
+			}
+			for _, a := range items {
+				if ctx.Err() != nil {
+					return false
+				}
+				if err := sendSSE(a); err != nil {
+					return false
+				}
+			}
+			flusher.Flush()
+			if cursor > since {
+				since = cursor
+			}
+			if len(items) < replayBatch {
+				return true
+			}
 		}
 	}
-	flusher.Flush()
-
-	ctx := r.Context()
+	if !tail() {
+		return
+	}
 	ping := time.NewTicker(20 * time.Second)
 	defer ping.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case a, ok := <-ch:
-			if !ok {
+		case _, ok := <-ch:
+			if !ok || !tail() {
 				return
 			}
-			if a.ID <= since {
-				continue // already replayed
-			}
-			if intentPtr != nil && (a.NodeID == nil || *a.NodeID != *intentPtr) {
-				continue // scoped session: only this intent's steps
-			}
-			since = a.ID
-			sendSSE(a)
 		case <-ping.C:
-			fmt.Fprint(w, ": ping\n\n")
+			if !tail() {
+				return
+			}
+			if _, err := fmt.Fprint(w, ": ping\n\n"); err != nil {
+				return
+			}
 			flusher.Flush()
 		}
 	}
@@ -2572,19 +2567,41 @@ func (s *Server) getTraffic(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pageQuery := traffic.PageQuery{
-		Hosts:   taskHosts,
-		Host:    q.Get("host"),
-		Method:  q.Get("method"),
-		Query:   q.Get("q"),
-		Body:    q.Get("body"),
-		Path:    q.Get("path"),
-		Status:  q.Get("status"),
-		RespMin: int64(atoiDefault(q.Get("resp_min"), -1)),
-		RespMax: int64(atoiDefault(q.Get("resp_max"), -1)),
-		Sort:    q.Get("sort"),
-		Order:   q.Get("order"),
+		Hosts:    taskHosts,
+		Host:     q.Get("host"),
+		Method:   q.Get("method"),
+		Query:    q.Get("q"),
+		Body:     q.Get("body"),
+		Path:     q.Get("path"),
+		Status:   q.Get("status"),
+		RespMin:  int64(atoiDefault(q.Get("resp_min"), -1)),
+		RespMax:  int64(atoiDefault(q.Get("resp_max"), -1)),
+		Sort:     q.Get("sort"),
+		Order:    q.Get("order"),
+		RouteURL: q.Get("route"),
 	}
-	ex, matched, _ := tr.Page(pageQuery, page, size)
+	if q.Get("view") == "routes" {
+		groups, total, matched, err := tr.GroupPage(pageQuery, page, size)
+		if err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		count := matched
+		if !taskScoped {
+			count, err = tr.Count()
+			if err != nil {
+				writeErr(w, 500, err.Error())
+				return
+			}
+		}
+		writeJSON(w, 200, map[string]any{"enabled": s.m.TrafficEnabled(), "count": count, "total": total, "matched_count": matched, "groups": groups, "exchanges": []any{}})
+		return
+	}
+	ex, matched, err := tr.Page(pageQuery, page, size)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
 	count, _ := tr.Count() // global total, for the stat card
 	if taskScoped {
 		// matched already represents the current task scope plus all active
@@ -2967,6 +2984,9 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+	}
+	if req.Workers != nil || req.WorkerPools != nil {
+		s.engine.RefreshInheritedWorkers()
 	}
 	if req.ConcurrencyEnabled != nil || req.ConcurrencyLimit != nil {
 		// 部分 PUT:未给的字段用当前值兜底,避免只改一个把另一个重置。

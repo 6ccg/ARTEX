@@ -1,4 +1,5 @@
 "use client";
+import { startPolling } from "@/hooks/use-polling";
 import * as React from "react";
 
 import {
@@ -47,13 +48,13 @@ import { cn } from "@/lib/utils";
 const PAGE_SIZES = [25, 50, 100, 200];
 
 const METHOD_COLOR: Record<string, string> = {
-  DELETE: "bg-red-100 text-red-700",
-  GET: "bg-emerald-100 text-emerald-700",
-  HEAD: "bg-purple-100 text-purple-700",
-  OPTIONS: "bg-slate-100 text-slate-600",
-  PATCH: "bg-orange-100 text-orange-700",
-  POST: "bg-blue-100 text-blue-700",
-  PUT: "bg-amber-100 text-amber-700",
+  DELETE: "bg-red-500/15 text-red-700 dark:text-red-400",
+  GET: "bg-emerald-500/15 text-emerald-700 dark:text-emerald-400",
+  HEAD: "bg-purple-500/15 text-purple-700 dark:text-purple-400",
+  OPTIONS: "bg-slate-500/15 text-slate-600 dark:text-slate-300",
+  PATCH: "bg-orange-500/15 text-orange-700 dark:text-orange-400",
+  POST: "bg-blue-500/15 text-blue-700 dark:text-blue-400",
+  PUT: "bg-amber-500/15 text-amber-700 dark:text-amber-400",
 };
 
 const TABS = (ui: UITranslate): { key: NewAssetType; label: string; icon: LucideIcon }[] => [
@@ -83,12 +84,15 @@ function assetLabel(asset: Asset): string {
       const address = [host, asset.port].filter((value) => value !== undefined && value !== "").join(":");
       return firstText([asset.url, address, asset.service_name], `#${asset.id}`);
     }
-    case "endpoint":
-      return firstText([[asset.method, asset.url].filter(Boolean).join(" ")], `#${asset.id}`);
+    case "endpoint": {
+      const method = asset.method && asset.method.toUpperCase() !== "UNKNOWN" ? asset.method : "";
+      return firstText([[method, asset.url].filter(Boolean).join(" ")], `#${asset.id}`);
+    }
   }
 }
 
 function MethodBadge({ method }: { method: string }) {
+  const { ui } = useUITranslation();
   const normalized = method.toUpperCase();
   return (
     <span
@@ -97,7 +101,7 @@ function MethodBadge({ method }: { method: string }) {
         METHOD_COLOR[normalized] ?? "bg-muted text-muted-foreground",
       )}
     >
-      {normalized || "—"}
+      {normalized && normalized !== "UNKNOWN" ? normalized : ui("opt.unknownMethod")}
     </span>
   );
 }
@@ -424,12 +428,10 @@ export function AssetsTab({ taskId }: { taskId: string }) {
       }
     };
     // Debounce DSL keystrokes; plain (re)loads and polling run immediately.
-    const debounce = setTimeout(() => void load(), dsl ? 400 : 0);
-    const timer = setInterval(() => void load(), 10_000);
+    const stopPolling = startPolling(load, 10_000, dsl ? 400 : 0);
     return () => {
       active = false;
-      clearTimeout(debounce);
-      clearInterval(timer);
+      stopPolling();
     };
   }, [page, query, refreshKey, size, tab, taskId, liveUI]);
 
@@ -664,7 +666,18 @@ export function AssetsTab({ taskId }: { taskId: string }) {
               return (
                 <TableRow key={asset.id}>
                   <TableCell className="max-w-xs truncate font-mono text-xs" title={address}>
-                    {address || "—"}
+                    {isHttp && asset.url ? (
+                      <a
+                        href={asset.url}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-blue-600 hover:underline dark:text-blue-400"
+                      >
+                        {asset.url}
+                      </a>
+                    ) : (
+                      address || "—"
+                    )}
                   </TableCell>
                   <TableCell className="max-w-48 truncate font-mono text-xs" title={asset.domain}>
                     {asset.domain || "—"}

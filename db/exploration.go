@@ -547,6 +547,9 @@ func (s *ExplorationStore) CancelIntent(id int64) (IntentCleanup, error) {
 		return out, err
 	}
 	defer tx.Rollback()
+	if _, err := tx.Exec(`SELECT pg_advisory_xact_lock(-$1::bigint)`, s.expID); err != nil {
+		return out, err
+	}
 
 	// 锁定意图行确认存在(幂等:已删则 not found)。状态不校验——真删除对任何状态成立,
 	// running 的 worker 由调用方先停。
@@ -1289,6 +1292,57 @@ WHERE id=$2 AND exploration_id=$3 AND kind='intent' AND state='open'`, owner, id
 	return n == 1, nil
 }
 
+// ClaimNextIntent selects and claims one available intent in a single round trip.
+// Skip rows being claimed by another transaction instead of loading and retrying
+// the same frontier in every worker. Priority and FIFO order match Frontier.
+func (s *ExplorationStore) ClaimNextIntent(owner string) (*Node, error) {
+	node, err := scanNode(s.db.QueryRow(`UPDATE exploration_nodes SET state='running', owner=$1
+WHERE id=(SELECT id FROM exploration_nodes
+ WHERE exploration_id=$2 AND kind='intent' AND state='open'
+ ORDER BY priority DESC,id ASC LIMIT 1 FOR UPDATE SKIP LOCKED)
+RETURNING `+nodeCols, owner, s.expID))
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	return node, err
+}
+
+type ExplorationRuntimeStats struct {
+	Nodes          map[string]int
+	RunningIntents int
+	Goals          GoalCounts
+}
+
+// RuntimeStats counts on the server without transferring node payloads just to
+// count their states. A single snapshot also keeps the dashboard totals aligned.
+func (s *ExplorationStore) RuntimeStats() (ExplorationRuntimeStats, error) {
+	out := ExplorationRuntimeStats{Nodes: map[string]int{}}
+	rows, err := s.db.Query(`SELECT kind,state,count(*) FROM exploration_nodes
+WHERE exploration_id=$1 GROUP BY kind,state`, s.expID)
+	if err != nil {
+		return out, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var kind, state string
+		var count int
+		if err := rows.Scan(&kind, &state, &count); err != nil {
+			return out, err
+		}
+		out.Nodes[kind] += count
+		if kind == KindIntent && state == "running" {
+			out.RunningIntents += count
+		}
+		if kind == KindGoal {
+			out.Goals.Total += count
+			if state == "met" {
+				out.Goals.Met += count
+			}
+		}
+	}
+	return out, rows.Err()
+}
+
 // Stats returns node counts grouped by kind (for dashboard).
 func (s *ExplorationStore) Stats() (map[string]int, error) {
 	rows, err := s.db.Query(`SELECT kind, count(*) FROM exploration_nodes WHERE exploration_id=$1 GROUP BY kind`, s.expID)
@@ -1319,7 +1373,8 @@ func (s *ExplorationStore) AppendActivity(a Activity) (int64, error) {
 	var id int64
 	err := s.db.QueryRow(`
 INSERT INTO activity(exploration_id, node_id, worker, kind, tool, tool_use_id, is_error, summary, detail, metadata, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, main_seg)
-VALUES ($1,$2,NULLIF($3,''),NULLIF($4,''),NULLIF($5,''),NULLIF($6,''),$7,NULLIF($8,''),NULLIF($9,''),$10,$11,$12,$13,$14,$15)
+SELECT $1,$2,NULLIF($3,''),NULLIF($4,''),NULLIF($5,''),NULLIF($6,''),$7,NULLIF($8,''),NULLIF($9,''),$10,$11,$12,$13,$14,$15
+FROM (SELECT pg_advisory_xact_lock(-$1::bigint)) activity_gate
 RETURNING id`, s.expID, a.NodeID, utf8Clean(a.Worker), utf8Clean(a.Kind), utf8Clean(a.Tool), utf8Clean(a.ToolUseID), a.IsError, utf8Clean(a.Summary), utf8Clean(a.Detail),
 		metadata, a.InputTokens, a.OutputTokens, a.CacheReadTokens, a.CacheWriteTokens, a.MainSeg).Scan(&id)
 	return id, err
@@ -1666,6 +1721,7 @@ func (s *ExplorationStore) ActivityListForTerminalIntent(nodeID, sinceID int64, 
 //
 // A zero value (all empty) matches the whole task (no session filter).
 type ActivitySessionFilter struct {
+	System  bool
 	Worker  string
 	NodeID  *int64
 	Main    bool // main-agent session
@@ -1674,6 +1730,8 @@ type ActivitySessionFilter struct {
 
 func (f ActivitySessionFilter) cond(argStart int) (string, []any) {
 	switch {
+	case f.System:
+		return " AND (worker='system' OR kind IN ('llm_switch','llm_failover'))", nil
 	case f.NodeID != nil:
 		return fmt.Sprintf(" AND node_id=$%d", argStart), []any{*f.NodeID}
 	case f.Main:

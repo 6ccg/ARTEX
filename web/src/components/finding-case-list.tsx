@@ -1,5 +1,7 @@
 "use client";
 import * as React from "react";
+import { usePolling } from "@/hooks/use-polling";
+import { sameSnapshot } from "@/lib/list-snapshot";
 
 import Link from "next/link";
 
@@ -468,29 +470,22 @@ export function FindingCaseList({
   React.useEffect(() => {
     setPage(1);
   }, [key]);
-  // biome-ignore lint/correctness/useExhaustiveDependencies: refresh is an explicit reload requested after grouping/retry.
-  React.useEffect(() => {
-    let active = true;
-    let timer: ReturnType<typeof setTimeout>;
-    async function load() {
-      try {
-        const v = await api.findingCases({ ...JSON.parse(key), page, pageSize });
-        if (active) {
-          setData(v);
-          setError("");
-        }
-      } catch (e) {
-        if (active) setError((e as Error).message);
-      } finally {
-        if (active) timer = setTimeout(load, 5000);
-      }
+  const requestSequence = React.useRef(0);
+  const load = React.useCallback(async () => {
+    void refresh;
+    const request = ++requestSequence.current;
+    try {
+      const next = await api.findingCases({ ...JSON.parse(key), page, pageSize });
+      if (request !== requestSequence.current) return;
+      setData((current) => (sameSnapshot(current, next) ? current : next));
+      setError("");
+    } catch (e) {
+      if (request === requestSequence.current) setError((e as Error).message);
     }
-    void load();
-    return () => {
-      active = false;
-      clearTimeout(timer);
-    };
   }, [key, page, pageSize, refresh]);
+
+  usePolling(load, 5000);
+
   React.useEffect(() => {
     if (data) onTotal?.(data.total);
   }, [data, onTotal]);

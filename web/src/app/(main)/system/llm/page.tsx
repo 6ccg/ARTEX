@@ -1,4 +1,5 @@
 "use client";
+import { startPolling } from "@/hooks/use-polling";
 import * as React from "react";
 
 import {
@@ -31,6 +32,7 @@ import type { LLMPoolMember, LLMPoolStatus, LLMProfile, LLMRetryOverride } from 
 import { cn } from "@/lib/utils";
 
 import { ProfileRetryFields, RetryPolicyPanel, ZERO_OVERRIDE } from "./_components/retry";
+import { WorkerPoolsPanel } from "./_components/worker-pools-panel";
 
 // 思考开关(thinking.type)与思考强度(reasoning_effort)是两个【互相独立】的字段，
 // 各自单独设置——有些接口没有 thinking 字段、只靠强度参数就能激活思考，故需解耦。
@@ -119,13 +121,13 @@ function PoolSheet({
   const { ui } = useUITranslation();
 
   const [busy, setBusy] = React.useState(false);
+  const needsRefresh = !!(open && pool?.enabled && pool.chain.some((m) => m.state !== "ok"));
 
   // 冷却倒计时是后端算出的剩余秒数——抽屉开着且有配置不正常时才定时拉，让它走起来。
   React.useEffect(() => {
-    if (!open || !pool?.enabled || !pool.chain.some((m) => m.state !== "ok")) return;
-    const t = setInterval(() => void onReload(), 10_000);
-    return () => clearInterval(t);
-  }, [open, pool, onReload]);
+    if (!needsRefresh) return;
+    return startPolling(onReload, 10_000, 10_000);
+  }, [needsRefresh, onReload]);
 
   async function toggle(patch: { llm_pool_enabled?: boolean; llm_pool_bind_fallback?: boolean }) {
     if (busy) return;
@@ -978,6 +980,7 @@ export default function LLMPage() {
               </div>
             )}
           </div>
+          <WorkerPoolsPanel profiles={profiles} />
         </TabsContent>
 
         <TabsContent value="retry" className="mt-4">

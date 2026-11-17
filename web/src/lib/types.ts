@@ -814,11 +814,21 @@ export interface Conversation {
   running?: boolean; // live server state, returned with the conversation list
   agent_key: string;
   title: string;
+  source?: "manual" | "automation";
+  source_task_id?: number;
+  outcome?: "completed" | "failed" | "timeout";
   llm_profile_id?: number;
   pinned?: boolean;
   pinned_at?: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface ConversationStats {
+  turns: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
 }
 
 // ---- Backend logs (/logs page) ----
@@ -967,6 +977,20 @@ export interface TrafficResp {
   page?: number;
   size?: number;
   exchanges?: TrafficExchange[];
+  groups?: TrafficRouteGroup[];
+  matched_count?: number;
+}
+
+export interface TrafficRouteGroup {
+  id: string;
+  url: string;
+  host: string;
+  method: string;
+  count: number;
+  first_ts: number;
+  last_ts: number;
+  resp_len: number;
+  statuses: Record<string, number>;
 }
 
 // Full raw request/response of one exchange (lazy-loaded on row select).
@@ -1358,13 +1382,11 @@ export interface Tool {
   key: string;
   system: boolean;
   description: string;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  schema: Record<string, any>; // full JSON-Schema (object with properties)
+  schema: Record<string, unknown>; // full JSON-Schema (object with properties)
   agents: string[]; // bound agent keys
   enabled: boolean;
   kind?: "builtin" | "shell" | "command" | "script" | "http"; // 自定义工具类型
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  exec?: Record<string, any>; // 自定义工具执行规格(kind!=builtin)
+  exec?: Record<string, unknown>; // 自定义工具执行规格(kind!=builtin)
   deferred?: boolean; // schema 延迟(SearchExtraTools/ExecuteExtraTool)
   calls?: number; // persistent runtime invocation count (older APIs may omit it)
 }
@@ -1460,8 +1482,7 @@ export interface InterceptPending {
   task_id?: string;
   agent_name: string;
   tool_name: string;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  tool_input: Record<string, any>;
+  tool_input: Record<string, unknown>;
   status: "pending" | "allowed" | "denied" | "timeout";
   reason: string; // 规则 message 或模型判定理由(模型判定带 [模型] 前缀)
   decided_at?: string;
@@ -1998,4 +2019,21 @@ export interface TaskFileListing {
   size: number;
   truncated: boolean;
   missing: boolean;
+}
+
+export interface ConversationListPage {
+  conversations: Conversation[];
+  total: number;
+  all_total: number;
+  groups: Record<string, { total: number; running: number }>;
+  agents: Record<string, number>;
+  running: boolean;
+}
+export interface ConversationListQuery {
+  stats?: number;
+  scope?: "manual" | "automation" | "all";
+  agent?: string;
+  q?: string;
+  limit?: number;
+  offset?: number;
 }

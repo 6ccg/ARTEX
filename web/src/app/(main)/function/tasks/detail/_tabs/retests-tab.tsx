@@ -1,4 +1,5 @@
 "use client";
+import { startPolling } from "@/hooks/use-polling";
 import * as React from "react";
 
 import Link from "next/link";
@@ -52,7 +53,6 @@ export function RetestsTab({ taskId }: { taskId: string }) {
   // Fetch history only for the selection, and wait for each poll to finish.
   React.useEffect(() => {
     let disposed = false;
-    let timer: ReturnType<typeof setTimeout>;
     async function load() {
       try {
         const result = await api.findingsPage({
@@ -76,15 +76,13 @@ export function RetestsTab({ taskId }: { taskId: string }) {
         setError("");
       } catch (e) {
         if (!disposed) setError((e as Error).message);
-      } finally {
-        if (!disposed) timer = setTimeout(() => void load(), 3000);
       }
     }
     void refreshVersion; // Refresh triage immediately after a retest completes.
-    void load();
+    const stopPolling = startPolling(load, 3000);
     return () => {
       disposed = true;
-      clearTimeout(timer);
+      stopPolling();
     };
   }, [taskId, page, refreshVersion, severity, query]);
 

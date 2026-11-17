@@ -124,6 +124,7 @@ func (t *ToolSet) insertAssets() actool.CoreTool {
 		"insert_assets",
 		"批量登记新发现的资产，一次可混合多种类型（type 见枚举）。\n"+
 			"各类型必填字段：root_domain→domain；ip→ip（须为 IPv4/IPv6，非主机名）；subdomain→domain；app→app_name；service(HTTP)→url；service(非HTTP)→service_name+port（ip/domain 至少填一个）；endpoint→url+method。其余字段含义见各自说明。\n"+
+			"HTTP 服务按协议+主机+端口归一；具体路径登记为 endpoint。接口按 URL 路径+method 归一，查询参数写入 params，不按参数值重复创建接口。IP 不属于 root_domain/subdomain。\n"+
 			"auth/technologies/params 为追加合并(append)，不覆盖原值。\n"+
 			"返回：{results:[{index,id,type}], errors:[{index,error}]}",
 		obj(map[string]any{

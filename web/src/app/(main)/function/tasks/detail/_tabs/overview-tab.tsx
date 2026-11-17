@@ -1,4 +1,5 @@
 "use client";
+import { startPolling } from "@/hooks/use-polling";
 import * as React from "react";
 
 import {
@@ -383,7 +384,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
         setFindings(findingsResp);
         // coverage is independent + may 503 when no asset store — fetch separately so
         // its failure never blocks the others.
-        api
+        await api
           .taskCoverage(taskId)
           .then((c) => {
             if (!cancelled) setCoverage(c);
@@ -398,20 +399,15 @@ export function OverviewTab({ taskId }: { taskId: string }) {
       }
     };
 
-    void load();
     void loadScope();
-    void loadTokens();
-    void loadGoals();
-    void loadConstraints();
-    const timer = setInterval(() => {
-      void load();
-      void loadTokens();
-      void loadGoals();
-      void loadConstraints();
-    }, 3000);
+    const stopFast = startPolling(load, 5000);
+    const stopSlow = startPolling(async () => {
+      await Promise.all([loadTokens(), loadGoals(), loadConstraints()]);
+    }, 15000);
     return () => {
       cancelled = true;
-      clearInterval(timer);
+      stopFast();
+      stopSlow();
     };
   }, [taskId, loadScope, loadTokens, loadGoals, loadConstraints]);
 

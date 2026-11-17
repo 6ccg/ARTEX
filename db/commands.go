@@ -53,14 +53,28 @@ type ToolStat struct {
 func (d *DB) ToolStats(expID *int64, q string) ([]ToolStat, error) {
 	where, args, _ := commandFilter(expID, q)
 
+	resultScope := ""
+	if expID != nil {
+		resultScope = " AND r.exploration_id=$1"
+	}
+	// Pair results in bulk: each result belongs to its latest preceding call in
+	// the same session, and only that call's earliest result supplies its status.
 	rows, err := d.Query(`
-SELECT COALESCE(NULLIF(u.tool,''),'-') AS tool, COUNT(*) AS total,
-       COUNT(*) FILTER (WHERE COALESCE(r.is_error,false)) AS errors
-FROM activity u
-LEFT JOIN activity r ON r.tool_use_id = u.tool_use_id AND r.kind = 'tool_result'
-`+where+`
-GROUP BY 1
-ORDER BY total DESC, tool ASC`, args...)
+WITH result_calls AS (
+ SELECT DISTINCT ON(r.id) r.id AS result_id,u.id AS call_id,r.is_error
+ FROM activity r JOIN activity u ON u.kind='tool_use'
+ AND r.exploration_id=u.exploration_id AND r.tool_use_id=u.tool_use_id AND r.id>u.id
+ AND r.worker IS NOT DISTINCT FROM u.worker AND r.node_id IS NOT DISTINCT FROM u.node_id
+ AND COALESCE(r.main_seg,0)=COALESCE(u.main_seg,0)
+ WHERE r.kind='tool_result'`+resultScope+`
+ ORDER BY r.id,u.id DESC
+), pairs AS (
+ SELECT DISTINCT ON(call_id) call_id,is_error FROM result_calls ORDER BY call_id,result_id
+)
+SELECT COALESCE(NULLIF(u.tool,''),'-') AS tool,COUNT(*) AS total,
+ COUNT(*) FILTER(WHERE pairs.is_error) AS errors
+FROM activity u LEFT JOIN pairs ON pairs.call_id=u.id
+`+where+` GROUP BY 1 ORDER BY total DESC,tool ASC`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -103,7 +117,18 @@ func (d *DB) ListCommands(expID *int64, q string, page, size int) ([]CommandReco
 SELECT u.id, u.exploration_id, COALESCE(u.worker,''), COALESCE(u.tool,''), COALESCE(u.detail,''),
        COALESCE(r.detail,''), COALESCE(r.is_error, false), u.created_at
 FROM activity u
-LEFT JOIN activity r ON r.tool_use_id = u.tool_use_id AND r.kind = 'tool_result'
+LEFT JOIN LATERAL (
+ SELECT result.detail,result.is_error FROM activity result
+ WHERE result.exploration_id=u.exploration_id AND result.tool_use_id=u.tool_use_id
+ AND result.kind='tool_result' AND result.id>u.id
+ AND result.worker IS NOT DISTINCT FROM u.worker AND result.node_id IS NOT DISTINCT FROM u.node_id
+ AND COALESCE(result.main_seg,0)=COALESCE(u.main_seg,0)
+ AND NOT EXISTS (SELECT 1 FROM activity next_use WHERE next_use.exploration_id=u.exploration_id
+  AND next_use.tool_use_id=u.tool_use_id AND next_use.kind='tool_use' AND next_use.id>u.id AND next_use.id<result.id
+  AND next_use.worker IS NOT DISTINCT FROM u.worker AND next_use.node_id IS NOT DISTINCT FROM u.node_id
+  AND COALESCE(next_use.main_seg,0)=COALESCE(u.main_seg,0))
+ ORDER BY result.id LIMIT 1
+) r ON true
 ` + where + `
 ORDER BY u.id DESC
 LIMIT $` + fmt.Sprintf("%d", argN) + ` OFFSET $` + fmt.Sprintf("%d", argN+1)

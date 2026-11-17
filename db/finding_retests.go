@@ -101,8 +101,8 @@ func (d *DB) CreateFindingRetest(ctx context.Context, findingID int64, notes str
 	if runes := []rune(title); len(runes) > 100 {
 		title = string(runes[:100])
 	}
-	c, err := scanConv(tx.QueryRowContext(ctx, `INSERT INTO conversations(agent_key,title) VALUES ($1,$2) RETURNING `+convCols,
-		FindingRetestAgentKey, fmt.Sprintf("复测 #%d · %s", findingID, title)))
+	c, err := scanConv(tx.QueryRowContext(ctx, `INSERT INTO conversations(agent_key,title,source,source_task_id) VALUES ($1,$2,'automation',(SELECT task_id FROM findings WHERE id=$3)) RETURNING `+convCols,
+		FindingRetestAgentKey, fmt.Sprintf("复测 #%d · %s", findingID, title), findingID))
 	if err != nil {
 		return nil, nil, false, err
 	}

@@ -65,7 +65,7 @@ type Task struct {
 	CoverageEnabled   bool `json:"coverage_enabled"`
 	ShareGlobalAssets bool `json:"share_global_assets"`
 	// WorkerCount is the per-task concurrent work-agent count. 0 means use the
-	// global settings.workers default when the engine starts this task.
+	// global worker count and model pools, including live changes.
 	WorkerCount int `json:"worker_count"`
 }
 
@@ -459,17 +459,21 @@ ORDER BY (pinned_at IS NOT NULL) DESC, pinned_at DESC NULLS LAST, id DESC`)
 	return out, nil
 }
 
-// TaskPatch updates editable metadata and global asset visibility.
+// TaskPatch updates editable metadata, asset visibility, and worker concurrency.
 type TaskPatch struct {
+	WorkerCount       *int
 	Name              *string
 	Remark            *string
 	Pinned            *bool
 	ShareGlobalAssets *bool
 }
 
-// UpdateTask applies a partial metadata/visibility mutation and returns the updated row.
+// UpdateTask applies a partial task mutation and returns the updated row.
 // Re-pinning an already pinned task preserves its original position.
 func (d *DB) UpdateTask(id int64, patch TaskPatch) (*Task, error) {
+	if patch.WorkerCount != nil && (*patch.WorkerCount < 0 || *patch.WorkerCount > MaxTaskWorkerCount) {
+		return nil, fmt.Errorf("Worker 运行数量必须在 0 到 %d 之间", MaxTaskWorkerCount)
+	}
 	task, err := scanTask(d.QueryRow(`UPDATE tasks SET
 	name = CASE WHEN $2::boolean THEN $3 ELSE name END,
 	remark = CASE WHEN $5::boolean THEN $6 ELSE remark END,
@@ -478,9 +482,10 @@ func (d *DB) UpdateTask(id int64, patch TaskPatch) (*Task, error) {
 		WHEN $4::boolean THEN COALESCE(pinned_at, now())
 		ELSE NULL
 	END,
-	share_global_assets = COALESCE($7::boolean, share_global_assets)
+	share_global_assets = COALESCE($7::boolean, share_global_assets),
+	worker_count = COALESCE($8::integer, worker_count)
 WHERE id=$1 AND deleted_at IS NULL
-RETURNING `+taskCols, id, patch.Name != nil, patch.Name, patch.Pinned, patch.Remark != nil, patch.Remark, patch.ShareGlobalAssets))
+RETURNING `+taskCols, id, patch.Name != nil, patch.Name, patch.Pinned, patch.Remark != nil, patch.Remark, patch.ShareGlobalAssets, patch.WorkerCount))
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}

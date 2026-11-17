@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/Autumn-27/artex/db"
 )
@@ -79,7 +80,7 @@ func (s *Server) taskAssetMapping(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	title := fmt.Sprintf("资产与网络梳理 · 任务 #%d", taskID)
-	conversation, err := s.m.pg.CreateConversation("asset_mapper", title, nil)
+	conversation, err := s.m.pg.CreateAutomationConversation("asset_mapper", title, taskID)
 	if err != nil || conversation == nil {
 		writeErr(w, http.StatusInternalServerError, "创建拓扑梳理会话失败")
 		return
@@ -106,13 +107,40 @@ func (s *Server) taskAssetMappingStatus(w http.ResponseWriter, r *http.Request) 
 		writeErr(w, http.StatusNotFound, "task not found")
 		return
 	}
-	conversations, err := s.m.pg.ListConversations()
-	if err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
 	title := fmt.Sprintf("资产与网络梳理 · 任务 #%s", t.ID)
 	legacyTitle := fmt.Sprintf("资产梳理 · 任务 #%s", t.ID)
+	runningIDs := []int64{}
+	s.chatMu.Lock()
+	for key, busy := range s.chatBusy {
+		if busy && strings.HasPrefix(key, "conv-") {
+			id, _ := strconv.ParseInt(strings.TrimPrefix(key, "conv-"), 10, 64)
+			runningIDs = append(runningIDs, id)
+		}
+	}
+	s.chatMu.Unlock()
+	conversations := []*db.Conversation{}
+	if len(runningIDs) > 0 {
+		rows, err := s.m.pg.Query(`SELECT id FROM conversations WHERE id=ANY($1::bigint[]) AND agent_key='asset_mapper' AND title IN ($2,$3)`, runningIDs, title, legacyTitle)
+		if err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		for rows.Next() {
+			var id int64
+			if err := rows.Scan(&id); err != nil {
+				rows.Close()
+				writeErr(w, 500, err.Error())
+				return
+			}
+			conversations = append(conversations, &db.Conversation{ID: id, AgentKey: "asset_mapper", Title: title})
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+	}
 	for _, conversation := range conversations {
 		if conversation.AgentKey != "asset_mapper" || (conversation.Title != title && conversation.Title != legacyTitle) {
 			continue
