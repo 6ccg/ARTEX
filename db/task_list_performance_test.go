@@ -92,7 +92,7 @@ INSERT INTO activity(
 	}
 	if _, err := d.Exec(`
 INSERT INTO exploration_nodes(exploration_id, kind, payload, state)
-VALUES ($1,'goal','{}','met'), ($1,'goal','{}','open')`, task.ExplorationID); err != nil {
+VALUES ($1,'goal','{}','met'), ($1,'goal','{}','open'), ($1,'intent','{}','running')`, task.ExplorationID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -113,5 +113,8 @@ VALUES ($1,'goal','{}','met'), ($1,'goal','{}','open')`, task.ExplorationID); er
 	}
 	if metrics.Goals.Total != 2 || metrics.Goals.Met != 1 {
 		t.Fatalf("unexpected goal metrics: %+v", metrics.Goals)
+	}
+	if metrics.RunningIntents != 1 {
+		t.Fatalf("unexpected running intent count: %d", metrics.RunningIntents)
 	}
 }

@@ -1471,8 +1471,8 @@ type TaskListMetrics struct {
 }
 
 // TaskListMetricsAll returns list aggregates for every live task in one query.
-// The lateral lookups use the per-exploration indexes instead of grouping the
-// complete activity history on every poll.
+// Activity lookups use the per-exploration indexes. Count running intents once
+// so dormant tasks do not each scan the exploration node table.
 func (d *DB) TaskListMetricsAll() (map[int64]TaskListMetrics, error) {
 	rows, err := d.Query(`
 		SELECT task.exploration_id,
@@ -1501,7 +1501,7 @@ func (d *DB) TaskListMetricsAll() (map[int64]TaskListMetrics, error) {
 			SELECT EXTRACT(EPOCH FROM created_at)::bigint AS created_at
 			FROM activity
 			WHERE exploration_id=task.exploration_id
-			ORDER BY created_at DESC
+			ORDER BY activity.created_at DESC
 			LIMIT 1
 		) latest_activity ON true
 		LEFT JOIN LATERAL (
@@ -1510,11 +1510,12 @@ func (d *DB) TaskListMetricsAll() (map[int64]TaskListMetrics, error) {
 			FROM exploration_nodes
 			WHERE exploration_id=task.exploration_id AND kind='goal'
 		) goal_metrics ON true
-		LEFT JOIN LATERAL (
-			SELECT COUNT(*) AS running
+		LEFT JOIN (
+			SELECT exploration_id, COUNT(*) AS running
 			FROM exploration_nodes
-			WHERE exploration_id=task.exploration_id AND kind='intent' AND state='running'
-		) intent_metrics ON true
+			WHERE kind='intent' AND state='running'
+			GROUP BY exploration_id
+		) intent_metrics ON intent_metrics.exploration_id=task.exploration_id
 		LEFT JOIN LATERAL (
 			SELECT COUNT(*) FILTER (WHERE severity='critical') AS critical,
 			       COUNT(*) FILTER (WHERE severity='high')     AS high,
