@@ -471,8 +471,8 @@ func (i *Interceptor) SetJudgeConfig(c JudgeConfig) error {
 
 // Judge runs the LLM fallback judge for a tool call that matched no rule. It
 // returns (Decision, true) when the judge produced a terminal verdict, or
-// (Decision{}, false) when the fallback is disabled or not wired (caller then
-// keeps the current behavior: allow). On model error or an unparseable reply it
+// (Decision{}, false) when the fallback is disabled or not wired (caller denies
+// the unmatched call). On model error or an unparseable reply it
 // retries up to RetryCount times, then falls back to the configured FailAction.
 // Ask verdicts carry the human-approval
 // timeout so the existing HandleAsk consumes them unchanged.
@@ -507,6 +507,10 @@ func (i *Interceptor) Judge(ctx context.Context, tool string, arguments json.Raw
 	}
 	if err != nil {
 		out = Decision{ProfileID: out.ProfileID, ModelFallback: true, Action: cfg.FailAction, Message: "模型审批失败,按失败策略处理: " + err.Error()}
+		if errors.Is(err, ErrJudgeUnavailable) {
+			out.Action = "deny"
+			out.Message = "模型未配置或不可用，拒绝执行: " + err.Error()
+		}
 	}
 	// By default the model receives snapshot read errors and its verdict is
 	// honored. Operators may explicitly require human review when an incomplete
@@ -569,12 +573,24 @@ func judgeActionLabel(action string) string {
 // (Decision{}, false) if no rule matches.
 func (i *Interceptor) Match(toolName string, input []byte) (Decision, bool) {
 	rules, err := i.rules()
-	if err != nil || len(rules) == 0 {
+	if err != nil {
 		return Decision{}, false
 	}
+	builtinInput, readOnly := ruleInput(toolName, input)
 	values := inputStrings(input)
 	for _, r := range rules {
-		if ruleMatches(r, toolName, input, values) {
+		subject := input
+		decoded := values
+		if r.Action == "deny" && r.MatchTarget == "tool_input" && strings.HasPrefix(r.Name, "[内置]") {
+			// Built-in keyword rules inspect a known executed command, not report
+			// text or an embedded script. Ambiguous actions go to the existing judge.
+			if builtinInput == "" {
+				continue
+			}
+			subject = []byte(builtinInput)
+			decoded = nil
+		}
+		if ruleMatches(r, toolName, subject, decoded) {
 			msg := r.Message
 			if msg == "" {
 				msg = defaultMessage(r.Action, r.Name)
@@ -591,14 +607,12 @@ func (i *Interceptor) Match(toolName string, input []byte) (Decision, bool) {
 			}, true
 		}
 	}
+	if readOnly {
+		return Decision{Action: "allow", RuleName: "只读命令", Message: "当前调用仅包含可静态确认的只读命令"}, true
+	}
 	return Decision{}, false
 }
 
-// ruleMatches reports whether r applies to the call. tool_input rules are tried
-// against the raw JSON first, then against each decoded string value in values.
-// The raw form alone is not enough: JSON escapes newlines, tabs and quotes, and
-// Go's encoder also escapes & < >, so a rule like `\brm\b` never fires on
-// "cd /tmp\nrm -rf /var/www" (the raw bytes read `\nrm`, with no word boundary).
 func ruleMatches(r compiledRule, toolName string, input []byte, values []string) bool {
 	switch r.MatchTarget {
 	case "tool_name":
@@ -678,13 +692,13 @@ func (i *Interceptor) Log(ctx context.Context, convID int64, dec Decision, toolN
 
 // HandleAsk creates a pending approval record and blocks until the user decides
 // (via /api/intercept/pending/{id}/decide) or the per-rule timeout elapses.
-// Returns true if the user approved.
+// Returns whether execution is allowed and, if blocked, the actual reason.
 //
 // convID == 0 means no active conversation (background pentest task). The
 // pending record is still created (conversation_id = NULL) so the approvals
 // page shows it and the sidebar badge lights up. The worker thread blocks just
 // like in a chat session — the user must visit the approvals page to unblock it.
-func (i *Interceptor) HandleAsk(ctx context.Context, convID int64, dec Decision, toolName string, input []byte) bool {
+func (i *Interceptor) HandleAsk(ctx context.Context, convID int64, dec Decision, toolName string, input []byte) (bool, string) {
 	ruleID := dec.RuleID
 	taskID, agentName := taskInfoFromCtx(ctx)
 	taskEmit := taskEmitFromCtx(ctx)
@@ -692,7 +706,7 @@ func (i *Interceptor) HandleAsk(ctx context.Context, convID int64, dec Decision,
 	audit := auditFor(ctx, dec, input, "pending")
 	pendingID, err := i.db.CreateInterceptPending(ruleID, convID, taskID, agentName, toolName, input, dec.Message, audit)
 	if err != nil {
-		return false
+		return false, "审批未完成，未执行：无法创建人工审批请求"
 	}
 
 	i.bindResult(ctx, pendingID, audit)
@@ -702,7 +716,7 @@ func (i *Interceptor) HandleAsk(ctx context.Context, convID int64, dec Decision,
 	// registered. Re-read after registration so that decision cannot be lost;
 	// later decisions will be delivered through ch.
 	if saved, err := i.db.GetInterceptDetail(pendingID); err == nil && saved != nil && saved.Status != "pending" {
-		return saved.Status == "allowed" || (saved.Audit != nil && saved.Audit.EffectiveAction == "allow")
+		return askResult(saved)
 	}
 
 	detail, _ := json.Marshal(map[string]any{
@@ -729,11 +743,14 @@ func (i *Interceptor) HandleAsk(ctx context.Context, convID int64, dec Decision,
 		// No timeout: wait indefinitely until user decides or worker stops.
 		select {
 		case allowed := <-ch:
-			return allowed
+			if allowed {
+				return true, ""
+			}
+			return false, "人工明确拒绝，当前调用未执行"
 		case <-ctx.Done():
 			_, _ = i.db.ResolveIntercept(pendingID, "denied", "deny", "工作已取消")
 			_ = i.db.CompleteIntercept(pendingID, audit.RunID, audit.ToolUseID, "not_executed", "执行前工作已取消", false)
-			return false
+			return false, "审批未完成，未执行：工作已取消"
 		}
 	}
 
@@ -745,27 +762,54 @@ func (i *Interceptor) HandleAsk(ctx context.Context, convID int64, dec Decision,
 	defer timer.Stop()
 	select {
 	case allowed := <-ch:
-		return allowed
+		if allowed {
+			return true, ""
+		}
+		return false, "人工明确拒绝，当前调用未执行"
 	case <-timer.C:
 		allowed := dec.TimeoutAction == "allow"
-		action := "deny"
+		action, reason := "deny", "审批未完成，未执行：人工审批等待超时"
 		if allowed {
-			action = "allow"
+			action, reason = "allow", "审批等待超时，按超时策略放行"
 		}
-		resolved, err := i.db.ResolveIntercept(pendingID, "timeout", action, "审批超时，按超时策略处理")
+		resolved, err := i.db.ResolveIntercept(pendingID, "timeout", action, reason)
 		if err != nil {
-			return false
+			return false, "审批未完成，未执行：无法保存超时审批结果"
 		}
 		if !resolved {
 			detail, err := i.db.GetInterceptDetail(pendingID)
-			return err == nil && detail != nil && (detail.Status == "allowed" || (detail.Audit != nil && detail.Audit.EffectiveAction == "allow"))
+			if err != nil {
+				return false, "审批未完成，未执行：无法读取最终审批结果"
+			}
+			return askResult(detail)
 		}
-		return allowed
+		if allowed {
+			return true, ""
+		}
+		return false, reason
 	case <-ctx.Done():
 		_, _ = i.db.ResolveIntercept(pendingID, "denied", "deny", "工作已取消")
 		_ = i.db.CompleteIntercept(pendingID, audit.RunID, audit.ToolUseID, "not_executed", "执行前工作已取消", false)
-		return false
+		return false, "审批未完成，未执行：工作已取消"
 	}
+}
+
+// Preserve the same explanation when another decision wins the registration or
+// timeout race. The existing saved status/source already identifies the outcome.
+func askResult(detail *db.InterceptDetail) (bool, string) {
+	if detail == nil {
+		return false, "审批未完成，未执行：无法取得审批结果"
+	}
+	if detail.Status == "allowed" || (detail.Audit != nil && detail.Audit.EffectiveAction == "allow") {
+		return true, ""
+	}
+	if detail.Status == "denied" && detail.DecisionSource == "manual" {
+		return false, "人工明确拒绝，当前调用未执行"
+	}
+	if detail.Status == "timeout" {
+		return false, "审批未完成，未执行：人工审批等待超时"
+	}
+	return false, "审批未完成，未执行：审批已取消或未完成"
 }
 
 var ErrAlreadyDecided = errors.New("审批已处理或不存在，请刷新记录")

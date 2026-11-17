@@ -150,6 +150,21 @@ func TestJudgeRetriesInvalidVerdict(t *testing.T) {
 	}
 }
 
+func TestJudgeUnavailableDeniesWithoutRetry(t *testing.T) {
+	i := retryTestInterceptor(t, map[string]string{
+		settingJudgeEnabled: "true", settingJudgeFailAction: "allow", settingJudgeRetryCount: "3",
+	})
+	calls := 0
+	i.SetReviewer(func(context.Context, int64, string, ReviewInput) (Decision, error) {
+		calls++
+		return Decision{}, ErrJudgeUnavailable
+	})
+	got, judged := i.Judge(t.Context(), "Bash", json.RawMessage(`{"command":"python scan.py"}`))
+	if !judged || got.Action != "deny" || calls != 1 || !got.ModelFallback {
+		t.Fatalf("judged=%v calls=%d decision=%+v", judged, calls, got)
+	}
+}
+
 func TestJudgeDefaultRetriesAndExplicitDisable(t *testing.T) {
 	for _, tc := range []struct {
 		name      string

@@ -2,9 +2,14 @@ package intercept
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 )
+
+// ErrJudgeUnavailable means there is no usable judge configuration; retrying
+// the same call cannot fix it, and a failure policy must not approve it.
+var ErrJudgeUnavailable = errors.New("裁判模型未配置或不可用")
 
 const (
 	MaxJudgeRetryCount          = 20
@@ -54,6 +59,9 @@ func reviewWithRetry(ctx context.Context, cfg JudgeConfig, rv Reviewer, input Re
 			err = attemptCtx.Err()
 		}
 		cancel()
+		if errors.Is(err, ErrJudgeUnavailable) {
+			return out, err
+		}
 		if err == nil {
 			switch out.Action {
 			case "allow", "ask", "deny":

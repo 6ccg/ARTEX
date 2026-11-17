@@ -44,15 +44,15 @@ func (s *Runtime) wireInterceptReviewer() {
 			}
 		}
 		if profileID == 0 {
-			return intercept.Decision{}, fmt.Errorf("未配置可用的裁判模型")
+			return intercept.Decision{}, intercept.ErrJudgeUnavailable
 		}
 		profile, err := s.m.pg.ProfileByID(profileID)
 		if err != nil || profile == nil {
-			return intercept.Decision{ProfileID: profileID}, fmt.Errorf("裁判模型 profile %d 不可用", profileID)
+			return intercept.Decision{ProfileID: profileID}, fmt.Errorf("%w: profile %d", intercept.ErrJudgeUnavailable, profileID)
 		}
 		if profile.Format == "jev" {
 			if strings.TrimSpace(profile.APIKey) == "" {
-				return intercept.Decision{ProfileID: profileID}, fmt.Errorf("Jev 判定模型未设置 API Key")
+				return intercept.Decision{ProfileID: profileID}, fmt.Errorf("%w: Jev 未设置 API Key", intercept.ErrJudgeUnavailable)
 			}
 			ctx = llmrec.WithWorker(ctx, judgeWorkerLane)
 			started := time.Now()
@@ -64,7 +64,7 @@ func (s *Runtime) wireInterceptReviewer() {
 		}
 		prov, _, ok := s.providerForProfile(profileID)
 		if !ok {
-			return intercept.Decision{ProfileID: profileID}, fmt.Errorf("裁判模型 profile %d 不可用", profileID)
+			return intercept.Decision{ProfileID: profileID}, fmt.Errorf("%w: profile %d", intercept.ErrJudgeUnavailable, profileID)
 		}
 		// Tag this call's usage as the "judge" lane so the config page can report
 		// how much the fallback approval has spent, separate from model profiles.

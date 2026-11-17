@@ -90,16 +90,19 @@ func (g *Guard) applyIntercept(ctx context.Context, ev hook.Event) hook.Result {
 	ctx = intercept.WithCall(ctx, ev.ToolName, ev.Input)
 	dec, matched := g.interceptor.Match(ev.ToolName, ev.Input)
 	if !matched {
-		// No rule matched. Ask the LLM fallback judge (if enabled); when it is off
-		// or unwired, keep current behavior and allow.
+		// Only a rule or an actual judge verdict can approve a reviewed tool call.
 		d, judged := g.interceptor.Judge(ctx, ev.ToolName, ev.Input)
 		if !judged {
-			return hook.Result{}
+			d = intercept.Decision{Action: "deny", ModelFallback: true,
+				Message: "模型自动审核未启用或未配置，当前操作未获放行"}
 		}
 		dec = d
 	}
 	switch dec.Action {
 	case "deny":
+		if dec.ModelFallback {
+			dec.Message = "审批未完成，未执行：" + dec.Message + "；这不代表已确认动作危险"
+		}
 		// 观测:deny 命中不阻塞审批,直接记一条 denied（历史/任务拦截页可见）。
 		g.interceptor.Log(ctx, intercept.ConvIDFromContext(ctx), dec, ev.ToolName, ev.Input, "denied")
 		return g.block(ev.ToolName, systemBlockMessage(dec.Message), "")
@@ -112,32 +115,22 @@ func (g *Guard) applyIntercept(ctx context.Context, ev hook.Event) hook.Result {
 		// immediately without creating a pending record — avoids orphaned DB entries
 		// and makes execOne complete fast, reducing the race against drainSynthetic.
 		if ctx.Err() != nil {
-			return g.block(ev.ToolName, systemBlockMessage("工作已取消，平台安全管控阻止执行"), "")
+			return g.block(ev.ToolName, systemBlockMessage("审批未完成，未执行：工作已取消"), "")
 		}
 		convID := intercept.ConvIDFromContext(ctx)
-		if !g.interceptor.HandleAsk(ctx, convID, dec, ev.ToolName, ev.Input) {
-			return g.block(ev.ToolName, systemBlockMessage("人工审批未通过（用户拒绝或审批超时）"), "")
+		if allowed, reason := g.interceptor.HandleAsk(ctx, convID, dec, ev.ToolName, ev.Input); !allowed {
+			return g.block(ev.ToolName, systemBlockMessage(reason), "")
 		}
 		return hook.Result{}
 	}
 	return hook.Result{}
 }
 
-// systemBlockMessage frames an intercept block as an ARTEX platform-governance
-// decision so the agent does not mistake it for a target-side defense.
-//
-// The bare reasons ("禁止执行此工具" / "用户拒绝") read exactly like a WAF/403 on
-// the target, so a pentest agent's instinct is to bypass them — rewrite the
-// command, swap the payload, re-encode, retry. That is both futile (the platform
-// blocks the class of action, not one string) and wrong (it's a policy decision,
-// not an obstacle to defeat). This prefix states plainly that the block comes
-// from the platform, is not the target's protection, and that the operation is
-// forbidden — so the agent pivots to another approach instead of evading it.
-// Audit/history rows keep the raw reason (see Interceptor.Log); only the
-// model-facing tool_result carries this framing.
+// Identify the platform block without turning an incomplete approval into a
+// claim of proven danger. Keep the reason and direct the agent to another route.
 func systemBlockMessage(reason string) string {
-	return "【ARTEX 平台管控·非目标防御】此调用被平台拦截。" +
-		"原因：" + reason + "。此操作被禁止。"
+	return "【ARTEX 平台管控·非目标防御】此调用被平台拦截，未执行。" +
+		"原因：" + reason + "。请选择其他可行路线继续任务，不要绕过审批或仅改写同一动作重试。"
 }
 
 var reBlocked = regexp.MustCompile(`(?i)\b(403|forbidden|waf|blocked|rate.?limit|429|captcha|denied)\b`)
