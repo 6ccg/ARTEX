@@ -1,10 +1,11 @@
 package enrich
 
 import (
+	"context"
 	"errors"
-	"strings"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -53,7 +54,7 @@ func TestProbeUserAgent(t *testing.T) {
 			client.CheckRedirect = func(*http.Request, []*http.Request) error {
 				return errors.New("probe captured")
 			}
-			e := &Engine{client: client}
+			e := &Engine{client: client, ctx: context.Background()}
 			e.doHTTP(1, server.URL)
 			if calls != 1 {
 				t.Fatalf("probe calls = %d, want 1", calls)

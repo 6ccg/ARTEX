@@ -6,8 +6,8 @@
 #
 # 本地手动构建镜像时，先自行准备二进制：
 #   cd web && npm run build:static && cd ..
-#   mkdir -p server/webui
-#   cp -r web/out server/webui/dist
+#   mkdir -p server/webui/dist
+#   cp -r web/out/. server/webui/dist/
 #   CGO_ENABLED=0 GOARCH=amd64 go build -tags embedui -o dist/amd64/artex ./cmd/artex
 #   docker build -t artex:local .
 FROM node:22-bookworm-slim AS node-runtime

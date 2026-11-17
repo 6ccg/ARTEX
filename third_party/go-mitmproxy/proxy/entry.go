@@ -401,7 +401,7 @@ func (e *entry) httpsDialFirstAttack(res http.ResponseWriter, req *http.Request,
 		return
 	}
 
-	wsPeek, err := cconn.(*wrapClientConn).PeekBuffered()
+	tunnelPeek, err := cconn.(*wrapClientConn).PeekBuffered()
 	if err == io.EOF {
 		err = nil
 	}
@@ -412,13 +412,36 @@ func (e *entry) httpsDialFirstAttack(res http.ResponseWriter, req *http.Request,
 		return
 	}
 
-	if helper.IsWebSocket(wsPeek) {
+	tunnelType := helper.GetTunnelType(tunnelPeek)
+
+	if tunnelType == helper.TunnelTypeWebSocket {
 		err = proxy.webSocketHandler.handle(conn, cconn, f)
 		if err != nil {
 			log.Errorf("WebSocket handle error: %v", err)
 			cconn.Close()
 			conn.Close()
 		}
+		return
+	}
+
+	if tunnelType == helper.TunnelTypeHttp {
+		f.ConnContext.ServerConn.client = &http.Client{
+			Transport: &http.Transport{
+				DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+					return conn, nil
+				},
+				ForceAttemptHTTP2:  false, // disable http2
+				DisableCompression: true,  // To get the original response from the server, set Transport.DisableCompression to true.
+			},
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				// 禁止自动重定向
+				return http.ErrUseLastResponse
+			},
+		}
+		proxy.attacker.listener.accept(&attackerConn{
+			Conn:    cconn,
+			connCtx: f.ConnContext,
+		})
 		return
 	}
 
@@ -453,7 +476,7 @@ func (e *entry) httpsDialLazyAttack(res http.ResponseWriter, req *http.Request, 
 		return
 	}
 
-	wsPeek, err := cconn.(*wrapClientConn).PeekBuffered()
+	tunnelPeek, err := cconn.(*wrapClientConn).PeekBuffered()
 	if err == io.EOF {
 		err = nil
 	}
@@ -463,13 +486,16 @@ func (e *entry) httpsDialLazyAttack(res http.ResponseWriter, req *http.Request, 
 		return
 	}
 
-	if helper.IsWebSocket(wsPeek) {
-		conn, err := proxy.attacker.httpsDial(req.Context(), req)
-		if err != nil {
-			cconn.Close()
-			log.Error(err)
-			return
-		}
+	tunnelType := helper.GetTunnelType(tunnelPeek)
+
+	conn, err := proxy.attacker.httpsDial(req.Context(), req)
+	if err != nil {
+		cconn.Close()
+		log.Error(err)
+		return
+	}
+
+	if tunnelType == helper.TunnelTypeWebSocket {
 		err = proxy.webSocketHandler.handle(conn, cconn, f)
 		if err != nil {
 			log.Errorf("WebSocket handle error: %v", err)
@@ -479,12 +505,27 @@ func (e *entry) httpsDialLazyAttack(res http.ResponseWriter, req *http.Request, 
 		return
 	}
 
-	conn, err := proxy.attacker.httpsDial(req.Context(), req)
-	if err != nil {
-		cconn.Close()
-		log.Error(err)
+	if tunnelType == helper.TunnelTypeHttp {
+		f.ConnContext.ServerConn.client = &http.Client{
+			Transport: &http.Transport{
+				DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+					return conn, nil
+				},
+				ForceAttemptHTTP2:  false, // disable http2
+				DisableCompression: true,  // To get the original response from the server, set Transport.DisableCompression to true.
+			},
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				// 禁止自动重定向
+				return http.ErrUseLastResponse
+			},
+		}
+		proxy.attacker.listener.accept(&attackerConn{
+			Conn:    cconn,
+			connCtx: f.ConnContext,
+		})
 		return
 	}
+
 	transfer(log, conn, cconn)
 	conn.Close()
 	cconn.Close()

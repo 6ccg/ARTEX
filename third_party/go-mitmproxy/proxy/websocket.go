@@ -142,7 +142,7 @@ func (h *webSocketHandler) handle(serverConn, clientConn net.Conn, f *Flow) erro
 	log.Debugf("Client WebSocket upgraded successfully")
 
 	wsData := newWebSocketData()
-	f.WebScoket = wsData
+	f.WebSocket = wsData
 
 	for _, addon := range h.proxy.Addons {
 		addon.WebSocketStart(f)
@@ -182,7 +182,7 @@ func (h *webSocketHandler) forwardMessages(clientWS, serverWS *websocket.Conn, f
 				return
 			}
 
-			f.WebScoket.addMessage(msgType, msg, true)
+			f.WebSocket.addMessage(msgType, msg, true)
 			for _, addon := range h.proxy.Addons {
 				addon.WebSocketMessage(f)
 			}
@@ -215,7 +215,7 @@ func (h *webSocketHandler) forwardMessages(clientWS, serverWS *websocket.Conn, f
 				return
 			}
 
-			f.WebScoket.addMessage(msgType, msg, false)
+			f.WebSocket.addMessage(msgType, msg, false)
 			for _, addon := range h.proxy.Addons {
 				addon.WebSocketMessage(f)
 			}
@@ -305,7 +305,7 @@ func (h *webSocketHandler) handleWSS(res http.ResponseWriter, req *http.Request)
 	f := newFlow()
 	f.Request = newRequest(req)
 	f.ConnContext = connCtx
-	f.WebScoket = wsData
+	f.WebSocket = wsData
 	defer f.finish()
 
 	for _, addon := range h.proxy.Addons {

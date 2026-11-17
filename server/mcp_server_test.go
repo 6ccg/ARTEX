@@ -74,7 +74,7 @@ func mcpTestServer(t *testing.T) (*Server, *mcpMemoryStore) {
 	store := &mcpMemoryStore{enabled: true, tokens: map[string]*db.APIToken{}}
 	store.add(1, mcpTestReadToken, db.APIScopeRead)
 	store.add(2, mcpTestFullToken, db.APIScopeRead, db.APIScopeTaskCreate, db.APIScopeTaskControl)
-	s := &Server{jwtKey: []byte("test-only-signing-key-32-characters"), mcpStoreOverride: store}
+	s := &Server{Runtime: &Runtime{}, jwtKey: []byte("test-only-signing-key-32-characters"), mcpStoreOverride: store}
 	if err := s.basicAuth.load(&basicAuthMemoryStore{}); err != nil {
 		t.Fatal(err)
 	}
@@ -502,7 +502,6 @@ func TestMCPServerPostgresEndToEnd(t *testing.T) {
 	}
 	s := newAdmissionTestServer(m, nil)
 	s.jwtKey = []byte("test-only-signing-key-32-characters")
-	m.SetTaskControlMutex(&s.concMu)
 	if err := s.basicAuth.load(m.pg); err != nil {
 		t.Fatal(err)
 	}

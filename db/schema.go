@@ -14,7 +14,7 @@ import (
 //go:embed upgrade_legacy.sql
 var legacySchemaSQL string
 
-const schemaRevision = 5
+const schemaRevision = 6
 const schemaRevisionKey = "database_schema_revision"
 
 // The caller holds schemaMigrationLockKey on conn. Each upgrade and its version
@@ -108,11 +108,53 @@ CREATE INDEX IF NOT EXISTS idx_conv_result ON conversation_activities(conversati
 			return err
 		}
 	}
+	if version < 6 {
+		if _, err := tx.ExecContext(ctx, mcpServerSchema); err != nil {
+			return err
+		}
+	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO settings(key,value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value`, schemaRevisionKey, strconv.Itoa(schemaRevision)); err != nil {
 		return err
 	}
 	return tx.Commit()
 }
+
+// Existing local databases predate the upstream MCP server tables.
+const mcpServerSchema = `
+CREATE TABLE IF NOT EXISTS api_tokens (
+    id BIGSERIAL PRIMARY KEY,
+    name TEXT NOT NULL,
+    token_hash TEXT NOT NULL UNIQUE,
+    token_prefix TEXT NOT NULL,
+    scopes JSONB NOT NULL DEFAULT '[]',
+    company_ids JSONB NOT NULL DEFAULT '[]',
+    max_active_tasks INTEGER NOT NULL DEFAULT 0,
+    max_tasks_per_hour INTEGER NOT NULL DEFAULT 0,
+    expires_at TIMESTAMPTZ,
+    last_used_at TIMESTAMPTZ,
+    revoked_at TIMESTAMPTZ,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS api_token_tasks (
+    token_id BIGINT NOT NULL REFERENCES api_tokens(id) ON DELETE CASCADE,
+    task_id BIGINT NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (token_id, task_id)
+);
+CREATE INDEX IF NOT EXISTS idx_api_token_tasks_recent ON api_token_tasks(token_id, created_at DESC);
+CREATE TABLE IF NOT EXISTS mcp_audit_log (
+    id BIGSERIAL PRIMARY KEY,
+    token_id BIGINT NOT NULL,
+    token_name TEXT NOT NULL DEFAULT '',
+    tool TEXT NOT NULL,
+    args TEXT NOT NULL DEFAULT '',
+    ok BOOLEAN NOT NULL,
+    result TEXT NOT NULL DEFAULT '',
+    remote_addr TEXT NOT NULL DEFAULT '',
+    duration_ms BIGINT NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+`
 
 // Recover a complete JSON string, including escaped quotes, from the trigger
 // context. Only replace generated titles; user-renamed conversations stay intact.

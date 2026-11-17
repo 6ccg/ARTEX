@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	uuid "github.com/satori/go.uuid"
+	uuid "github.com/google/uuid"
 )
 
 // flow http request
@@ -110,7 +110,7 @@ type Flow struct {
 	ConnContext *ConnContext
 	Request     *Request
 	Response    *Response
-	WebScoket   *WebSocketData
+	WebSocket   *WebSocketData
 	SSE         *SSEData // Server-Sent Events data
 
 	// https://docs.mitmproxy.org/stable/overview-features/#streaming
@@ -123,7 +123,7 @@ type Flow struct {
 
 func newFlow() *Flow {
 	return &Flow{
-		Id:        uuid.NewV4(),
+		Id:        uuid.New(),
 		StartTime: time.Now(),
 		done:      make(chan struct{}),
 	}

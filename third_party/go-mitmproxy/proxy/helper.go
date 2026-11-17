@@ -5,6 +5,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"runtime/debug"
 	"strings"
 
 	log "github.com/sirupsen/logrus"
@@ -32,7 +33,7 @@ func logErr(log *log.Entry, err error) (loged bool) {
 		}
 	}
 
-	log.Error(err)
+	log.Errorf("%v\n%s", err, debug.Stack())
 	loged = true
 	return
 }

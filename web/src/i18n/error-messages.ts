@@ -1,4 +1,8 @@
 export const errorMessages = {
+  "error.http_user_agent_invalid": [
+    "User-Agent 只能包含可打印的 ASCII 字符",
+    "User-Agent must contain printable ASCII characters only",
+  ],
   "error.tool_schema_object_required": ["参数 Schema 必须是 JSON 对象", "The parameter schema must be a JSON object"],
   "error.intelligence_response_invalid": [
     "情报数据响应不完整，请刷新后重试",

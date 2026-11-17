@@ -75,6 +75,19 @@ INSERT INTO scheduler_state(key,value) VALUES('last_timeout_id','2');
 	if err := conn.QueryRowContext(ctx, `SELECT to_regclass('pending_trigger_runs') IS NOT NULL`).Scan(&pendingExists); err != nil || !pendingExists {
 		t.Fatalf("pending table: %v %v", pendingExists, err)
 	}
+	// Revision 5 had no MCP server tables; upgrading must add them without legacy DDL.
+	if _, err := conn.ExecContext(ctx, `DROP TABLE api_token_tasks,api_tokens,mcp_audit_log; UPDATE settings SET value='5' WHERE key='database_schema_revision'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := initializeSchema(ctx, conn); err != nil {
+		t.Fatalf("revision 5 upgrade: %v", err)
+	}
+	for _, table := range []string{"api_tokens", "api_token_tasks", "mcp_audit_log"} {
+		var exists bool
+		if err := conn.QueryRowContext(ctx, `SELECT to_regclass($1) IS NOT NULL`, table).Scan(&exists); err != nil || !exists {
+			t.Fatalf("MCP table %s: exists=%v err=%v", table, exists, err)
+		}
+	}
 	// Holding a read transaction would deadlock a second connection trying DDL.
 	reader, err := d.Begin()
 	if err != nil {

@@ -2,7 +2,7 @@ package cert
 
 import (
 	"bytes"
-	"io/ioutil"
+	"os"
 	"reflect"
 	"testing"
 )
@@ -32,7 +32,7 @@ func TestNewCA(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	fileContent, err := ioutil.ReadFile(ca.caFile())
+	fileContent, err := os.ReadFile(ca.caFile())
 	if err != nil {
 		t.Fatal(err)
 	}

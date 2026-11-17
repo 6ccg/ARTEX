@@ -22,6 +22,7 @@ import (
 	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/egress"
+	"github.com/Autumn-27/artex/internal/httpidentity"
 	"github.com/Autumn-27/artex/intercept"
 	"github.com/Autumn-27/artex/intercept/jev"
 	"github.com/Autumn-27/artex/report"
@@ -44,7 +45,7 @@ type Server struct {
 	lastCPUAt  time.Time
 
 	mcpStoreOverride mcpStore
-	mcpCreateMu sync.Mutex
+	mcpCreateMu      sync.Mutex
 }
 
 // NewHandler adapts an existing runtime to HTTP. It does not start runtime work.
@@ -2830,17 +2831,18 @@ func (s *Server) pgDetectPython(w http.ResponseWriter, r *http.Request) {
 // off, agents get no proxy config, no traffic tools, and no proxy prompt content.
 func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		TrafficCapture      *bool `json:"traffic_capture"`
-		BrowserScreenshot   *bool `json:"browser_screenshot_enabled"`
-		ScreenshotTimestamp *bool `json:"browser_screenshot_timestamp_enabled"`
-		OpsecEnabled        *bool `json:"opsec_enabled"`
-		AgentTrafficBinding *bool `json:"agent_traffic_binding"`
-		TaskIntelligence    *bool `json:"task_intelligence_enabled"`
-		TaskAutoTitle       *bool `json:"task_auto_title_enabled"`
-		ChatAutoTitle       *bool `json:"chat_auto_title_enabled"`
-		CredentialAgent     *bool `json:"credential_agent_enabled"`
-		CredentialTraffic   *bool `json:"credential_traffic_binding"`
-		LLMRecord           *bool `json:"llm_record"` // LLM 录制开关（默认关）；即时生效，无需重建 agent
+		TrafficCapture      *bool   `json:"traffic_capture"`
+		BrowserScreenshot   *bool   `json:"browser_screenshot_enabled"`
+		ScreenshotTimestamp *bool   `json:"browser_screenshot_timestamp_enabled"`
+		OpsecEnabled        *bool   `json:"opsec_enabled"`
+		HTTPUserAgent       *string `json:"http_user_agent"`
+		AgentTrafficBinding *bool   `json:"agent_traffic_binding"`
+		TaskIntelligence    *bool   `json:"task_intelligence_enabled"`
+		TaskAutoTitle       *bool   `json:"task_auto_title_enabled"`
+		ChatAutoTitle       *bool   `json:"chat_auto_title_enabled"`
+		CredentialAgent     *bool   `json:"credential_agent_enabled"`
+		CredentialTraffic   *bool   `json:"credential_traffic_binding"`
+		LLMRecord           *bool   `json:"llm_record"` // LLM 录制开关（默认关）；即时生效，无需重建 agent
 		// Web search. WebSearchEnabled/Backend toggle the tool + backend; BraveKey/TavilyKey
 		// are optional — omit (null) to leave a stored key untouched, send "" to clear.
 		WebSearchEnabled       *bool         `json:"web_search_enabled"`
@@ -2888,6 +2890,14 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
+	if req.HTTPUserAgent != nil {
+		value, err := httpidentity.ValidateUserAgent(*req.HTTPUserAgent)
+		if err != nil {
+			writeJSON(w, 400, map[string]any{"error": err.Error(), "code": "http_user_agent_invalid"})
+			return
+		}
+		req.HTTPUserAgent = &value
+	}
 	if req.EgressProbeURL != nil {
 		value := strings.TrimSpace(*req.EgressProbeURL)
 		if value != "" {
@@ -2906,6 +2916,18 @@ func (s *Server) putSettings(w http.ResponseWriter, r *http.Request) {
 				writeErr(w, 400, err.Error())
 				return
 			}
+		}
+	}
+	if req.HTTPUserAgent != nil {
+		s.cfgMu.Lock()
+		err := s.m.pg.SetSetting(settingHTTPUserAgent, *req.HTTPUserAgent)
+		if err == nil {
+			err = os.Setenv("ARTEX_HTTP_USER_AGENT", *req.HTTPUserAgent)
+		}
+		s.cfgMu.Unlock()
+		if err != nil {
+			writeErr(w, 500, err.Error())
+			return
 		}
 	}
 	if req.ConstraintsInjectPlanner != nil {

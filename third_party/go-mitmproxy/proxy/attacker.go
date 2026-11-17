@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"runtime/debug"
 	"strings"
 	"sync"
 
@@ -168,7 +169,13 @@ func (a *attacker) serveConn(clientTlsConn *tls.Conn, connCtx *ConnContext) {
 
 func (a *attacker) ServeHTTP(res http.ResponseWriter, req *http.Request) {
 	if req.URL.Scheme == "" {
+		connCtx := req.Context().Value(connContextKey).(*ConnContext)
 		req.URL.Scheme = "https"
+		if connCtx.ClientConn.Tls {
+			req.URL.Scheme = "https"
+		} else {
+			req.URL.Scheme = "http"
+		}
 	}
 	if req.URL.Host == "" {
 		req.URL.Host = req.Host
@@ -265,18 +272,22 @@ func (a *attacker) serverTlsHandshake(ctx context.Context, connCtx *ConnContext)
 		CipherSuites: clientHello.CipherSuites,
 	}
 	if len(clientHello.SupportedVersions) > 0 {
-		minVersion := clientHello.SupportedVersions[0]
-		maxVersion := clientHello.SupportedVersions[0]
-		for _, version := range clientHello.SupportedVersions {
-			if version < minVersion {
-				minVersion = version
+		minVersion, maxVersion := uint16(0xffff), uint16(0)
+		for _, v := range clientHello.SupportedVersions {
+			if v&0x0F0F == 0x0A0A && v&0xff == v>>8 { // skip GREASE
+				continue
 			}
-			if version > maxVersion {
-				maxVersion = version
+			if v < minVersion {
+				minVersion = v
+			}
+			if v > maxVersion {
+				maxVersion = v
 			}
 		}
-		serverTlsConfig.MinVersion = minVersion
-		serverTlsConfig.MaxVersion = maxVersion
+		if minVersion != 0xffff {
+			serverTlsConfig.MinVersion = minVersion
+			serverTlsConfig.MaxVersion = maxVersion
+		}
 	}
 	serverTlsConn := tls.Client(serverConn.Conn, serverTlsConfig)
 	serverConn.tlsConn = serverTlsConn
@@ -548,7 +559,7 @@ func (a *attacker) attack(res http.ResponseWriter, req *http.Request) {
 	// when addons panic
 	defer func() {
 		if err := recover(); err != nil {
-			log.Warnf("Recovered: %v\n", err)
+			log.Warnf("Recovered: %v\n%s", err, debug.Stack())
 		}
 	}()
 

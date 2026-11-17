@@ -1,5 +1,13 @@
 // Settings display text only. API values, prompts and model output remain unchanged.
 export const settingsMessages = {
+  "settings.httpUserAgent": ["HTTP User-Agent", "HTTP User-Agent"],
+  "settings.httpUserAgentHelp": [
+    "留空时从 20 个浏览器样本中随机选择。保存后立即用于新的 HTTP 请求和采集脚本；重定向与重试沿用同一次请求的值，显式请求头优先。",
+    "Leave empty to select randomly from 20 browser samples. Changes apply to new HTTP requests and collection scripts immediately. Redirects and retries reuse the request's value; explicit headers take precedence.",
+  ],
+  "settings.httpUserAgentPlaceholder": ["默认随机选择浏览器 User-Agent", "Random browser User-Agent by default"],
+  "settings.httpUserAgentSaved": ["已保存 HTTP User-Agent", "HTTP User-Agent saved"],
+  "settings.keywords.httpUserAgent": ["HTTP User-Agent 浏览器 请求头 UA", "HTTP User-Agent browser request headers UA"],
   "settings.workerConfigLoadFailed": [
     "设置加载失败，请刷新后再保存 Worker 配置",
     "Settings could not be loaded. Refresh before saving the Worker configuration.",
