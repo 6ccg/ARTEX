@@ -98,7 +98,7 @@ func TestToolResultsStayWithinCallScopeAndDoNotMultiply(t *testing.T) {
 	defer d.Exec(`DELETE FROM explorations WHERE id=$1`, other)
 	appendRow := func(s *ExplorationStore, kind, worker, detail string) {
 		t.Helper()
-		_, err := s.AppendActivity(Activity{Kind: kind, Worker: worker, Tool: "regression_tool", ToolUseID: "reused-id", Detail: detail, IsError: detail == "correct first result" || detail == "wrong worker"})
+		_, err := s.AppendActivity(Activity{Kind: kind, Worker: worker, Tool: "regression_tool", ToolUseID: "reused-id", Detail: detail, IsError: detail == "correct first result" || detail == "wrong worker" || detail == "late error"})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -111,6 +111,7 @@ func TestToolResultsStayWithinCallScopeAndDoNotMultiply(t *testing.T) {
 	appendRow(store, "tool_use", "work#1", "regression_tool second")
 	appendRow(store, "tool_use", "work#1", "regression_tool third")
 	appendRow(store, "tool_result", "work#1", "correct third result")
+	appendRow(store, "tool_result", "work#1", "late error")
 	exp := store.ID()
 	rows, total, err := d.ListCommands(&exp, "regression_tool", 0, 10)
 	if err != nil || total != 3 || len(rows) != 3 {
@@ -126,6 +127,10 @@ func TestToolResultsStayWithinCallScopeAndDoNotMultiply(t *testing.T) {
 	stats, err = d.ToolStats(&exp, "third")
 	if err != nil || len(stats) != 1 || stats[0].Total != 1 || stats[0].Errors != 0 {
 		t.Fatalf("filtered stats=%+v err=%v", stats, err)
+	}
+	stats, err = d.ToolStats(&exp, "no-matching-execution")
+	if err != nil || len(stats) != 0 {
+		t.Fatalf("stats with no matching calls=%+v err=%v", stats, err)
 	}
 }
 
