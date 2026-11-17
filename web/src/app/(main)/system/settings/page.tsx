@@ -62,6 +62,11 @@ export default function SystemSettingsPage() {
   const [savingTavilyKey, setSavingTavilyKey] = React.useState(false);
   const [proxyInput, setProxyInput] = React.useState("");
   const [savingProxy, setSavingProxy] = React.useState(false);
+  const [llmProxyInput, setLLMProxyInput] = React.useState("");
+  const [savingLLMProxy, setSavingLLMProxy] = React.useState(false);
+  const [transparentProxy, setTransparentProxy] = React.useState(false);
+  const [allowIPv6, setAllowIPv6] = React.useState(false);
+  const [savingIPv6, setSavingIPv6] = React.useState(false);
   const [globalProxyInput, setGlobalProxyInput] = React.useState("");
   const [savingGlobalProxy, setSavingGlobalProxy] = React.useState(false);
   const [proxyPool, setProxyPool] = React.useState<ProxyPoolEntry[]>([]);
@@ -136,6 +141,9 @@ export default function SystemSettingsPage() {
     setTavilyKeySet(!!s.tavily_key_set);
     setDeepSeekKeySet(!!s.deepseek_search_key_set);
     setProxyInput(s.web_search_proxy ?? "");
+    setLLMProxyInput(s.llm_proxy ?? "");
+    setTransparentProxy(!!s.global_proxy_transparent);
+    setAllowIPv6(!!s.egress_allow_ipv6);
     const savedProxy = s.global_proxy ?? "";
     setGlobalProxyInput(savedProxy);
     setProxyPool(s.proxy_pool ?? []);
@@ -483,6 +491,18 @@ export default function SystemSettingsPage() {
       .finally(() => setSavingProxy(false));
   };
 
+  const saveLLMProxy = () => {
+    setSavingLLMProxy(true);
+    api
+      .setSettings({ llm_proxy: llmProxyInput.trim() })
+      .then((s) => {
+        apply(s);
+        toast.success(llmProxyInput.trim() ? t("settings.llmProxySaved") : t("settings.llmProxyCleared"));
+      })
+      .catch((e) => toast.error(t("settings.saveFailedPrefix") + localizedError(e, t)))
+      .finally(() => setSavingLLMProxy(false));
+  };
+
   const saveGlobalProxy = () => {
     if (proxyPool.length > 0) {
       toast.info(t("settings.poolOverridesProxy"));
@@ -496,7 +516,11 @@ export default function SystemSettingsPage() {
         // 保存后链路变了，旧结果（尤其"尚未保存"）立刻失效。
         clearEgressReport();
         if (showEgressIp) void probeEgress().catch(() => undefined);
-        toast.success(globalProxyInput.trim() ? t("settings.globalProxySaved") : t("settings.globalProxyCleared"));
+        toast.success(
+          globalProxyInput.trim()
+            ? t("settings.globalProxySaved")
+            : t(transparentProxy ? "settings.globalProxyBlocked" : "settings.globalProxyCleared"),
+        );
       })
       .catch((e) => toast.error(t("settings.saveFailedPrefix") + localizedError(e, t)))
       .finally(() => setSavingGlobalProxy(false));
@@ -605,6 +629,21 @@ export default function SystemSettingsPage() {
     }
   };
 
+  const toggleIPv6 = async (allowed: boolean) => {
+    setSavingIPv6(true);
+    try {
+      const settings = await api.setSettings({ egress_allow_ipv6: allowed });
+      setAllowIPv6(!!settings.egress_allow_ipv6);
+      clearEgressReport();
+      if (showEgressIp) void probeEgress().catch(() => undefined);
+      toast.success(t(allowed ? "settings.ipv6Enabled" : "settings.ipv6Disabled"));
+    } catch (error) {
+      toast.error(t("settings.saveFailedPrefix") + localizedError(error, t));
+    } finally {
+      setSavingIPv6(false);
+    }
+  };
+
   // 测表单里当前的值，不要求先保存；后端返回直连 / 经代理两条。
   const testEgress = () => {
     const seq = ++egressSeq.current;
@@ -622,7 +661,7 @@ export default function SystemSettingsPage() {
         if (rep.ok) {
           // 先取 ②：直连那行永远成功，先命中它会把直连 IP 当成出口报出去。
           const hit =
-            rep.checks.find((c) => c.key === "global" && !c.skipped && c.result.ok) ??
+            rep.checks.find((c) => c.key !== "direct" && !c.skipped && c.result.ok) ??
             rep.checks.find((c) => !c.skipped && c.result.ok);
           toast.success(
             hit?.result.exit_ip ? t("settings.egressResult", { ip: hit.result.exit_ip }) : t("settings.probeSucceeded"),
@@ -893,7 +932,9 @@ export default function SystemSettingsPage() {
                   <RadioTowerIcon className="size-4" />
                   {t("settings.globalProxy")}
                 </CardTitle>
-                <CardDescription>{t("settings.globalProxyHelp")}</CardDescription>
+                <CardDescription>
+                  {t(transparentProxy ? "settings.globalProxyTransparentHelp" : "settings.globalProxyHelp")}
+                </CardDescription>
               </CardHeader>
               <CardContent className="flex flex-col gap-5">
                 <section className="space-y-2">
@@ -905,7 +946,11 @@ export default function SystemSettingsPage() {
                       id="global-proxy"
                       className="min-w-0 flex-1"
                       autoComplete="off"
-                      placeholder={t("settings.globalProxyPlaceholder")}
+                      placeholder={t(
+                        transparentProxy
+                          ? "settings.globalProxyTransparentPlaceholder"
+                          : "settings.globalProxyPlaceholder",
+                      )}
                       value={globalProxyInput}
                       disabled={!loaded || savingGlobalProxy}
                       onChange={(e) => {
@@ -923,14 +968,16 @@ export default function SystemSettingsPage() {
                     </Button>
                   </div>
                   <p className="text-muted-foreground text-xs">
-                    {globalProxyInput.trim() ? t("settings.proxyConfigured") : t("settings.proxyUnconfigured")}
+                    {globalProxyInput.trim()
+                      ? t("settings.proxyConfigured")
+                      : t(transparentProxy ? "settings.proxyBlocked" : "settings.proxyUnconfigured")}
                   </p>
                   <details className="text-xs">
                     <summary className="text-muted-foreground cursor-pointer select-none">
                       {t("settings.howProxyWorks")}
                     </summary>
                     <p className="text-muted-foreground mt-2 max-w-4xl leading-relaxed">
-                      {t("settings.howProxyWorksHelp")}
+                      {t(transparentProxy ? "settings.howTransparentProxyWorksHelp" : "settings.howProxyWorksHelp")}
                     </p>
                   </details>
                 </section>
@@ -981,6 +1028,22 @@ export default function SystemSettingsPage() {
                     onCheckedChange={(checked) => void toggleEgressVisibility(checked)}
                   />
                 </div>
+                {transparentProxy && (
+                  <div className="flex items-center justify-between gap-4 rounded-md border px-3 py-2">
+                    <div className="min-w-0">
+                      <Label htmlFor="egress-allow-ipv6" className="text-sm font-normal">
+                        {t("settings.allowIPv6")}
+                      </Label>
+                      <p className="text-muted-foreground text-xs">{t("settings.allowIPv6Help")}</p>
+                    </div>
+                    <Switch
+                      id="egress-allow-ipv6"
+                      checked={allowIPv6}
+                      disabled={!loaded || savingIPv6}
+                      onCheckedChange={(allowed) => void toggleIPv6(allowed)}
+                    />
+                  </div>
+                )}
                 {/* 紧贴结果区：用户看两行时正好需要它。细节放文档。 */}
                 <details className="text-xs">
                   <summary className="text-muted-foreground cursor-pointer select-none">
@@ -1502,6 +1565,41 @@ export default function SystemSettingsPage() {
             </Card>
 
             <Card
+              className={`${isSettingVisible("network", "settings.keywords.llmProxy") ? "" : "hidden"} mb-4 break-inside-avoid md:mb-6`}
+            >
+              <CardHeader>
+                <CardTitle className="flex items-center gap-2 text-base">
+                  <RadioTowerIcon className="size-4" />
+                  {t("settings.llmProxy")}
+                </CardTitle>
+                <CardDescription>
+                  {t(transparentProxy ? "settings.llmProxyTransparentHelp" : "settings.llmProxyHelp")}
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="flex flex-col gap-2">
+                <Label htmlFor="llm-proxy" className="text-sm font-normal text-muted-foreground">
+                  {t("settings.proxyAddress")}
+                </Label>
+                <div className="flex items-center gap-2">
+                  <Input
+                    id="llm-proxy"
+                    autoComplete="off"
+                    placeholder={t(
+                      transparentProxy ? "settings.proxyTransparentPlaceholder" : "settings.proxyPlaceholder",
+                    )}
+                    value={llmProxyInput}
+                    disabled={!loaded || savingLLMProxy}
+                    onChange={(e) => setLLMProxyInput(e.target.value)}
+                  />
+                  <Button type="button" onClick={saveLLMProxy} disabled={!loaded || savingLLMProxy}>
+                    {t("settings.save")}
+                  </Button>
+                </div>
+                <p className="text-muted-foreground text-xs">{t("settings.llmProxyTestHelp")}</p>
+              </CardContent>
+            </Card>
+
+            <Card
               className={`${isSettingVisible("network", "settings.keywords.webSearch") ? "" : "hidden"} mb-4 break-inside-avoid md:mb-6`}
             >
               <CardHeader>
@@ -1667,7 +1765,9 @@ export default function SystemSettingsPage() {
                         {t("settings.save")}
                       </Button>
                     </div>
-                    <p className="text-muted-foreground text-xs">{t("settings.searchProxyHelp")}</p>
+                    <p className="text-muted-foreground text-xs">
+                      {t(transparentProxy ? "settings.searchProxyTransparentHelp" : "settings.searchProxyHelp")}
+                    </p>
                   </div>
                 )}
 

@@ -18,6 +18,7 @@ import (
 
 	"github.com/Autumn-27/artex/agent"
 	pgdb "github.com/Autumn-27/artex/db"
+	"github.com/Autumn-27/artex/egress"
 	"github.com/Autumn-27/artex/enrich"
 	"github.com/Autumn-27/artex/guard"
 	"github.com/Autumn-27/artex/intercept"
@@ -296,11 +297,12 @@ type Manager struct {
 	braveKey         string
 	tavilyKey        string
 	webSearchProxy   string
-	// globalProxy is the egress proxy all target traffic routes through
-	// (http/https/socks5, optional user:pass). Empty = direct. When traffic
-	// capture is on it becomes the MITM's upstream; when capture is off it is
-	// injected into agent bash env / WebFetch directly. See ProxyAddr.
+	// The upstream pool selects globalProxy. Docker applies it to the mandatory
+	// gateway; native mode uses the MITM or stable local forwarder.
 	globalProxy         string
+	egressAllowIPv6     bool
+	llmProxy            string
+	network             *egress.Client
 	proxyPool           *proxyPoolState
 	forwardProxy        *dynamicForwardProxy
 	proxyPoolConfigured atomic.Bool
@@ -323,14 +325,15 @@ const (
 	settingTavilyKey           = "tavily_search_api_key"
 	settingDeepSeekSearchKey   = "deepseek_search_api_key"
 	settingWebSearchProxy      = "web_search_proxy"
+	settingLLMProxy            = "llm_proxy"
 	// settingGlobalProxy is the global egress proxy for all target traffic
-	// (http/https/socks5). Empty = direct. Distinct from web_search_proxy (which
-	// only routes the search backend) and the per-profile LLM proxy.
-	settingGlobalProxy  = "global_proxy"
-	settingShowEgressIP = "show_egress_ip"
-	settingWorkers      = "workers"
-	settingWorkerPools  = "worker_pools"
-	settingLLMRecord    = "llm_record"
+	// (http/https/socks5). Empty blocks Docker execution; native mode is direct.
+	settingGlobalProxy     = "global_proxy"
+	settingShowEgressIP    = "show_egress_ip"
+	settingEgressAllowIPv6 = "egress_allow_ipv6"
+	settingWorkers         = "workers"
+	settingWorkerPools     = "worker_pools"
+	settingLLMRecord       = "llm_record"
 	// LLM 轮询(故障转移)。默认关闭——开启后走「全局激活配置」的 agent 在当前配置
 	// 不可用(余额不足/key 失效/限流/服务异常)时自动切到下一个配置。
 	// settingLLMPoolBindFallback 仅在轮询开启时有意义:默认关闭,即 agent/任务显式
@@ -606,13 +609,14 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 		log.Printf("[llmusage] create table: %v", err)
 	}
 	m := &Manager{dir: dir, pg: pg, assets: pg.Assets(), tasks: map[string]*Task{}, interceptor: intercept.New(pg)}
-	if fp, ferr := newDynamicForwardProxy(func() string { return m.GlobalProxy() }); ferr == nil {
-		m.forwardProxy = fp
-		// An empty runtime route means direct egress, even when the persisted
-		// pool still contains disabled or blank entries.
-		fp.direct = func() bool { return strings.TrimSpace(m.GlobalProxy()) == "" }
-	} else {
-		log.Printf("[proxy] local forwarder disabled: %v", ferr)
+	m.network = egress.FromEnvironment()
+	if m.network == nil {
+		if fp, ferr := newDynamicForwardProxy(func() string { return m.GlobalProxy() }); ferr == nil {
+			m.forwardProxy = fp
+			fp.direct = func() bool { return strings.TrimSpace(m.GlobalProxy()) == "" }
+		} else {
+			log.Printf("[proxy] local forwarder disabled: %v", ferr)
+		}
 	}
 	if proxyAddr != "" {
 		tr, err := traffic.Open(filepath.Join(dir, "traffic"), proxyAddr)
@@ -675,8 +679,29 @@ func NewManager(dir, proxyAddr string) (*Manager, error) {
 		m.globalProxy = strings.TrimSpace(v)
 	}
 	m.initProxyPool()
+	v, _, err := pg.GetSetting(settingLLMProxy)
+	if err != nil {
+		pg.Close()
+		return nil, err
+	}
+	m.llmProxy = strings.TrimSpace(v)
+	if err := egress.SetLLMProxy(m.llmProxy); err != nil {
+		pg.Close()
+		return nil, err
+	}
+	if err := egress.SetSearchProxy(m.webSearchProxy); err != nil {
+		pg.Close()
+		return nil, err
+	}
+	if m.network != nil {
+		m.egressAllowIPv6 = pg.GetBool(settingEgressAllowIPv6, false)
+		if err := m.network.ApplyAll(egress.ProxySettings{Execution: m.globalProxy, LLM: m.llmProxy, Search: m.webSearchProxy, AllowIPv6: m.egressAllowIPv6}); err != nil {
+			pg.Close()
+			return nil, err
+		}
+	}
 	if m.traffic != nil {
-		if err := m.traffic.SetUpstreamProxy(m.globalProxy); err != nil {
+		if err := m.traffic.SetUpstreamProxy(m.ApplicationProxy()); err != nil {
 			log.Printf("[proxy] 全局代理 %q 无效，已忽略: %v", m.globalProxy, err)
 		}
 	}
@@ -807,6 +832,7 @@ func (m *Manager) WebSearchOpts() agent.WebSearchOpts {
 	if backend == deepSeekWebSearchBackend {
 		o.DeepSeekAPIKey = m.deepSeekSearchKey()
 	}
+	o.Proxy = egress.SearchProxyURL(o.Proxy)
 	return o
 }
 
@@ -856,9 +882,22 @@ func (m *Manager) SetWebSearch(on bool, backend string, braveKey, tavilyKey, pro
 	}
 	if proxy != nil {
 		p := strings.TrimSpace(*proxy)
-		if err := m.pg.SetSetting(settingWebSearchProxy, p); err != nil {
+		if _, err := egress.ParseProxy(p); err != nil {
 			return err
 		}
+		if m.network != nil {
+			if err := m.network.ApplySearch(p); err != nil {
+				return err
+			}
+		}
+		if err := m.pg.SetSetting(settingWebSearchProxy, p); err != nil {
+			if m.network != nil {
+				_, _, _, _, old := m.WebSearch()
+				_ = m.network.ApplySearch(old)
+			}
+			return err
+		}
+		_ = egress.SetSearchProxy(p)
 		m.mu.Lock()
 		m.webSearchProxy = p
 		m.mu.Unlock()
@@ -1033,14 +1072,8 @@ func (m *Manager) Assets() *pgdb.AssetStore  { return m.assets }
 func (m *Manager) PG() *pgdb.DB              { return m.pg }
 func (m *Manager) Traffic() *traffic.Traffic { return m.traffic }
 
-// ProxyAddr returns the egress proxy address agents route target traffic through:
-//   - capture ON  → the recording MITM proxy (which itself exits via the global
-//     proxy when one is set); agents also get its CA (see ProxyCACert).
-//   - capture OFF → the global egress proxy directly (empty CA — real target
-//     certs), or "" when no global proxy is set (direct, no recording).
-//
-// So the global proxy takes effect in both modes: at the MITM's upstream when
-// capturing, in the agent's own bash env / WebFetch when not.
+// ProxyAddr supplies only the recording proxy in Docker: the gateway owns egress.
+// Local runs also use the configured URL when recording is disabled.
 func (m *Manager) ProxyAddr() string {
 	if m.traffic != nil && m.TrafficEnabled() {
 		return m.traffic.ProxyAddr()
@@ -1048,10 +1081,46 @@ func (m *Manager) ProxyAddr() string {
 	m.mu.RLock()
 	global := m.globalProxy
 	m.mu.RUnlock()
+	if m.network != nil {
+		return ""
+	}
 	if (global != "" || m.proxyPoolConfigured.Load()) && m.forwardProxy != nil {
 		return m.forwardProxy.Addr()
 	}
 	return maskSecrets(global)
+}
+
+func (m *Manager) TransparentProxy() bool { return m.network != nil }
+
+func (m *Manager) EgressAllowIPv6() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.egressAllowIPv6
+}
+
+func (m *Manager) SetEgressAllowIPv6(allowed bool) error {
+	if m.network == nil {
+		return fmt.Errorf("IPv6 出网开关仅适用于 Docker 透明网关")
+	}
+	if err := m.network.ApplyIPv6(allowed); err != nil {
+		return err
+	}
+	if err := m.pg.SetBool(settingEgressAllowIPv6, allowed); err != nil {
+		_ = m.network.ApplyIPv6(m.EgressAllowIPv6())
+		return err
+	}
+	m.mu.Lock()
+	m.egressAllowIPv6 = allowed
+	m.mu.Unlock()
+	return nil
+}
+
+// ApplicationProxy is empty when the gateway already routes every socket.
+func (m *Manager) ApplicationProxy() string {
+	if m.network != nil {
+		return ""
+	}
+	return m.GlobalProxy()
 }
 
 // ProxyCACert returns the CA cert path agents must trust to verify HTTPS through
@@ -1066,17 +1135,44 @@ func (m *Manager) ProxyCACert() string {
 	return m.traffic.CACertPath()
 }
 
-// GlobalProxy returns the configured global egress proxy URL (empty = direct).
+// GlobalProxy returns the saved global egress proxy URL.
 func (m *Manager) GlobalProxy() string {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.globalProxy
 }
 
-// SetGlobalProxy validates, persists and applies the global egress proxy
-// (http/https/socks5, optional user:pass; empty = direct). It updates the MITM's
-// upstream immediately; callers must rebuild agents (applyLLM) afterwards so the
-// capture-off path (bash env / WebFetch) picks up the change too.
+func (m *Manager) LLMProxy() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.llmProxy
+}
+
+func (m *Manager) SetLLMProxy(raw string) error {
+	raw = strings.TrimSpace(raw)
+	if _, err := egress.ParseProxy(raw); err != nil {
+		return err
+	}
+	if m.network != nil {
+		if err := m.network.ApplyLLM(raw); err != nil {
+			return err
+		}
+	}
+	if err := m.pg.SetSetting(settingLLMProxy, raw); err != nil {
+		if m.network != nil {
+			_ = m.network.ApplyLLM(m.LLMProxy())
+		}
+		return err
+	}
+	_ = egress.SetLLMProxy(raw)
+	m.mu.Lock()
+	m.llmProxy = raw
+	m.mu.Unlock()
+	return nil
+}
+
+// SetGlobalProxy applies the URL before saving it. Docker blocks execution
+// traffic when it is empty; native mode uses direct connections. No fallback.
 func (m *Manager) SetGlobalProxy(raw string) error {
 	raw = strings.TrimSpace(raw)
 	if raw != "" {
@@ -1107,14 +1203,22 @@ func (m *Manager) SetGlobalProxy(raw string) error {
 			return nil
 		}
 	}
+	if m.network != nil {
+		if err := m.network.Apply(raw); err != nil {
+			return err
+		}
+	}
 	if err := m.pg.SetSetting(settingGlobalProxy, raw); err != nil {
+		if m.network != nil {
+			_ = m.network.Apply(m.GlobalProxy())
+		}
 		return err
 	}
 	m.mu.Lock()
 	m.globalProxy = raw
 	m.mu.Unlock()
 	if m.traffic != nil {
-		if err := m.traffic.SetUpstreamProxy(raw); err != nil {
+		if err := m.traffic.SetUpstreamProxy(m.ApplicationProxy()); err != nil {
 			return err
 		}
 	}

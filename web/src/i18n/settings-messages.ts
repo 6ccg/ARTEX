@@ -57,14 +57,50 @@ export const settingsMessages = {
   "settings.braveKeySaved": ["已保存 Brave API Key", "Brave API key saved"],
   "settings.tavilyKeySaved": ["已保存 Tavily API Key", "Tavily API key saved"],
   "settings.deepSeekKeySaved": ["已保存 DeepSeek Search API Key", "DeepSeek Search API key saved"],
-  "settings.searchProxySaved": ["已保存出口代理", "Outbound proxy saved"],
-  "settings.searchProxyCleared": ["已清除出口代理（改为直连）", "Outbound proxy cleared; using a direct connection"],
+  "settings.searchProxySaved": ["已保存搜索代理", "Search proxy saved"],
+  "settings.searchProxyCleared": ["已清除搜索代理（改为直连）", "Search proxy cleared; using a direct connection"],
+  "settings.llmProxy": ["AI 请求代理", "AI request proxy"],
+  "settings.llmProxySaved": ["已保存 AI 请求代理", "AI request proxy saved"],
+  "settings.llmProxyCleared": ["已清除 AI 请求代理（改为直连）", "AI request proxy cleared; using a direct connection"],
+  "settings.llmProxyHelp": [
+    "用于拉取模型、连接测试和实际模型调用。支持 http / https / socks5 和账号密码认证。留空时直连；配置的代理失败时不回退直连。保存后对后续连接生效。",
+    "Used for model lists, connection tests and model calls. Supports HTTP, HTTPS, SOCKS5 and authentication. Leave blank for direct connections. A failed configured proxy never falls back to direct access. Changes apply to subsequent connections.",
+  ],
+  "settings.llmProxyTransparentHelp": [
+    "用于拉取模型、连接测试和实际模型调用。支持 http / https / socks5 和账号密码认证。留空时仅经过全局代理；填写后在全局代理之后再连接此代理。配置的代理失败时不回退直连。保存后对后续连接生效。",
+    "Used for model lists, connection tests and model calls. Supports HTTP, HTTPS, SOCKS5 and authentication. Leave blank to use only the global proxy; set a value to chain this proxy after it. A failed configured proxy never falls back to direct access. Changes apply to subsequent connections.",
+  ],
+  "settings.llmProxyTestHelp": [
+    "可在 LLM 配置中使用“拉取模型”和“连接测试”验证此出口。",
+    "Use Fetch models and Test connection in LLM settings to verify this route.",
+  ],
+  "settings.llmProxyRouting": [
+    "模型列表、连接测试和模型调用统一使用“系统设置 → AI 请求代理”；Docker 中仍先经过执行环境代理。",
+    "Model lists, connection tests and model calls use System settings → AI request proxy. In Docker, they first pass through the execution proxy.",
+  ],
+  "settings.keywords.llmProxy": [
+    "AI 请求代理 LLM 模型 http https socks5",
+    "AI request proxy LLM models http https socks5",
+  ],
   "settings.poolOverridesProxy": [
     "代理池非空时，全局代理输入框仅用于回显，请在代理池中编辑或切换",
     "When the proxy pool has entries, this field only shows the active proxy. Edit or switch proxies in the pool.",
   ],
-  "settings.globalProxySaved": ["已保存全局代理", "Global proxy saved"],
-  "settings.globalProxyCleared": ["已清除全局代理（改为直连）", "Global proxy cleared; using a direct connection"],
+  "settings.globalProxySaved": ["已保存执行环境代理", "Execution proxy saved"],
+  "settings.globalProxyBlocked": ["已清除执行环境代理（阻断出网）", "Execution proxy cleared; outbound access blocked"],
+  "settings.allowIPv6": ["允许 IPv6 出网", "Allow outbound IPv6"],
+  "settings.ipv6Enabled": ["已允许 IPv6 通过全局代理出网", "Outbound IPv6 through the global proxy enabled"],
+  "settings.ipv6Disabled": ["已关闭 IPv6 出网", "Outbound IPv6 disabled"],
+  "settings.allowIPv6Help": [
+    "默认关闭：阻断 IPv6 目标连接，仅解析 IPv4。开启后 IPv6 仍必须经过全局代理，代理需支持 IPv6。",
+    "Disabled by default: block IPv6 connections and resolve only IPv4. When enabled, IPv6 still uses the global proxy, which must support IPv6.",
+  ],
+  "settings.proxyIPv4": ["代理 IPv4", "Proxy IPv4"],
+  "settings.proxyIPv6": ["代理 IPv6", "Proxy IPv6"],
+  "settings.globalProxyCleared": [
+    "已清除执行环境代理（改为直连）",
+    "Execution proxy cleared; using a direct connection",
+  ],
   "settings.importLineError": ["第{{line}}行：{{message}}", "Line {{line}}: {{message}}"],
   "settings.proxyPoolImported": ["代理池已导入", "Proxy pool imported"],
   "settings.importFailedPrefix": ["导入失败：", "Could not import: "],
@@ -174,10 +210,23 @@ export const settingsMessages = {
     "要求执行型 Agent 复用流量和浏览器特征、控制请求噪声，并遵守平台代理与授权范围。",
     "Require execution Agents to reuse traffic and browser characteristics, reduce request noise, and respect platform proxy settings and authorized scope.",
   ],
-  "settings.globalProxy": ["全局代理", "Global proxy"],
+  "settings.globalProxy": ["AI 执行环境代理（全局代理）", "AI execution proxy (global proxy)"],
   "settings.globalProxyHelp": [
     "设置 Agent 目标流量的统一出口。留空时直连；网络搜索和 LLM 代理不受影响。",
     "Set a shared outbound proxy for Agent traffic to targets. Leave blank for a direct connection. Web search and LLM proxies are configured separately.",
+  ],
+  "settings.globalProxyTransparentHelp": [
+    "代理池统一控制命令、脚本、浏览器、WebFetch、AI 请求和联网搜索的外网出口。未配置可用代理时阻断出网，不回退直连。",
+    "The proxy pool controls outbound access for commands, scripts, browsers, WebFetch, AI requests and web search. Access is blocked without a usable proxy; it never falls back to direct connections.",
+  ],
+  "settings.globalProxyTransparentPlaceholder": [
+    "socks5://user:pass@host:1080 或 http://host:port（留空=阻断出网）",
+    "socks5://user:pass@host:1080 or http://host:port (blank = block outbound access)",
+  ],
+  "settings.proxyBlocked": ["未配置 · Docker 出网已阻断", "Not configured · Docker outbound access blocked"],
+  "settings.howTransparentProxyWorksHelp": [
+    "代理池切换会同步更新透明网关，无需重启 Agent。开启流量捕获时，MITM 负责解密和记录；实际出口仍由网关控制。AI 和搜索代理可在此出口后追加一跳。",
+    "Switching the proxy pool updates the transparent gateway without restarting Agents. Traffic capture uses MITM for decryption and recording; the gateway still controls outbound access. AI and search proxies can add another hop after this route.",
   ],
   "settings.proxyAddress": ["代理地址", "Proxy address"],
   "settings.globalProxyPlaceholder": [
@@ -191,8 +240,8 @@ export const settingsMessages = {
   "settings.proxyUnconfigured": ["未配置 · 目标流量直连出网", "Not configured · Target traffic connects directly"],
   "settings.howProxyWorks": ["代理工作方式", "How the proxy works"],
   "settings.howProxyWorksHelp": [
-    "开启流量捕获时，此代理作为记录代理的上游；关闭时，代理会注入 Agent 的 bash / WebFetch 出网。支持 http、https 和 socks5，可带账号密码。关闭流量捕获使用 socks5 时，命令行工具需支持 ALL_PROXY；Python urllib 等工具可能不支持，开启流量捕获可避免此限制。",
-    "With traffic capture enabled, this proxy is upstream of the capture proxy. Otherwise, it is provided to Agent bash / WebFetch requests. HTTP, HTTPS and SOCKS5 are supported, with optional credentials. When capture is disabled, command-line tools must support ALL_PROXY to use SOCKS5; tools such as Python urllib may not support it. Enable traffic capture to avoid this limitation.",
+    "开启流量捕获时，此代理作为记录代理的上游；关闭时，使用稳定的本地转发代理连接当前代理池成员，切换后无需重启 Agent。",
+    "With traffic capture enabled, this proxy is upstream of the capture proxy. Otherwise, a stable local forwarding proxy connects to the active pool member. Switching proxies does not require restarting Agents.",
   ],
   "settings.reconnection": ["异常重连策略", "Reconnection after failure"],
   "settings.reconnectionHelp": [
@@ -376,8 +425,8 @@ export const settingsMessages = {
     "Use the separate DeepSeek Search / Fetch API for search and page extraction. The current Agent’s model generates queries and organizes results.",
   ],
   "settings.deepSeekNetworkHelp": [
-    "搜索请求由 ARTEX 服务端发往 DeepSeek，可使用上方独立出口代理。API Key 只保存于服务端设置，不会回显。",
-    "ARTEX sends requests to DeepSeek from the server, using the separate outbound proxy above if configured. API keys are stored on the server and never shown.",
+    "搜索请求由 ARTEX 服务端发往 DeepSeek，使用搜索代理设置；Docker 中仍经过执行环境代理。API Key 只保存于服务端设置，不会回显。",
+    "ARTEX sends requests to DeepSeek from the server using the search proxy setting. In Docker, requests also pass through the execution proxy. API keys are stored on the server and never shown.",
   ],
   "settings.keyConfiguredPlaceholder": ["已配置（留空则不变）", "Configured (leave blank to keep)"],
   "settings.keyConfigured": ["API Key 已配置", "API key configured"],
@@ -400,14 +449,22 @@ export const settingsMessages = {
     "前往 https://tavily.com 注册并获取 API Key。",
     "Register at https://tavily.com to get an API key.",
   ],
-  "settings.outboundProxy": ["出口代理（可选）", "Outbound proxy (optional)"],
+  "settings.outboundProxy": ["搜索代理（可选）", "Search proxy (optional)"],
   "settings.proxyPlaceholder": [
     "http://host:port 或 socks5://host:port（留空=直连）",
     "http://host:port or socks5://host:port (blank = direct)",
   ],
+  "settings.proxyTransparentPlaceholder": [
+    "http://host:端口 或 socks5://host:端口（留空=使用全局代理）",
+    "http://host:port or socks5://host:port (blank = use global proxy)",
+  ],
   "settings.searchProxyHelp": [
-    "独立出口代理，仅用于访问搜索端点（VPN/SOCKS 等）。与记录流量的 MITM 代理无关；网络不通时经此代理访问。",
-    "A separate outbound proxy for search endpoints (VPN/SOCKS, etc.), independent of the MITM capture proxy. Use it when search services are otherwise unreachable.",
+    "联网搜索的独立出口，包含 DeepSeek 联网搜索请求。留空时直连；配置的代理失败时不回退直连。",
+    "A separate route for web search, including DeepSeek search requests. Leave blank for direct connections. A failed configured proxy never falls back to direct access.",
+  ],
+  "settings.searchProxyTransparentHelp": [
+    "包含 DeepSeek 联网搜索请求。留空时仅经过全局代理；填写后在全局代理之后再连接此代理。配置的代理失败时不回退直连。",
+    "Includes DeepSeek search requests. Leave blank to use only the global proxy; set a value to chain this proxy after it. A failed configured proxy never falls back to direct access.",
   ],
   "settings.searchTestHelp": [
     "用当前配置（来源 + 代理 + Key）实际搜索一次「test」，验证是否可用。",
@@ -704,8 +761,8 @@ export const settingsMessages = {
     "screenshots browser report timestamp OPSEC headers proxy TLS traffic",
   ],
   "settings.keywords.globalProxy": [
-    "全局代理 出口 IP socks5 http https",
-    "global proxy outbound IP egress SOCKS5 HTTP HTTPS pool rotation health check reconnection",
+    "AI 执行环境 全局代理 出口 IP IPv4 IPv6 出网 socks5 http https",
+    "AI execution environment global proxy outbound IP IPv4 IPv6 egress SOCKS5 HTTP HTTPS pool rotation health check reconnection",
   ],
   "settings.keywords.constraints": [
     "操作约束 allow deny planner worker 爆破",
@@ -766,5 +823,6 @@ export const settingsMessages = {
   "settings.connected": ["已连通", "Connected"],
   "settings.egressCheck.direct": ["① 直连出口 IP", "① Direct outbound IP"],
   "settings.egressCheck.global": ["② 全局代理出口 IP", "② Global proxy outbound IP"],
+  "settings.egressCheck.global_ipv6": ["③ 全局代理 IPv6 出口 IP", "③ Global proxy IPv6 outbound IP"],
   "settings.noGlobalProxy": ["未配置全局代理", "No global proxy configured"],
 } satisfies Record<string, readonly [string, string]>;

@@ -110,7 +110,7 @@ func TestProviderDoesNotRetryExplicitQuota429(t *testing.T) {
 	}))
 	defer upstream.Close()
 
-	provider, err := ConfigFrom("openai", "test-model", upstream.URL, "test-key", "").NewProvider()
+	provider, err := ConfigFrom("openai", "test-model", upstream.URL, "test-key").NewProvider()
 	if err != nil {
 		t.Fatal(err)
 	}

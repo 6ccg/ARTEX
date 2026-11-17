@@ -43,18 +43,17 @@ type Replay struct {
 	Save   func(context.Context, Memory) error
 }
 
-type ContextOptions struct{ OutputTokens int }
-
 type contextBuilder struct {
-	service  SideQuestionService
-	replay   Replay
-	memory   Memory
-	recent   []Exchange
-	info     ContextInfo
-	usage    llm.Usage
-	calls    int
-	window   int
-	onUpdate func(Answer, ContextInfo)
+	service   SideQuestionService
+	replay    Replay
+	memory    Memory
+	recent    []Exchange
+	info      ContextInfo
+	usage     llm.Usage
+	calls     int
+	window    int
+	maxTokens int
+	onUpdate  func(Answer, ContextInfo)
 }
 
 func (b *contextBuilder) progress(phase string) {
@@ -81,11 +80,7 @@ const summaryInstruction = "你只生成供独立旁路问答使用的简短摘�
 
 const summaryRetryInstruction = "上次摘要未满足完整性或长度要求。请直接输出完整、精简的摘要正文，控制在 600 tokens 内；合并重复证据，不逐条复述，不输出思考过程、开场白或工具调用。"
 
-const (
-	summaryOutputTokens      = 2048
-	summaryRetryOutputTokens = 8192
-	maxSummaryCalls          = 12
-)
+const maxSummaryCalls = 12
 
 // Summaries themselves must fit. Process UTF-8-safe bounded chunks rather than
 // submitting the same oversized request to the summarizer. The call cap spans
@@ -100,8 +95,9 @@ func (b *contextBuilder) summarize(ctx context.Context, prior, text string) (str
 		}
 		// Reserve the recovery budget before choosing a chunk so a retry can
 		// replay exactly the same source without overflowing a small window.
+		reserved := outputBudget(llm.CompletionRequest{MaxTokens: b.maxTokens})
 		overhead := EstimateInputTokens(llm.CompletionRequest{System: []string{summaryInstruction, summaryRetryInstruction}, Messages: []llm.Message{llm.UserText("[此前摘要]\n" + prior + "\n[新材料片段]\n")}})
-		chunkBytes := min(32000, b.window-summaryRetryOutputTokens-overhead-512) * 3
+		chunkBytes := min(32000, b.window-reserved-overhead-512) * 3
 		if chunkBytes < 1024 {
 			return "", ErrContextBudget
 		}
@@ -111,7 +107,7 @@ func (b *contextBuilder) summarize(ctx context.Context, prior, text string) (str
 		}
 		part := text[:n]
 		req := llm.CompletionRequest{
-			System: []string{summaryInstruction}, Thinking: "disabled", MaxTokens: summaryOutputTokens,
+			System: []string{summaryInstruction}, MaxTokens: b.maxTokens,
 			Messages: []llm.Message{llm.UserText("[此前摘要]\n" + prior + "\n[新材料片段]\n" + part)},
 		}
 		result, err := b.summarizeChunk(ctx, req)
@@ -123,9 +119,9 @@ func (b *contextBuilder) summarize(ctx context.Context, prior, text string) (str
 	return prior, nil
 }
 
-// Retry an unusable summary once with room for providers that still spend
-// output tokens on reasoning despite Thinking=disabled. Never continue from
-// partial output or persist it as memory; both attempts use the original data.
+// Retry an unusable summary once with tighter instructions and the configured
+// model parameters. Never continue from partial output or persist it as memory;
+// both attempts use the original data.
 func (b *contextBuilder) summarizeChunk(ctx context.Context, req llm.CompletionRequest) (string, error) {
 	for attempt := 0; attempt < 2; attempt++ {
 		if err := ctx.Err(); err != nil {
@@ -134,7 +130,7 @@ func (b *contextBuilder) summarizeChunk(ctx context.Context, req llm.CompletionR
 		if b.calls >= maxSummaryCalls {
 			return "", errors.New("旁路上下文整理已达到本次处理上限，请缩小问题范围后重试")
 		}
-		if EstimateInputTokens(req)+req.MaxTokens+512 > b.window {
+		if EstimateInputTokens(req)+outputBudget(req)+512 > b.window {
 			return "", ErrContextBudget
 		}
 		b.calls++
@@ -164,7 +160,6 @@ func (b *contextBuilder) summarizeChunk(ctx context.Context, req llm.CompletionR
 		if attempt == 1 {
 			return "", fmt.Errorf("%w，自动恢复后仍失败，请重试或调整模型配置", err)
 		}
-		req.MaxTokens = summaryRetryOutputTokens
 		req.System = append(req.System, summaryRetryInstruction)
 	}
 	panic("unreachable")
@@ -292,18 +287,18 @@ func (b *contextBuilder) compactSnapshot(ctx context.Context, base []llm.Message
 	return snapshotSummaryMessages(summary, base[start:]), nil
 }
 
-func (b *contextBuilder) prepare(ctx context.Context, snapshot Snapshot, question string, options ContextOptions, force bool) (llm.CompletionRequest, error) {
+func (b *contextBuilder) prepare(ctx context.Context, snapshot Snapshot, question string, force bool) (llm.CompletionRequest, error) {
 	req, err := CloneRequest(snapshot.Request)
 	if err != nil {
 		return req, err
 	}
-	req.MaxTokens = outputBudget(req, options.OutputTokens)
 	base := llm.MessagesForAPI(req.Messages)
-	limit := inputBudget(snapshot, req.MaxTokens)
+	reserved := outputBudget(req)
+	limit := inputBudget(snapshot, reserved)
 	if force {
 		limit /= 2
 	}
-	b.info.InputBudget, b.info.OutputTokens = limit, req.MaxTokens
+	b.info.InputBudget, b.info.OutputTokens = limit, reserved
 	// Reserve a bounded history allowance, so long side conversations cannot
 	// crowd all primary evidence out. Both count and token limits are enforced.
 	historyLimit := min(16000, max(0, limit/4))
@@ -373,12 +368,12 @@ func isContextOverflow(err error) bool {
 
 // Respond owns preparation and at most one overflow recovery. No tools, main
 // transcript or model-failover chain are introduced by the summary calls.
-func (s SideQuestionService) Respond(ctx context.Context, snapshot Snapshot, question string, replay Replay, options ContextOptions, update func(Answer, ContextInfo)) (out Answer, info ContextInfo, err error) {
+func (s SideQuestionService) Respond(ctx context.Context, snapshot Snapshot, question string, replay Replay, update func(Answer, ContextInfo)) (out Answer, info ContextInfo, err error) {
 	window := snapshot.Model.WindowTokens
 	if window <= 0 {
 		window = 200000
 	}
-	b := &contextBuilder{service: s, replay: replay, memory: replay.Memory, window: window, onUpdate: update}
+	b := &contextBuilder{service: s, replay: replay, memory: replay.Memory, window: window, maxTokens: snapshot.Request.MaxTokens, onUpdate: update}
 	defer func() { info = b.info; out.Usage.Add(b.usage) }()
 	b.progress("preparing")
 	if err = b.loadHistory(ctx); err != nil {
@@ -387,7 +382,7 @@ func (s SideQuestionService) Respond(ctx context.Context, snapshot Snapshot, que
 	previousSize := 0
 	for attempt := 0; attempt < 2; attempt++ {
 		var req llm.CompletionRequest
-		req, err = b.prepare(ctx, snapshot, question, options, attempt > 0)
+		req, err = b.prepare(ctx, snapshot, question, attempt > 0)
 		if err != nil {
 			return
 		}

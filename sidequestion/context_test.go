@@ -52,7 +52,7 @@ func TestSideTwentyExchangeBoundaryAndRestart(t *testing.T) {
 			}}
 			snap := Snapshot{Request: fixture(), Model: Model{WindowTokens: 200000}}
 			var memory Memory
-			out, info, err := (SideQuestionService{p}).Respond(t.Context(), snap, "what was my first decision?", replayFixture(history, &memory), ContextOptions{}, nil)
+			out, info, err := (SideQuestionService{p}).Respond(t.Context(), snap, "what was my first decision?", replayFixture(history, &memory), nil)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -66,7 +66,7 @@ func TestSideTwentyExchangeBoundaryAndRestart(t *testing.T) {
 				t.Fatal("first-round decision absent after round 20")
 			}
 			before := summaries
-			_, _, err = (SideQuestionService{p}).Respond(t.Context(), snap, "continue after restart", replayFixture(history, &memory), ContextOptions{}, nil)
+			_, _, err = (SideQuestionService{p}).Respond(t.Context(), snap, "continue after restart", replayFixture(history, &memory), nil)
 			if err != nil || summaries != before {
 				t.Fatalf("persisted summary not reused: %v", err)
 			}
@@ -86,7 +86,7 @@ func TestSideBudgetCountsContentNotJSONCharacters(t *testing.T) {
 	if err != nil {
 		t.Fatalf("valid code-heavy snapshot rejected: %v", err)
 	}
-	if req.MaxTokens != 8192 || EstimateInputTokens(req) >= 200000 {
+	if req.MaxTokens != 32768 || EstimateInputTokens(req) >= 200000 {
 		t.Fatalf("budget: %d %d", req.MaxTokens, EstimateInputTokens(req))
 	}
 	if string(before) != string(mustJSON(t, snap)) {
@@ -112,7 +112,7 @@ func TestSideLongExchangeAndSnapshotCompactionAreBounded(t *testing.T) {
 			calls, answers := 0, 0
 			var final llm.CompletionRequest
 			p := fakeProvider{complete: func(_ context.Context, r llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {
-				if r.Thinking == "disabled" {
+				if len(r.System) == 1 && r.System[0] == summaryInstruction {
 					calls++
 					if len(r.Tools) != 0 || EstimateInputTokens(r)+r.MaxTokens > 32000 || !utf8.ValidString(r.Messages[0].Text()) {
 						t.Fatal("unsafe summary request")
@@ -124,7 +124,7 @@ func TestSideLongExchangeAndSnapshotCompactionAreBounded(t *testing.T) {
 				return assistant("done"), "end_turn", llm.Usage{OutputTokens: 5}, nil
 			}}
 			var memory Memory
-			out, info, err := (SideQuestionService{p}).Respond(t.Context(), snap, "progress?", replayFixture(history, &memory), ContextOptions{}, nil)
+			out, info, err := (SideQuestionService{p}).Respond(t.Context(), snap, "progress?", replayFixture(history, &memory), nil)
 			if err != nil || calls < 2 || calls > 12 || answers != 1 || out.Usage.OutputTokens != 3*calls+5 {
 				t.Fatalf("calls=%d answers=%d info=%+v err=%v", calls, answers, info, err)
 			}
@@ -141,13 +141,13 @@ func TestSideLongExchangeAndSnapshotCompactionAreBounded(t *testing.T) {
 				t.Fatal("main snapshot modified")
 			}
 			before := calls
-			_, _, err = (SideQuestionService{p}).Respond(t.Context(), snap, "another question", replayFixture(history, &memory), ContextOptions{}, nil)
+			_, _, err = (SideQuestionService{p}).Respond(t.Context(), snap, "another question", replayFixture(history, &memory), nil)
 			if err != nil || calls != before {
 				t.Fatalf("summary cache not reused: %v", err)
 			}
 			if !hugeHistory {
 				snap.Version++
-				_, _, err = (SideQuestionService{p}).Respond(t.Context(), snap, "new snapshot", replayFixture(history, &memory), ContextOptions{}, nil)
+				_, _, err = (SideQuestionService{p}).Respond(t.Context(), snap, "new snapshot", replayFixture(history, &memory), nil)
 				if err != nil || calls == before {
 					t.Fatalf("stale snapshot cache reused: %v", err)
 				}
@@ -161,7 +161,7 @@ func TestSideOverflowRecoveryOnceAndFailureUsage(t *testing.T) {
 		t.Run(fmt.Sprint(twice), func(t *testing.T) {
 			answers, summaries := 0, 0
 			p := fakeProvider{complete: func(_ context.Context, r llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {
-				if r.Thinking == "disabled" {
+				if len(r.System) == 1 && r.System[0] == summaryInstruction {
 					summaries++
 					return assistant("summary"), "end_turn", llm.Usage{InputTokens: 3}, nil
 				}
@@ -173,7 +173,7 @@ func TestSideOverflowRecoveryOnceAndFailureUsage(t *testing.T) {
 			}}
 			snap := Snapshot{Request: fixture(), Model: Model{WindowTokens: 32000}}
 			snap.Request.Messages = append([]llm.Message{llm.UserText(strings.Repeat("old context ", 2000))}, snap.Request.Messages...)
-			out, info, err := (SideQuestionService{p}).Respond(t.Context(), snap, "question", Replay{}, ContextOptions{}, nil)
+			out, info, err := (SideQuestionService{p}).Respond(t.Context(), snap, "question", Replay{}, nil)
 			if answers != 2 || summaries != 1 || !info.OverflowRetried || (err != nil) != twice {
 				t.Fatalf("retry limit: %d %d %+v %v", answers, summaries, info, err)
 			}
@@ -195,7 +195,7 @@ func TestSideOverflowRecoveryOnceAndFailureUsage(t *testing.T) {
 			y(llm.StreamEvent{}, errors.New("context_length_exceeded"))
 		}
 	}}
-	out, _, err := (SideQuestionService{p}).Respond(t.Context(), Snapshot{Request: fixture(), Model: Model{Streaming: true}}, "q", Replay{}, ContextOptions{}, nil)
+	out, _, err := (SideQuestionService{p}).Respond(t.Context(), Snapshot{Request: fixture(), Model: Model{Streaming: true}}, "q", Replay{}, nil)
 	if err == nil || out.Text != "partial" || count != 1 {
 		t.Fatal("partial stream retried")
 	}
@@ -210,7 +210,7 @@ func TestSideSummaryCancellationAndFailureDoNotAdvanceMemory(t *testing.T) {
 			p := fakeProvider{complete: func(_ context.Context, r llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {
 				calls++
 				usage := llm.Usage{InputTokens: 9}
-				if r.Thinking != "disabled" {
+				if len(r.System) == 0 || r.System[0] != summaryInstruction {
 					t.Fatal("failed summary continued to answer")
 				}
 				switch mode {
@@ -239,7 +239,7 @@ func TestSideSummaryCancellationAndFailureDoNotAdvanceMemory(t *testing.T) {
 			if mode == "save-failed" {
 				replay.Save = func(context.Context, Memory) error { return errors.New("cleared") }
 			}
-			out, _, err := (SideQuestionService{p}).Respond(ctx, Snapshot{Request: fixture()}, "q", replay, ContextOptions{}, nil)
+			out, _, err := (SideQuestionService{p}).Respond(ctx, Snapshot{Request: fixture()}, "q", replay, nil)
 			wantCalls := 1
 			if mode == "empty" || mode == "truncated" || mode == "too-large" {
 				wantCalls = 2
@@ -258,7 +258,7 @@ func TestSideSummaryRecoversWithoutSavingPartialOutput(t *testing.T) {
 			var requests []llm.CompletionRequest
 			answers, saves := 0, 0
 			p := fakeProvider{complete: func(_ context.Context, req llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {
-				if req.Thinking != "disabled" {
+				if len(req.System) == 0 || req.System[0] != summaryInstruction {
 					answers++
 					if memory.History != "complete summary" || memory.Through != 1 {
 						t.Fatalf("answer started before complete summary was saved: %+v", memory)
@@ -266,7 +266,7 @@ func TestSideSummaryRecoversWithoutSavingPartialOutput(t *testing.T) {
 					return assistant("answer"), "end_turn", llm.Usage{InputTokens: 7}, nil
 				}
 				requests = append(requests, req)
-				if len(req.Tools) != 0 || EstimateInputTokens(req)+req.MaxTokens+512 > 32000 {
+				if len(req.Tools) != 0 || EstimateInputTokens(req)+outputBudget(req)+512 > 32000 || req.MaxTokens != fixture().MaxTokens || req.Thinking != "" {
 					t.Fatal("summary recovery exceeds budget or enables tools")
 				}
 				if memory != (Memory{}) || saves != 0 {
@@ -285,8 +285,8 @@ func TestSideSummaryRecoversWithoutSavingPartialOutput(t *testing.T) {
 						return assistant("partial summary"), mode, usage, nil
 					}
 				}
-				if len(requests) != 2 || req.MaxTokens <= requests[0].MaxTokens || req.Messages[0].Text() != requests[0].Messages[0].Text() || len(req.System) <= len(requests[0].System) {
-					t.Fatal("recovery must increase output budget, tighten instructions and replay original material")
+				if len(requests) != 2 || req.MaxTokens != requests[0].MaxTokens || req.Messages[0].Text() != requests[0].Messages[0].Text() || len(req.System) <= len(requests[0].System) {
+					t.Fatal("recovery must preserve model parameters, tighten instructions and replay original material")
 				}
 				return assistant("complete summary"), "end_turn", llm.Usage{InputTokens: 11, OutputTokens: 30}, nil
 			}}
@@ -296,7 +296,7 @@ func TestSideSummaryRecoversWithoutSavingPartialOutput(t *testing.T) {
 			}
 			replay := replayFixture(history, &memory)
 			replay.Save = func(_ context.Context, value Memory) error { saves++; memory = value; return nil }
-			out, _, err := (SideQuestionService{p}).Respond(t.Context(), Snapshot{Request: fixture(), Model: Model{WindowTokens: 32000}}, "q", replay, ContextOptions{}, nil)
+			out, _, err := (SideQuestionService{p}).Respond(t.Context(), Snapshot{Request: fixture(), Model: Model{WindowTokens: 32000}}, "q", replay, nil)
 			if err != nil || out.Text != "answer" || len(requests) != 2 || answers != 1 || saves != 1 || out.Usage.InputTokens != 27 || out.Usage.OutputTokens != 2078 {
 				t.Fatalf("recovery: summaries=%d answers=%d saves=%d out=%+v err=%v", len(requests), answers, saves, out, err)
 			}
@@ -311,7 +311,7 @@ func TestSideSummaryRecoveryReservesWindowForEveryChunk(t *testing.T) {
 			var first llm.CompletionRequest
 			p := fakeProvider{complete: func(_ context.Context, req llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {
 				calls++
-				if EstimateInputTokens(req)+req.MaxTokens+512 > window || !utf8.ValidString(req.Messages[0].Text()) {
+				if EstimateInputTokens(req)+outputBudget(req)+512 > window || !utf8.ValidString(req.Messages[0].Text()) || req.MaxTokens != 0 {
 					t.Fatal("unsafe chunk during recovery")
 				}
 				if calls%2 == 1 {
@@ -374,20 +374,20 @@ func TestSideSummaryCallCapAndStaticBudget(t *testing.T) {
 	calls := 0
 	p := fakeProvider{complete: func(_ context.Context, r llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {
 		calls++
-		if r.Thinking != "disabled" {
+		if len(r.System) != 1 || r.System[0] != summaryInstruction {
 			t.Fatal("oversized request answered")
 		}
 		return assistant("bounded summary"), "end_turn", llm.Usage{OutputTokens: 1}, nil
 	}}
 	snap := Snapshot{Model: Model{WindowTokens: 32000}, Request: fixture()}
 	snap.Request.Messages = []llm.Message{llm.UserText(strings.Repeat("x", 1200000))}
-	out, _, err := (SideQuestionService{p}).Respond(t.Context(), snap, "q", Replay{}, ContextOptions{}, nil)
+	out, _, err := (SideQuestionService{p}).Respond(t.Context(), snap, "q", Replay{}, nil)
 	if err == nil || calls != 12 || out.Usage.OutputTokens != 12 {
 		t.Fatalf("summary cap calls=%d err=%v", calls, err)
 	}
 	calls = 0
 	snap.Request.System = []string{strings.Repeat("x", 200000)}
-	_, _, err = (SideQuestionService{p}).Respond(t.Context(), snap, "q", Replay{}, ContextOptions{}, nil)
+	_, _, err = (SideQuestionService{p}).Respond(t.Context(), snap, "q", Replay{}, nil)
 	if !errors.Is(err, ErrContextBudget) || calls != 0 {
 		t.Fatalf("static oversized budget: calls=%d err=%v", calls, err)
 	}
@@ -403,14 +403,14 @@ func TestSideTwentyLongRepliesRespectSmallWindow(t *testing.T) {
 		if EstimateInputTokens(req)+req.MaxTokens > 32000 {
 			t.Fatal("request exceeds small model window")
 		}
-		if req.Thinking == "disabled" {
+		if len(req.System) == 1 && req.System[0] == summaryInstruction {
 			calls++
 			return assistant("historical objectives and evidence"), "end_turn", llm.Usage{}, nil
 		}
 		return assistant("answer"), "end_turn", llm.Usage{}, nil
 	}}
 	var memory Memory
-	_, info, err := (SideQuestionService{p}).Respond(t.Context(), Snapshot{Request: fixture(), Model: Model{WindowTokens: 32000}}, "current status?", replayFixture(history, &memory), ContextOptions{}, nil)
+	_, info, err := (SideQuestionService{p}).Respond(t.Context(), Snapshot{Request: fixture(), Model: Model{WindowTokens: 32000}}, "current status?", replayFixture(history, &memory), nil)
 	if err != nil || !info.HistorySummarized || calls > 12 || memory.Through != 20 {
 		t.Fatalf("20 long replies: calls=%d info=%+v memory=%+v err=%v", calls, info, memory, err)
 	}
@@ -419,7 +419,7 @@ func TestSideTwentyLongRepliesRespectSmallWindow(t *testing.T) {
 func TestSideOverflowWithoutReductionDoesNotRepeatAnswer(t *testing.T) {
 	answers, summaries := 0, 0
 	p := fakeProvider{complete: func(_ context.Context, req llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {
-		if req.Thinking == "disabled" {
+		if len(req.System) == 1 && req.System[0] == summaryInstruction {
 			summaries++
 			return assistant(strings.Repeat("longer summary ", 100)), "end_turn", llm.Usage{InputTokens: 3}, nil
 		}
@@ -427,7 +427,7 @@ func TestSideOverflowWithoutReductionDoesNotRepeatAnswer(t *testing.T) {
 		return llm.Message{}, "", llm.Usage{InputTokens: 5}, errors.New("context_length_exceeded")
 	}}
 	snapshot := Snapshot{Request: llm.CompletionRequest{MaxTokens: 128, Messages: []llm.Message{llm.UserText("tiny")}}}
-	out, _, err := (SideQuestionService{p}).Respond(t.Context(), snapshot, "question", Replay{}, ContextOptions{}, nil)
+	out, _, err := (SideQuestionService{p}).Respond(t.Context(), snapshot, "question", Replay{}, nil)
 	if err == nil || !strings.Contains(err.Error(), "未能进一步缩减") || answers != 1 || summaries != 1 || out.Usage.InputTokens != 8 {
 		t.Fatalf("no-progress recovery: %d %d %+v %v", answers, summaries, out, err)
 	}

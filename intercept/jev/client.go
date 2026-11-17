@@ -28,7 +28,6 @@ type Config struct {
 	BaseURL string
 	APIKey  string
 	Model   string
-	Proxy   string
 	Client  *http.Client
 }
 
@@ -90,10 +89,11 @@ func (c Config) ListModels(ctx context.Context) ([]string, error) {
 	endpoint = strings.TrimSuffix(endpoint, "/systemone") + "/models"
 	hc := c.Client
 	if hc == nil {
-		hc, err = llmhttp.NewClient(c.Proxy)
+		hc, err = llmhttp.NewClient()
 		if err != nil {
 			return nil, err
 		}
+		defer hc.CloseIdleConnections()
 	}
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
@@ -306,10 +306,11 @@ func (c Config) Do(ctx context.Context, req Request) (Response, error) {
 	}
 	hc := c.Client
 	if hc == nil {
-		hc, err = llmhttp.NewClient(c.Proxy)
+		hc, err = llmhttp.NewClient()
 		if err != nil {
 			return Response{}, err
 		}
+		defer hc.CloseIdleConnections()
 	}
 	hreq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {

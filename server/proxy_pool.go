@@ -315,8 +315,20 @@ func (m *Manager) applyActiveProxyLockedWithHealth(id, reason string, allowUnhea
 	m.mu.RLock()
 	from := m.globalProxy
 	m.mu.RUnlock()
+	if m.network != nil {
+		if err := m.network.Apply(next); err != nil {
+			return err
+		}
+	}
 	if m.traffic != nil {
-		if err := m.traffic.SetUpstreamProxy(next); err != nil {
+		upstream := next
+		if m.TransparentProxy() {
+			upstream = ""
+		}
+		if err := m.traffic.SetUpstreamProxy(upstream); err != nil {
+			if m.network != nil {
+				_ = m.network.Apply(from)
+			}
 			return err
 		}
 	}

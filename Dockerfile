@@ -1,4 +1,3 @@
-# syntax=docker/dockerfile:1
 #
 # 运行镜像（不在镜像里编译）：只装常用工具，放入**预编译好的 Linux 单二进制**。
 # 二进制由 CI 的 binaries job 交叉编译（纯 Go、无 QEMU），按目标架构放在
@@ -10,17 +9,25 @@
 #   cp -r web/out server/webui/dist
 #   CGO_ENABLED=0 GOARCH=amd64 go build -tags embedui -o dist/amd64/artex ./cmd/artex
 #   docker build -t artex:local .
-FROM python:3.12-slim-bookworm
+FROM node:22-bookworm-slim AS node-runtime
+
+FROM ghcr.io/sagernet/sing-box:v1.14.3 AS egress
+ARG TARGETARCH
+RUN apk add --no-cache iproute2
+COPY dist/${TARGETARCH}/artex /usr/local/bin/artex
+ENTRYPOINT ["/usr/local/bin/artex", "-egress-service"]
+
+FROM python:3.12-slim-bookworm AS artex
 ARG TARGETARCH
 # 常用工具：ripgrep / curl / vim，加一批 recon 常备件（按需增删）。
-# Node 从 NodeSource 装 22.x，与前端构建使用的主版本一致。
+# 从官方镜像复制 Node 22，避免 NodeSource 安装失败后回退到 Debian 的旧版本。
+COPY --from=node-runtime /usr/local/ /usr/local/
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates ripgrep curl wget vim git jq unzip \
       tzdata \
       dnsutils iputils-ping netcat-openbsd inetutils-telnet whois nmap \
-    && curl -fsSL https://deb.nodesource.com/setup_22.x | bash - \
-    && apt-get install -y --no-install-recommends nodejs \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && node --version && npm --version
 # 预装 Playwright MCP 与 CLI（全局），运行时不再 npx 联网下载。
 # @playwright/mcp：browser MCP 直接 `npx @playwright/mcp`（已全局装好，无需 -y/@latest）。
 # @playwright/cli：提供 playwright-cli，装完顺带 --help 验证可执行。
@@ -32,16 +39,19 @@ RUN npm install -g @playwright/mcp@latest @playwright/cli@latest playwright@late
     && rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 ENV TZ=Asia/Shanghai
+RUN apt-get update && apt-get install -y --no-install-recommends iproute2 util-linux nftables \
+    && rm -rf /var/lib/apt/lists/*
 # 预编译好的对应架构二进制（dist/amd64/artex 或 dist/arm64/artex）
 COPY dist/${TARGETARCH}/artex /app/artex
 # 守护启动脚本：进程退出后按退出码决定是否重新拉起，页面一键更新靠它完成换装。
 # 它同时负责把 SIGTERM 转发给 artex —— docker stop 只把信号发给 PID 1，
 # 不转发的话 artex 收不到、做不了优雅关闭，10 秒后被 SIGKILL 硬杀。
 COPY start.sh /app/start.sh
-RUN chmod +x /app/artex /app/start.sh
+COPY network-start.sh /app/network-start.sh
+RUN chmod +x /app/artex /app/start.sh /app/network-start.sh
 COPY skills/ /app/skills/
 # data/（SQLite + jwt.key）持久化点
 VOLUME ["/app/data"]
 EXPOSE 8787 8788
-ENTRYPOINT ["/app/start.sh"]
+ENTRYPOINT ["/app/network-start.sh"]
 CMD ["-addr", ":8787", "-proxy", ":8788"]

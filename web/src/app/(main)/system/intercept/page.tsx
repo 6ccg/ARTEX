@@ -265,7 +265,6 @@ function JudgeCard() {
         selectedProfile.model || "jev-latest",
         selectedProfile.base_url ?? "",
         "",
-        selectedProfile.proxy ?? "",
         "",
         "",
         Number(selectedProfile.id),

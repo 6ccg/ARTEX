@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Autumn-27/artex/egress"
 	"github.com/Autumn-27/norma/permission"
 	actool "github.com/Autumn-27/norma/tool"
 )
@@ -47,14 +48,12 @@ func DeepSeekSearchProbe(ctx context.Context, key, proxy, query string, count in
 	if strings.TrimSpace(key) == "" {
 		return 0, fmt.Errorf("DeepSeek Search API Key is required")
 	}
-	client := &http.Client{Timeout: 30 * time.Second}
-	if strings.TrimSpace(proxy) != "" {
-		parsed, err := url.Parse(proxy)
-		if err != nil || parsed.Scheme == "" || parsed.Host == "" {
-			return 0, fmt.Errorf("invalid search proxy URL")
-		}
-		client.Transport = &http.Transport{Proxy: http.ProxyURL(parsed)}
+	transport, err := egress.NewIndependentTransport(proxy)
+	if err != nil {
+		return 0, err
 	}
+	client := &http.Client{Timeout: 30 * time.Second, Transport: transport}
+	defer client.CloseIdleConnections()
 	body, _ := json.Marshal(map[string]any{"query": query, "count": count})
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, deepSeekToolsURL+"search", strings.NewReader(string(body)))
 	if err != nil {

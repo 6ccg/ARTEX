@@ -11,7 +11,7 @@ import (
 // back to the API base, and Provider() round-trips the short name. NewProvider
 // must build a working provider for it.
 func TestConfigFromOpenAIResponses(t *testing.T) {
-	c := ConfigFrom("openai-responses", "gpt-5", "https://gw.example/v1/responses", "sk-x", "")
+	c := ConfigFrom("openai-responses", "gpt-5", "https://gw.example/v1/responses", "sk-x")
 	if c.Format != llm.FormatOpenAIResponses {
 		t.Fatalf("format=%v, want FormatOpenAIResponses", c.Format)
 	}

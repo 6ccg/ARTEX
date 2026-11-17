@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 )
@@ -47,5 +48,28 @@ func TestDeepSeekToolsRespectGlobalAndBackendSettings(t *testing.T) {
 		if got := deepSeekTools(opts); len(got) != 0 {
 			t.Fatalf("deepseek tools enabled for opts %+v", opts)
 		}
+	}
+}
+
+func TestDeepSeekSearchProbeUsesGatewayAndUnsavedProxy(t *testing.T) {
+	const proxy = "http://proxy.invalid:8080"
+	gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/independent" ||
+			r.Header.Get("X-Artex-LLM-Upstream") != deepSeekToolsURL+"search" ||
+			r.Header.Get("X-Artex-Independent-Proxy") != proxy ||
+			r.Header.Get("Authorization") != "Bearer test-key" {
+			t.Errorf("unexpected probe: %s %s headers=%v", r.Method, r.URL, r.Header)
+		}
+		body, _ := io.ReadAll(r.Body)
+		if string(body) != `{"count":3,"query":"ARTEX"}` {
+			t.Errorf("body=%s", body)
+		}
+		_, _ = io.WriteString(w, `{"results":[{"title":"ARTEX"}]}`)
+	}))
+	defer gateway.Close()
+	t.Setenv("ARTEX_EGRESS_URL", gateway.URL)
+	count, err := DeepSeekSearchProbe(context.Background(), "test-key", proxy, "ARTEX", 3)
+	if err != nil || count != 1 {
+		t.Fatalf("count=%d err=%v", count, err)
 	}
 }

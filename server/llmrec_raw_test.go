@@ -58,7 +58,7 @@ func TestRecorderPersistsRawWireBodies(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cfg := agent.Config{Format: llm.FormatAnthropic, BaseURL: srv.URL, APIKey: "k", Model: "claude-raw-test"}
+	cfg := agent.Config{Format: llm.FormatAnthropic, BaseURL: srv.URL, APIKey: "k", Model: "claude-raw-test", Stream: true, MaxTokens: 512}
 	inner, err := cfg.NewProvider()
 	if err != nil {
 		t.Fatalf("NewProvider: %v", err)

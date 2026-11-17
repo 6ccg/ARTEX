@@ -13,8 +13,10 @@ import (
 	"time"
 
 	"github.com/Autumn-27/artex/config"
+	"github.com/Autumn-27/artex/egress"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
-	_ "github.com/jackc/pgx/v5/stdlib" // pgx database/sql driver ("pgx")
+	"github.com/jackc/pgx/v5/stdlib"
 )
 
 //go:embed schema.sql
@@ -97,6 +99,15 @@ func DSN() (dsn, source string, err error) {
 // (MVCC), so unlike the old SQLite store there is no process-wide write mutex.
 type DB struct{ *sql.DB }
 
+func openSQL(dsn string) (*sql.DB, error) {
+	cfg, err := pgx.ParseConfig(dsn)
+	if err != nil {
+		return nil, err
+	}
+	cfg.DialFunc = egress.BackendDialContext
+	return stdlib.OpenDB(*cfg), nil
+}
+
 // ensureDatabase connects to the postgres system database and creates the target
 // database if it does not exist. dsn must be a postgres:// URL.
 func ensureDatabase(dsn string) error {
@@ -111,7 +122,7 @@ func ensureDatabase(dsn string) error {
 	// connect to the postgres maintenance database instead
 	adminDSN := *u
 	adminDSN.Path = "/postgres"
-	admin, err := sql.Open("pgx", adminDSN.String())
+	admin, err := openSQL(adminDSN.String())
 	if err != nil {
 		return nil // best-effort; let Open surface the real error
 	}
@@ -134,7 +145,7 @@ func Open(dsn string) (*DB, error) {
 	if err := ensureDatabase(dsn); err != nil {
 		return nil, err
 	}
-	sqlDB, err := sql.Open("pgx", dsn)
+	sqlDB, err := openSQL(dsn)
 	if err != nil {
 		return nil, err
 	}

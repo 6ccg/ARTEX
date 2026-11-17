@@ -52,15 +52,12 @@ func EstimateInputTokens(req llm.CompletionRequest) int {
 	return tokens
 }
 
-func outputBudget(req llm.CompletionRequest, configured int) int {
-	if configured <= 0 {
-		configured = DefaultOutputTokens
-	}
-	configured = min(configured, 32768)
+// outputBudget reserves context space without changing the model request.
+func outputBudget(req llm.CompletionRequest) int {
 	if req.MaxTokens > 0 {
-		configured = min(configured, req.MaxTokens)
+		return req.MaxTokens
 	}
-	return configured
+	return DefaultOutputTokens
 }
 
 func inputBudget(s Snapshot, output int) int {
@@ -97,7 +94,6 @@ func BuildRequest(s Snapshot, history []Exchange, question string) (llm.Completi
 		return req, err
 	}
 	base := llm.MessagesForAPI(req.Messages)
-	req.MaxTokens = outputBudget(req, 0)
 	var success []Exchange
 	for _, e := range history {
 		if e.Status == "completed" {
@@ -109,7 +105,7 @@ func BuildRequest(s Snapshot, history []Exchange, question string) (llm.Completi
 	}
 	for {
 		req = assemble(req, base, "", success, question)
-		if EstimateInputTokens(req) <= inputBudget(s, req.MaxTokens) {
+		if EstimateInputTokens(req) <= inputBudget(s, outputBudget(req)) {
 			return req, nil
 		}
 		if len(success) == 0 {

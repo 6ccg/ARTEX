@@ -2013,7 +2013,6 @@ func (s *Server) pgListModels(w http.ResponseWriter, r *http.Request) {
 		Provider  string `json:"provider"` // "openai" | "anthropic"
 		BaseURL   string `json:"base_url"`
 		APIKey    string `json:"api_key"`
-		Proxy     string `json:"proxy"`
 		ProfileID *int64 `json:"profile_id"` // fallback: use stored key from this profile
 	}
 	if err := decode(r, &req); err != nil {
@@ -2034,18 +2033,15 @@ func (s *Server) pgListModels(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if provider == "jev" {
-		baseURL, proxy := strings.TrimSpace(req.BaseURL), strings.TrimSpace(req.Proxy)
+		baseURL := strings.TrimSpace(req.BaseURL)
 		if req.ProfileID != nil {
 			if p, err := s.m.pg.ProfileByID(*req.ProfileID); err == nil && p != nil {
 				if baseURL == "" {
 					baseURL = p.BaseURL
 				}
-				if proxy == "" {
-					proxy = p.Proxy
-				}
 			}
 		}
-		models, err := (jev.Config{BaseURL: baseURL, APIKey: apiKey, Proxy: proxy}).ListModels(r.Context())
+		models, err := (jev.Config{BaseURL: baseURL, APIKey: apiKey}).ListModels(r.Context())
 		if err != nil {
 			writeJSON(w, 200, map[string]any{"ok": false, "error": err.Error()})
 			return
@@ -2102,8 +2098,8 @@ func (s *Server) pgListModels(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Build HTTP client with the same profile proxy semantics as LLM calls.
-	client, err := llmhttp.NewClient(req.Proxy)
+	// Use the same system AI proxy as LLM calls.
+	client, err := llmhttp.NewClient()
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return

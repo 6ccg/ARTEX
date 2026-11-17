@@ -57,7 +57,7 @@ func (s *Server) wireInterceptReviewer() {
 			ctx = llmrec.WithWorker(ctx, judgeWorkerLane)
 			started := time.Now()
 			decision, usage, reviewErr := (jev.Config{
-				BaseURL: profile.BaseURL, APIKey: profile.APIKey, Model: profile.Model, Proxy: profile.Proxy,
+				BaseURL: profile.BaseURL, APIKey: profile.APIKey, Model: profile.Model,
 			}).ReviewWithUsage(ctx, input, prompt, s.m.interceptor.GetJudgeConfig().ConfidenceThreshold, profileID)
 			s.recordJevJudgeUsage(ctx, profile, usage, started, reviewErr)
 			return decision, reviewErr
@@ -115,17 +115,11 @@ func reviewCompletion(ctx context.Context, prov llm.Provider, prompt string, inp
 	return streamCollectText(ctx, prov, prompt, string(user))
 }
 
-// streamCollectText runs a single non-streaming-style completion (thinking off,
-// low temperature, bounded output) and returns the concatenated text. The
-// budget includes the explanation and complete closing JSON delimiters.
+// streamCollectText uses the selected model profile and collects its text.
 func streamCollectText(ctx context.Context, prov llm.Provider, system, user string) (string, error) {
-	temp := 0.0
 	req := llm.CompletionRequest{
-		System:      []string{system},
-		Messages:    []llm.Message{llm.UserText(user)},
-		MaxTokens:   1024,
-		Temperature: &temp,
-		Thinking:    "disabled",
+		System:   []string{system},
+		Messages: []llm.Message{llm.UserText(user)},
 	}
 	var sb strings.Builder
 	for ev, err := range prov.Stream(ctx, req) {

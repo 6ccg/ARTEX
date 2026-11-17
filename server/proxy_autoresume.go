@@ -132,10 +132,14 @@ func (s *Server) proxyReconnectConfig() (int, time.Duration) {
 }
 
 func (s *Server) runProxyProbe(ctx context.Context, proxyRaw, caPEMPath string, probes []string, timeout time.Duration) egressProbeResult {
+	return s.runProxyProbeFamily(ctx, proxyRaw, caPEMPath, probes, timeout, 0)
+}
+
+func (s *Server) runProxyProbeFamily(ctx context.Context, proxyRaw, caPEMPath string, probes []string, timeout time.Duration, family int) egressProbeResult {
 	if s != nil && s.proxyProbe != nil {
 		return s.proxyProbe(ctx, proxyRaw, caPEMPath, probes, timeout)
 	}
-	return probeEgress(ctx, proxyRaw, caPEMPath, probes, timeout)
+	return probeEgressFamily(ctx, proxyRaw, caPEMPath, probes, timeout, family)
 }
 
 func (s *Server) handleProxyFailure(taskID string, cause error) {
@@ -353,6 +357,9 @@ func (s *Server) proxyReconnectSuccessWithGuard(expectedID string, expectedGener
 }
 
 func (s *Server) proxyReconnectSuccessWithGuards(guards map[string]proxyReconnectGuard, afterAdmission func()) {
+	if s.m.TransparentProxy() && strings.TrimSpace(s.m.GlobalProxy()) == "" {
+		return
+	}
 	max, interval := s.proxyReconnectConfig()
 	s.scheduleMu.Lock()
 	defer s.scheduleMu.Unlock()
@@ -427,6 +434,10 @@ func (s *Server) testTaskProxy(w http.ResponseWriter, r *http.Request) {
 	proxy := strings.TrimSpace(s.m.GlobalProxy())
 	guards := s.snapshotProxyReconnectGuardsWithExhausted(false, true)
 	if proxy == "" {
+		if s.m.TransparentProxy() {
+			writeJSON(w, 200, map[string]any{"ok": false, "error": "未配置执行环境代理，Docker 出网已阻断"})
+			return
+		}
 		writeJSON(w, 200, map[string]any{"ok": true, "direct": true})
 		s.proxyReconnectSuccessWithGuards(guards, nil)
 		return

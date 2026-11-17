@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/Autumn-27/artex/egress"
 	"github.com/Autumn-27/artex/selfupdate"
 )
 
@@ -79,5 +80,8 @@ func (s *Server) updateClient() (*http.Client, string, error) {
 		return nil, "", err
 	}
 	client, err := selfupdate.NewClient(cfg.Proxy)
+	if err == nil && s.m.TransparentProxy() {
+		client.Transport, err = egress.NewIndependentTransport(cfg.Proxy)
+	}
 	return client, cfg.Proxy, err
 }

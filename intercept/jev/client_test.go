@@ -12,6 +12,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/Autumn-27/artex/egress"
 	"github.com/Autumn-27/artex/intercept"
 )
 
@@ -171,7 +172,12 @@ func TestSystemOneUsesConfiguredProxy(t *testing.T) {
 		_, _ = w.Write([]byte(`{"answers":{"decision":{"type":"choice","choice":"deny","confidence":1,"probabilities":{"allow":0,"ask":0,"deny":1}}}}`))
 	}))
 	defer proxy.Close()
-	lat, _, err := (Config{BaseURL: "http://target.invalid", Proxy: proxy.URL, APIKey: "secret"}).TestConnection(context.Background())
+	t.Setenv("ARTEX_EGRESS_URL", "")
+	if err := egress.SetLLMProxy(proxy.URL); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = egress.SetLLMProxy("") })
+	lat, _, err := (Config{BaseURL: "http://target.invalid", APIKey: "secret"}).TestConnection(context.Background())
 	if err != nil || lat <= 0 {
 		t.Fatalf("proxy test latency=%v err=%v", lat, err)
 	}
@@ -247,6 +253,7 @@ func TestEndpointNormalizesAndValidatesBaseURL(t *testing.T) {
 }
 
 func TestListModelsNativeSchemaAndProxy(t *testing.T) {
+	t.Setenv("ARTEX_EGRESS_URL", "")
 	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet || r.URL.Path != "/v1/models" {
 			t.Errorf("request = %s %s", r.Method, r.URL)
@@ -257,8 +264,12 @@ func TestListModelsNativeSchemaAndProxy(t *testing.T) {
 		_, _ = w.Write([]byte(`{"models":[{"name":"jev-latest"},{"name":"jev-preview"},{"name":""}]}`))
 	}))
 	defer proxy.Close()
+	if err := egress.SetLLMProxy(proxy.URL); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = egress.SetLLMProxy("") })
 	for _, suffix := range []string{"", "/v1", "/v1/systemone"} {
-		models, err := (Config{BaseURL: "http://target.invalid" + suffix, Proxy: proxy.URL, APIKey: " secret "}).ListModels(context.Background())
+		models, err := (Config{BaseURL: "http://target.invalid" + suffix, APIKey: " secret "}).ListModels(context.Background())
 		if err != nil || strings.Join(models, ",") != "jev-latest,jev-preview" {
 			t.Fatalf("models=%v err=%v", models, err)
 		}

@@ -12,6 +12,8 @@ export const settingsRuntimeMessages = {
     "Search test passed · {{backend}} returned {{count}} results",
   ],
   "settings.egressSkip.no_proxy": ["输入框为空，未配置代理", "The field is empty; no proxy is configured"],
+  "settings.egressSkip.ipv6_disabled": ["IPv6 出网已关闭", "Outbound IPv6 is disabled"],
+  "settings.egressSkip.no_global_proxy": ["未配置全局代理", "No global proxy configured"],
   "settings.egressSkip.saved_proxy_active": [
     "输入框为空；已保存的代理仍在生效",
     "The field is empty; the saved proxy is still active",
@@ -19,6 +21,18 @@ export const settingsRuntimeMessages = {
   "settings.egressWarning.pending_direct": [
     "此地址尚未保存，Agent 当前仍使用 {{proxy}}。保存后即改为直连。",
     "This change is not saved. Agents still use {{proxy}}. Saving will switch to a direct connection.",
+  ],
+  "settings.egressWarning.pending_block": [
+    "此地址尚未保存，Agent 当前仍使用 {{proxy}}。保存空地址后将阻断出网。",
+    "This change is not saved. Agents still use {{proxy}}. Saving an empty address will block outbound access.",
+  ],
+  "settings.egressWarning.egress_blocked": [
+    "未配置执行环境代理，Docker 出网已阻断；直连检测仅供后台对照。",
+    "No execution proxy is configured. Docker outbound access is blocked; the direct probe is only a server-side comparison.",
+  ],
+  "settings.egressWarning.pending_unblock": [
+    "此地址尚未保存，Agent 当前出网已阻断。上方结果对应输入框中的值，保存后生效。",
+    "This address is not saved. Agent outbound access is currently blocked. The test uses the value in the field; save it to apply.",
   ],
   "settings.egressWarning.pending_proxy": [
     "此地址尚未保存，Agent 当前仍为直连。上方结果对应输入框中的值，保存后生效。",

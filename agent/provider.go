@@ -37,10 +37,6 @@ type Config struct {
 	BaseURL string
 	APIKey  string
 	Model   string
-	// Proxy routes all LLM requests through the given proxy URL (http/https/socks5,
-	// optionally with user:pass@ credentials). Empty means direct — it does NOT
-	// fall back to the standard *_PROXY environment variables.
-	Proxy string
 	// RatePerSecond / RatePerMinute cap the shared request rate across ALL agents
 	// using the provider (0 = that window unlimited).
 	RatePerSecond float64
@@ -143,7 +139,6 @@ func compactionConfig(windowTokens int) *compaction.Config {
 //	ARTEX_LLM_PROVIDER = anthropic|openai (default: inferred from keys)
 //	ARTEX_LLM_MODEL    = model id        (default: per provider)
 //	ARTEX_LLM_BASE_URL = endpoint        (optional)
-//	ARTEX_LLM_PROXY    = proxy URL        (optional; http/https/socks5)
 //	ANTHROPIC_API_KEY / OPENAI_API_KEY         = credentials
 func FromEnv() (Config, bool) {
 	prov := os.Getenv("ARTEX_LLM_PROVIDER")
@@ -164,7 +159,6 @@ func FromEnv() (Config, bool) {
 	c := Config{
 		BaseURL: os.Getenv("ARTEX_LLM_BASE_URL"),
 		Model:   os.Getenv("ARTEX_LLM_MODEL"),
-		Proxy:   strings.TrimSpace(os.Getenv("ARTEX_LLM_PROXY")),
 		// 默认流式;ARTEX_LLM_STREAM=false/0/off 显式关闭走非流式。
 		Stream: !isFalsy(os.Getenv("ARTEX_LLM_STREAM")),
 	}
@@ -198,12 +192,11 @@ func FromEnv() (Config, bool) {
 // anthropic; model defaults per provider). Inputs are trimmed and the base URL
 // is normalized to the API base the provider expects (the provider appends the
 // endpoint path itself), so a full endpoint URL is tolerated.
-func ConfigFrom(provider, model, baseURL, apiKey, proxy string) Config {
+func ConfigFrom(provider, model, baseURL, apiKey string) Config {
 	c := Config{
 		Model:   strings.TrimSpace(model),
 		BaseURL: strings.TrimRight(strings.TrimSpace(baseURL), "/"),
 		APIKey:  strings.TrimSpace(apiKey),
-		Proxy:   strings.TrimSpace(proxy),
 		Stream:  true, // 默认流式;调用方按 profile 覆盖
 	}
 	switch strings.TrimSpace(provider) {
@@ -273,7 +266,7 @@ func (c Config) NewProviderWithLimiter(limiter *RequestLimiter) (llm.Provider, e
 	if c.Jev {
 		return nil, fmt.Errorf("Jev System One 仅可用于拦截判定模型，不能作为聊天 provider")
 	}
-	client, err := quotaAwareHTTPClient(c.Proxy, c.SessionHeaderKey)
+	client, err := quotaAwareHTTPClient(c.SessionHeaderKey)
 	if err != nil {
 		return nil, err
 	}
@@ -299,8 +292,7 @@ func (c Config) newProvider(client *http.Client, limiter *RequestLimiter) (llm.P
 	// 可只发 thinking.type、只发 effort、都发、或都不发。
 	lc.ThinkingType = c.ThinkingType
 	lc.ReasoningEffort = c.ReasoningEffort
-	// 输出上限的字段名选择(空 = 用 max_tokens)。上限的「值」不在这里:它每轮随
-	// agentcore.Options.MaxTokens 走,provider 只决定把它塞进哪个键。
+	// 输出上限的字段名与值统一来自模型配置；ConfigureProvider 在每次调用时应用该值。
 	lc.MaxTokensField = c.MaxTokensField
 	// 重试参数与 SDK 同语义(次数 0=默认/负=关闭,间隔 0=指数退避/>0=固定),原样透传。
 	lc.MaxRetries = c.Retry.ConnectAttempts
@@ -309,7 +301,11 @@ func (c Config) newProvider(client *http.Client, limiter *RequestLimiter) (llm.P
 	lc.EmptyResponseInterval = c.Retry.EmptyInterval
 	// Norma's limiter allows a full-window burst and excludes establishment
 	// retries. Enforce limits on HTTP attempts instead; do not also enable it.
-	return llm.NewProvider(lc)
+	prov, err := llm.NewProvider(lc)
+	if err != nil {
+		return nil, err
+	}
+	return c.ConfigureProvider(prov), nil
 }
 
 // IsQuotaExhaustedMessage deliberately recognizes only explicit balance,
@@ -426,8 +422,8 @@ func requestBodySnapshot(req *http.Request) string {
 	return string(b)
 }
 
-func quotaAwareHTTPClient(proxy, sessionHeaderKey string) (*http.Client, error) {
-	client, err := llmhttp.NewClient(proxy)
+func quotaAwareHTTPClient(sessionHeaderKey string) (*http.Client, error) {
+	client, err := llmhttp.NewClient()
 	if err != nil {
 		return nil, err
 	}
@@ -489,17 +485,12 @@ func TestConnection(ctx context.Context, c Config) (time.Duration, string, error
 	// 一套发头逻辑;未配 SessionHeaderKey 的端点不读它,无副作用。
 	ctx = transcript.WithSessionID(ctx, "conntest-"+transcript.NewSessionID())
 	start := time.Now()
-	// MaxTokens 要给足：推理模型(如 deepseek-v4-pro)在给出答案前会先产出一大段
-	// 思考(实测对一句 "ping" 也能烧 ~2900 token)。若只给 32,模型会一直卡在"思考阶段"
-	// 就撞到输出上限(finish=length)、被截断,连接测试虽仍算通(err=nil)但显示成
-	// "已中断/length/resume" 一团糟。给足预算让它把 OK 干净吐完(finish=stop)。
-	// EscalateMaxTokens 保持 false:不因截断而抬额重试,避免 resume 循环空烧。
 	reply, err := agentcore.Run(ctx, agentcore.Options{
 		Provider:       prov,
-		SystemPrompt:   []string{"你是连接测试。直接输出两个字符 OK 即可，不要思考、不要解释、不要别的。"},
+		SystemPrompt:   []string{"你是连接测试。直接输出两个字符 OK 即可，不要解释、不要别的。"},
 		PermissionMode: acperm.ModeBypass,
 		MaxTurns:       1,
-		MaxTokens:      8192,
+		MaxTokens:      c.MaxTokens,
 		NonStreaming:   !c.Stream, // 用该 profile 的真实收发模式做连接测试
 	}, "ping")
 	lat := time.Since(start)

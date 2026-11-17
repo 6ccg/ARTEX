@@ -46,9 +46,11 @@ install_docker(){
   else
     info "沿用已存在的 .env"
   fi
-  info "拉取镜像并启动…"
-  docker compose pull
-  docker compose up -d
+  if [ ! -f jwt.key ]; then
+    (umask 077; printf '%s%s' "$(rand)" "$(rand)" > jwt.key)
+  fi
+  info "构建镜像并启动（需要已准备 dist/<架构>/artex）…"
+  docker compose up -d --build
   ok "启动完成 → http://localhost:8787"
   info "查看日志：docker compose logs -f artex"
 }

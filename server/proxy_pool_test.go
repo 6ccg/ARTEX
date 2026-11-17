@@ -421,6 +421,9 @@ func TestProxyPoolClearedRuntimeForwarderFallsBackToDirect(t *testing.T) {
 	m := proxyTestManager(t)
 	// A configured pool can remain persisted after its last usable member is
 	// disabled or cleared. The runtime route is still direct in that state.
+	m.mu.Lock()
+	m.globalProxy = ""
+	m.mu.Unlock()
 	m.proxyPoolConfigured.Store(true)
 	proxyURL, err := url.Parse(m.ProxyAddr())
 	if err != nil {
