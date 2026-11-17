@@ -4,14 +4,17 @@ import (
 	"context"
 	"database/sql"
 	_ "embed"
+	"encoding/json"
 	"fmt"
+	"regexp"
 	"strconv"
+	"strings"
 )
 
 //go:embed upgrade_legacy.sql
 var legacySchemaSQL string
 
-const schemaRevision = 2
+const schemaRevision = 5
 const schemaRevisionKey = "database_schema_revision"
 
 // The caller holds schemaMigrationLockKey on conn. Each upgrade and its version
@@ -74,13 +77,102 @@ func initializeSchema(ctx context.Context, conn *sql.Conn) error {
 	if _, err := tx.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS pending_trigger_runs (id BIGSERIAL PRIMARY KEY, agent_key TEXT NOT NULL, title TEXT NOT NULL, message TEXT NOT NULL, task_id BIGINT NOT NULL DEFAULT 0, task_desc TEXT NOT NULL DEFAULT '', task_goal TEXT NOT NULL DEFAULT '', mergeable BOOLEAN NOT NULL DEFAULT false, conversation_id BIGINT, started BOOLEAN NOT NULL DEFAULT false)`); err != nil {
 		return err
 	}
+	if version < 3 {
+		if err := migrateAssetClassification(ctx, tx); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `ALTER TABLE conversations ADD COLUMN IF NOT EXISTS source text NOT NULL DEFAULT 'manual';
+ALTER TABLE conversations ADD COLUMN IF NOT EXISTS source_task_id bigint;
+UPDATE conversations c SET source='automation', source_task_id=COALESCE(
+ substring(c.title FROM 'task#([0-9]{1,18})')::bigint,
+ substring(c.title FROM '任务 #([0-9]{1,18})')::bigint,
+ (SELECT substring(COALESCE(a.detail,a.summary) FROM '【任务 #([0-9]{1,18})')::bigint FROM conversation_activities a WHERE a.conversation_id=c.id AND a.kind='user' ORDER BY a.id LIMIT 1))
+WHERE c.title ~ '^(工具触发|发现触发|目标触发|超时触发|任务创建触发|周期触发|定时触发|合并触发|漏洞报告|漏洞整理|复测|人工生成步骤与报告|资产与网络梳理|凭据整理)';
+UPDATE conversations c SET title=left(subject.name,180)
+FROM (SELECT DISTINCT ON (conversation_id) conversation_id,substring(COALESCE(detail,summary) FROM '"name"[[:space:]]*:[[:space:]]*"([^"]+)"') AS name FROM conversation_activities WHERE kind='user' ORDER BY conversation_id,id) subject
+WHERE subject.conversation_id=c.id AND c.source='automation' AND c.title LIKE '工具触发 · report_finding%' AND subject.name IS NOT NULL`); err != nil {
+			return err
+		}
+	}
 	if err := seedInitialSchemaData(ctx, tx); err != nil {
 		return err
+	}
+	if version < 4 {
+		if err := migrateConversationTitles(ctx, tx); err != nil {
+			return err
+		}
+	}
+	if version < 5 {
+		if _, err := tx.ExecContext(ctx, `CREATE INDEX IF NOT EXISTS idx_act_system ON activity(exploration_id,id) WHERE worker='system' OR kind IN ('llm_switch','llm_failover');
+CREATE INDEX IF NOT EXISTS idx_conv_result ON conversation_activities(conversation_id,id DESC) WHERE kind='result'`); err != nil {
+			return err
+		}
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO settings(key,value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value`, schemaRevisionKey, strconv.Itoa(schemaRevision)); err != nil {
 		return err
 	}
 	return tx.Commit()
+}
+
+// Recover a complete JSON string, including escaped quotes, from the trigger
+// context. Only replace generated titles; user-renamed conversations stay intact.
+func migrateConversationTitles(ctx context.Context, tx *sql.Tx) error {
+	rows, err := tx.QueryContext(ctx, `SELECT c.id,c.title,COALESCE(a.detail,a.summary,'') FROM conversations c
+JOIN LATERAL (SELECT detail,summary FROM conversation_activities WHERE conversation_id=c.id AND kind='user' ORDER BY id LIMIT 1) a ON true
+WHERE c.source='automation' AND c.agent_key='reporter'`)
+	if err != nil {
+		return err
+	}
+	type titleUpdate struct {
+		id    int64
+		title string
+	}
+	var updates []titleUpdate
+	full := regexp.MustCompile(`"name"\s*:\s*("(?:[^"\\]|\\.)*")`)
+	old := regexp.MustCompile(`"name"\s*:\s*"([^"]+)"`)
+	for rows.Next() {
+		var id int64
+		var title, body string
+		if err := rows.Scan(&id, &title, &body); err != nil {
+			rows.Close()
+			return err
+		}
+		m := full.FindStringSubmatch(body)
+		if len(m) != 2 {
+			continue
+		}
+		var name string
+		if json.Unmarshal([]byte(m[1]), &name) != nil || strings.TrimSpace(name) == "" {
+			continue
+		}
+		runes := []rune(name)
+		if len(runes) > 180 {
+			name = string(runes[:180])
+		}
+		previous := old.FindStringSubmatch(body)
+		generated := strings.HasPrefix(title, "工具触发 · report_finding")
+		if len(previous) == 2 {
+			runes := []rune(previous[1])
+			if len(runes) > 180 {
+				runes = runes[:180]
+			}
+			generated = generated || title == string(runes)
+		}
+		if generated && title != name {
+			updates = append(updates, titleUpdate{id, name})
+		}
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	for _, u := range updates {
+		if _, err := tx.ExecContext(ctx, `UPDATE conversations SET title=$2 WHERE id=$1`, u.id, u.title); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func seedInitialSchemaData(ctx context.Context, tx *sql.Tx) error {

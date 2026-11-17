@@ -20,14 +20,12 @@ func DomainKey(fqdn string) string {
 func IPKey(ip string) string { return strings.TrimSpace(ip) }
 
 // RootDomain returns the registrable domain (eTLD+1) for a host and whether the
-// host itself IS that apex (§3.1). Edge cases (§3.1 边界处理): an IP literal or a
-// host publicsuffix can't classify (localhost / internal / non-ICANN TLD) is
-// returned unchanged as its own root with isApex=true — best-effort, never treated
-// as a subdomain.
+// host itself IS that apex. IP literals have no domain root. Hosts publicsuffix
+// cannot classify (localhost / internal / non-ICANN TLD) remain their own root.
 func RootDomain(host string) (root string, isApex bool) {
 	h := DomainKey(host)
 	if h == "" || net.ParseIP(h) != nil {
-		return h, true
+		return "", true
 	}
 	etld1, err := publicsuffix.EffectiveTLDPlusOne(h)
 	if err != nil || etld1 == "" {

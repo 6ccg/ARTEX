@@ -295,7 +295,7 @@ func TestInsertAssetsMixedBatch(t *testing.T) {
 	defer d.Exec(`DELETE FROM assets WHERE
 		domain IN ('batch-sub.batch-test.org','batch-test.org') OR
 		ip='55.66.77.88' OR
-		url='https://batch-test.org/api' OR
+		url IN ('https://batch-test.org/api','https://batch-test.org') OR
 		(type='endpoint' AND url='https://batch-test.org/api/users')`)
 
 	out := callInsertAssets(t, ts, map[string]any{
@@ -330,7 +330,7 @@ func TestInsertAssetsMixedBatch(t *testing.T) {
 		case "subdomain":
 			d.QueryRow(`SELECT COUNT(*) FROM assets WHERE type=$1 AND domain='batch-sub.batch-test.org'`, typ).Scan(&cnt)
 		case "service":
-			d.QueryRow(`SELECT COUNT(*) FROM assets WHERE type=$1 AND url='https://batch-test.org/api'`, typ).Scan(&cnt)
+			d.QueryRow(`SELECT COUNT(*) FROM assets WHERE type=$1 AND url='https://batch-test.org'`, typ).Scan(&cnt)
 		case "endpoint":
 			d.QueryRow(`SELECT COUNT(*) FROM assets WHERE type=$1 AND url='https://batch-test.org/api/users'`, typ).Scan(&cnt)
 		}
