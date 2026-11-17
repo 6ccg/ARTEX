@@ -814,11 +814,21 @@ export interface Conversation {
   running?: boolean; // live server state, returned with the conversation list
   agent_key: string;
   title: string;
+  source?: "manual" | "automation";
+  source_task_id?: number;
+  outcome?: "completed" | "failed" | "timeout";
   llm_profile_id?: number;
   pinned?: boolean;
   pinned_at?: string | null;
   created_at: string;
   updated_at: string;
+}
+
+export interface ConversationStats {
+  turns: number;
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
 }
 
 // ---- Backend logs (/logs page) ----
@@ -1998,4 +2008,21 @@ export interface TaskFileListing {
   size: number;
   truncated: boolean;
   missing: boolean;
+}
+
+export interface ConversationListPage {
+  conversations: Conversation[];
+  total: number;
+  all_total: number;
+  groups: Record<string, { total: number; running: number }>;
+  agents: Record<string, number>;
+  running: boolean;
+}
+export interface ConversationListQuery {
+  stats?: number;
+  scope?: "manual" | "automation" | "all";
+  agent?: string;
+  q?: string;
+  limit?: number;
+  offset?: number;
 }

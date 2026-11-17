@@ -102,7 +102,17 @@ export function FindingAutoChat({
       return;
     }
     void createConversation();
-  }, [conversation, createConversation, initialConversationId, manualEmpty, open, safeTitle, storageKey]);
+  }, [
+    conversation,
+    createConversation,
+    initialConversationId,
+    manualEmpty,
+    open,
+    safeTitle,
+    storageKey,
+    agentKey,
+    findingId,
+  ]);
 
   React.useEffect(() => {
     if (!historyOpen && !running) return;
@@ -110,7 +120,18 @@ export function FindingAutoChat({
     let timer: ReturnType<typeof setTimeout>;
     const load = async () => {
       try {
-        const items = await api.conversations();
+        const items: Conversation[] = [];
+        for (let offset = 0; live; offset += 100) {
+          const page = await api.conversations({
+            agent: agentKey,
+            q: `漏洞 #${findingId} ·`,
+            limit: 100,
+            offset,
+            stats: 0,
+          });
+          items.push(...page.conversations);
+          if (page.conversations.length < 100) break;
+        }
         if (!live) return;
         const prefix = `漏洞 #${findingId} ·`;
         setHistory(items.filter((item) => item.agent_key === agentKey && item.title.startsWith(prefix)));

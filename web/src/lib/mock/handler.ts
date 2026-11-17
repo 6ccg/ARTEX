@@ -2585,16 +2585,51 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
   // ── conversations ──
   if (path === "/conversations" && m === "GET") {
     sortMockConversations();
-    return {
-      conversations: structuredClone(
-        mockConversations.map((conversation) => ({
-          ...conversation,
-          running: mockRetests.some(
-            (item) => item.conversation_id === conversation.id && ["pending", "running"].includes(item.status),
-          ),
-        })),
+    const all = mockConversations.map((conversation) => ({
+      ...conversation,
+      running: mockRetests.some(
+        (item) => item.conversation_id === conversation.id && ["pending", "running"].includes(item.status),
       ),
+    }));
+    const filtered = all.filter(
+      (item) =>
+        (!q.get("agent") || item.agent_key === q.get("agent")) &&
+        (q.get("scope") === "automation"
+          ? item.source === "automation"
+          : q.get("scope") === "manual"
+            ? item.source !== "automation" || item.pinned || !!item.pinned_at || item.running
+            : true) &&
+        `${item.title} #${item.id} ${item.source_task_id ?? ""}`
+          .toLocaleLowerCase()
+          .includes((q.get("q") ?? "").toLocaleLowerCase()),
+    );
+    if (q.get("view") === "ids") return { ids: filtered.map((item) => item.id) };
+    const groups: Record<string, { total: number; running: number }> = {};
+    const agents: Record<string, number> = {};
+    for (const item of all) agents[item.agent_key] = (agents[item.agent_key] ?? 0) + 1;
+    for (const item of filtered) {
+      if (item.pinned || item.pinned_at) continue;
+      const key = item.source === "automation" ? `task:${item.source_task_id ?? 0}` : item.agent_key;
+      const group = groups[key] ?? { total: 0, running: 0 };
+      groups[key] = group;
+      group.total++;
+      if (item.running) group.running++;
+    }
+    const offset = Math.max(0, Number(q.get("offset")) || 0);
+    const limit = Math.max(1, Number(q.get("limit")) || 100);
+    return {
+      conversations: structuredClone(filtered.slice(offset, offset + limit)),
+      total: filtered.length,
+      all_total: all.length,
+      groups,
+      agents,
+      running: all.some((item) => item.running),
     };
+  }
+  if (seg[0] === "conversations" && seg.length === 2 && m === "GET") {
+    const conversation = mockConversations.find((item) => item.id === Number(seg[1]));
+    if (!conversation) throw new Error("404 conversation not found");
+    return structuredClone(conversation);
   }
   if (path === "/conversations" && m === "POST") {
     const now = new Date().toISOString();

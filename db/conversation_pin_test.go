@@ -49,7 +49,7 @@ func TestConversationPinOrderingAndPatch(t *testing.T) {
 		t.Fatalf("repeat pin should preserve pin time: %+v (want %v)", first, firstPinnedAt)
 	}
 
-	conversations, err := d.ListConversations()
+	conversations, _, err := d.ListConversationsPage(ConversationFilter{}, 100, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

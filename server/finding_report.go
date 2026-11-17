@@ -58,7 +58,11 @@ func (s *Server) generateFindingReport(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	message := manualFindingReportMessage(f, taskID)
-	conversation, err := s.m.pg.CreateConversation("reporter", fmt.Sprintf("漏洞报告 · finding#%d", f.ID), nil)
+	title := f.Name
+	if strings.TrimSpace(title) == "" {
+		title = fmt.Sprintf("漏洞报告 · finding#%d", f.ID)
+	}
+	conversation, err := s.m.pg.CreateAutomationConversation("reporter", title, taskID)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "创建报告对话失败: "+err.Error())
 		return

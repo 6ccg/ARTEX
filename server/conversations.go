@@ -57,18 +57,57 @@ func (s *Server) pgListConversations(w http.ResponseWriter, r *http.Request) {
 	if pg == nil {
 		return
 	}
-	cs, err := pg.ListConversations()
+	running := map[int64]bool{}
+	s.chatMu.Lock()
+	for key, busy := range s.chatBusy {
+		if busy && strings.HasPrefix(key, "conv-") {
+			id, _ := strconv.ParseInt(strings.TrimPrefix(key, "conv-"), 10, 64)
+			running[id] = true
+		}
+	}
+	s.chatMu.Unlock()
+	ids := []int64{}
+	for id := range running {
+		ids = append(ids, id)
+	}
+	q := r.URL.Query()
+	filter := db.ConversationFilter{SkipStats: q.Get("stats") == "0", Scope: q.Get("scope"), Agent: q.Get("agent"), Query: q.Get("q"), RunningIDs: ids}
+	if q.Get("view") == "ids" {
+		all, err := pg.ConversationIDs(filter)
+		if err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		writeJSON(w, 200, map[string]any{"ids": all})
+		return
+	}
+	cs, meta, err := pg.ListConversationsPage(filter, atoiDefault(q.Get("limit"), 100), atoiDefault(q.Get("offset"), 0))
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
 	}
 	items := make([]conversationListItem, 0, len(cs))
-	s.chatMu.Lock()
 	for _, c := range cs {
-		items = append(items, conversationListItem{Conversation: c, Running: s.chatBusy[s.convBusyKey(c.ID)]})
+		items = append(items, conversationListItem{Conversation: c, Running: running[c.ID]})
 	}
+	writeJSON(w, 200, map[string]any{"conversations": items, "total": meta.Total, "all_total": meta.AllTotal, "groups": meta.Groups, "agents": meta.Agents, "running": len(ids) > 0})
+}
+
+func (s *Server) pgGetConversation(w http.ResponseWriter, r *http.Request) {
+	pg, c, ok := s.convByID(w, r)
+	if !ok {
+		return
+	}
+	outcome, err := pg.LatestConversationOutcome(c.ID)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	c.Outcome = outcome
+	s.chatMu.Lock()
+	running := s.chatBusy[s.convBusyKey(c.ID)]
 	s.chatMu.Unlock()
-	writeJSON(w, 200, map[string]any{"conversations": items})
+	writeJSON(w, 200, conversationListItem{c, running})
 }
 
 func (s *Server) pgCreateConversation(w http.ResponseWriter, r *http.Request) {
@@ -319,6 +358,11 @@ func (s *Server) pgConversationMessages(w http.ResponseWriter, r *http.Request) 
 	}
 	q := r.URL.Query()
 	limit := atoiDefault(q.Get("limit"), 200)
+	stats, err := pg.ConversationStats(c.ID)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
 	s.chatMu.Lock()
 	running := s.chatBusy[s.convBusyKey(c.ID)]
 	s.chatMu.Unlock()
@@ -332,7 +376,7 @@ func (s *Server) pgConversationMessages(w http.ResponseWriter, r *http.Request) 
 			writeErr(w, 500, err.Error())
 			return
 		}
-		writeJSON(w, 200, map[string]any{"items": activityDTOs(items), "cursor": cursor, "running": running, "hasMore": false})
+		writeJSON(w, 200, map[string]any{"items": activityDTOs(items), "cursor": cursor, "running": running, "hasMore": false, "stats": stats})
 		return
 	}
 
@@ -349,7 +393,7 @@ func (s *Server) pgConversationMessages(w http.ResponseWriter, r *http.Request) 
 	if n := len(items); n > 0 {
 		cursor = items[n-1].ID
 	}
-	writeJSON(w, 200, map[string]any{"items": activityDTOs(items), "cursor": cursor, "running": running, "hasMore": hasMore})
+	writeJSON(w, 200, map[string]any{"items": activityDTOs(items), "cursor": cursor, "running": running, "hasMore": hasMore, "stats": stats})
 }
 
 // pgConversationMsgDetail lazily returns one step's full detail blob.

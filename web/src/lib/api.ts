@@ -1,3 +1,4 @@
+import type { ConversationListPage, ConversationListQuery } from "./types";
 // Real backend client. /api/* is proxied to the Go backend (next.config rewrites).
 // Returns the domain types in lib/types.ts. Shapes match the backend handlers;
 // a few fields the backend serializes differently (e.g. created_at as a unix int)
@@ -25,6 +26,7 @@ import type {
   CompanyScopeMutation,
   CompanyScopeRule,
   Conversation,
+  ConversationStats,
   ConvTokenSummary,
   CoverageAssetRefs,
   CoverageGraphData,
@@ -1412,7 +1414,15 @@ export const api = {
   deleteAgent: (key: string) => del<{ deleted: string }>(`/agents/${key}`),
 
   // ---- conversations (chat page) ----
-  conversations: () => get<{ conversations: Conversation[] }>("/conversations").then((r) => arr(r.conversations)),
+  conversations: (options: ConversationListQuery = {}) =>
+    get<ConversationListPage>(
+      `/conversations?${new URLSearchParams(Object.entries(options).map(([key, value]) => [key, String(value)]))}`,
+    ),
+  conversationIDs: (options: ConversationListQuery) =>
+    get<{ ids: number[] }>(
+      `/conversations?${new URLSearchParams([...Object.entries(options).map(([key, value]) => [key, String(value)]), ["view", "ids"]])}`,
+    ).then((page) => page.ids),
+  getConversation: (id: number) => get<Conversation>(`/conversations/${id}`),
   createConversation: (agent_key: string, title = "", llm_profile_id?: number | null) =>
     post<Conversation>("/conversations", { agent_key, title, llm_profile_id: llm_profile_id ?? null }),
   updateConversation: (id: number, input: { title?: string; pinned?: boolean }) =>
@@ -1426,17 +1436,23 @@ export const api = {
     post<{ items: { id: number; ok: boolean; error?: string }[] }>("/conversations/delete/batch", { ids }),
   // Incremental tail: steps after `since` (id ASC) — live poll + post-send fetch.
   conversationMessages: (id: number, since = 0) =>
-    get<{ items: Activity[]; cursor: number; running: boolean }>(`/conversations/${id}/messages?since=${since}`).then(
-      (r) => ({ items: arr(r.items), cursor: r.cursor ?? 0, running: !!r.running }),
-    ),
+    get<{ items: Activity[]; cursor: number; running: boolean; stats?: ConversationStats }>(
+      `/conversations/${id}/messages?since=${since}`,
+    ).then((r) => ({ items: arr(r.items), cursor: r.cursor ?? 0, running: !!r.running, stats: r.stats })),
   // Reverse pagination: the latest `limit` steps (before=0) or the page of older
   // steps ending before id `before`. hasMore = still-older steps exist.
   conversationHistory: (id: number, before = 0, limit = 200) => {
     const q = new URLSearchParams({ limit: String(limit) });
     if (before > 0) q.set("before", String(before));
-    return get<{ items: Activity[]; cursor: number; running: boolean; hasMore: boolean }>(
+    return get<{ items: Activity[]; cursor: number; running: boolean; hasMore: boolean; stats?: ConversationStats }>(
       `/conversations/${id}/messages?${q.toString()}`,
-    ).then((r) => ({ items: arr(r.items), cursor: r.cursor ?? 0, running: !!r.running, hasMore: !!r.hasMore }));
+    ).then((r) => ({
+      items: arr(r.items),
+      cursor: r.cursor ?? 0,
+      running: !!r.running,
+      hasMore: !!r.hasMore,
+      stats: r.stats,
+    }));
   },
   conversationMsgDetail: (id: number, seq: number) =>
     get<{ detail: string }>(`/conversations/${id}/messages/${seq}`).then((r) => r.detail ?? ""),

@@ -101,7 +101,7 @@ func (s *Runtime) processCredentialJob(parent context.Context, item *db.Intellig
 	result := *item.Credentials
 	conversationID := result.ConversationID
 	if conversationID == 0 {
-		if c, err := s.m.pg.CreateConversation(db.CredentialAgentKey, "凭据整理 · "+firstLine(item.Title, 42), nil); err == nil {
+		if c, err := s.m.pg.CreateAutomationConversation(db.CredentialAgentKey, "凭据整理 · "+firstLine(item.Title, 42), item.TaskID); err == nil {
 			conversationID = c.ID
 			result.ConversationID = c.ID
 			_, _ = s.m.pg.AppendConvActivity(c.ID, db.Activity{Worker: db.CredentialAgentKey, Kind: "user", Summary: "收到凭据上报，开始整理", Detail: item.Content})

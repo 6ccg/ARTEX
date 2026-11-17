@@ -2,6 +2,7 @@ package db
 
 import (
 	"database/sql"
+	"strings"
 	"time"
 )
 
@@ -53,6 +54,9 @@ type Conversation struct {
 	ID           int64      `json:"id"`
 	AgentKey     string     `json:"agent_key"`
 	Title        string     `json:"title"`
+	Source       string     `json:"source"`
+	SourceTaskID *int64     `json:"source_task_id,omitempty"`
+	Outcome      string     `json:"outcome,omitempty"`
 	LLMProfileID *int64     `json:"llm_profile_id,omitempty"`
 	Pinned       bool       `json:"pinned"`
 	PinnedAt     *time.Time `json:"pinned_at,omitempty"`
@@ -66,12 +70,12 @@ type ConversationPatch struct {
 	Pinned *bool
 }
 
-const convCols = `id, agent_key, title, llm_profile_id, pinned_at, created_at, updated_at`
+const convCols = `id, agent_key, title, llm_profile_id, pinned_at, created_at, updated_at, source, source_task_id`
 
 func scanConv(row interface{ Scan(...any) error }) (Conversation, error) {
 	var c Conversation
 	var pinnedAt sql.NullTime
-	err := row.Scan(&c.ID, &c.AgentKey, &c.Title, &c.LLMProfileID, &pinnedAt, &c.CreatedAt, &c.UpdatedAt)
+	err := row.Scan(&c.ID, &c.AgentKey, &c.Title, &c.LLMProfileID, &pinnedAt, &c.CreatedAt, &c.UpdatedAt, &c.Source, &c.SourceTaskID)
 	if pinnedAt.Valid {
 		c.Pinned = true
 		c.PinnedAt = &pinnedAt.Time
@@ -82,6 +86,18 @@ func scanConv(row interface{ Scan(...any) error }) (Conversation, error) {
 // CreateConversation opens a new chat thread for agentKey with an initial title.
 // llmProfileID may be nil to use the globally active profile.
 func (d *DB) CreateConversation(agentKey, title string, llmProfileID *int64) (*Conversation, error) {
+	return d.createConversation(agentKey, title, llmProfileID, "manual", nil)
+}
+
+func (d *DB) CreateAutomationConversation(agentKey, title string, taskID int64) (*Conversation, error) {
+	var task *int64
+	if taskID > 0 {
+		task = &taskID
+	}
+	return d.createConversation(agentKey, title, nil, "automation", task)
+}
+
+func (d *DB) createConversation(agentKey, title string, llmProfileID *int64, source string, taskID *int64) (*Conversation, error) {
 	tx, err := d.Begin()
 	if err != nil {
 		return nil, err
@@ -92,8 +108,8 @@ func (d *DB) CreateConversation(agentKey, title string, llmProfileID *int64) (*C
 	// by this transaction before it takes a profile lock, matching DeleteProfile's
 	// child-row -> profile-row protocol.
 	c, err := scanConv(tx.QueryRow(`
-INSERT INTO conversations(agent_key, title, llm_profile_id) VALUES ($1, $2, NULL)
-RETURNING `+convCols, agentKey, title))
+INSERT INTO conversations(agent_key, title, llm_profile_id,source,source_task_id) VALUES ($1, $2, NULL,$3,$4)
+RETURNING `+convCols, agentKey, title, source, taskID))
 	if err != nil {
 		return nil, err
 	}
@@ -111,6 +127,29 @@ WHERE id=$1 RETURNING `+convCols, c.ID, llmProfileID))
 		return nil, err
 	}
 	return &c, nil
+}
+
+// ConversationStats covers the complete thread, independent of transcript pages.
+type ConversationStats struct {
+	Turns           int   `json:"turns"`
+	InputTokens     int64 `json:"input_tokens"`
+	OutputTokens    int64 `json:"output_tokens"`
+	CacheReadTokens int64 `json:"cache_read_tokens"`
+}
+
+func (d *DB) ConversationStats(id int64) (ConversationStats, error) {
+	var stats ConversationStats
+	err := d.QueryRow(`WITH completed AS (
+ SELECT COALESCE(max(id),0) AS cursor,COALESCE(sum(input_tokens),0) AS input,COALESCE(sum(output_tokens),0) AS output,COALESCE(sum(cache_read_tokens),0) AS cache
+ FROM conversation_activities WHERE conversation_id=$1 AND kind='result'
+), live AS (
+ SELECT input_tokens,output_tokens,cache_read_tokens FROM conversation_activities
+ WHERE conversation_id=$1 AND kind='usage' AND id>(SELECT cursor FROM completed) ORDER BY id DESC LIMIT 1
+)
+SELECT (SELECT count(*) FROM conversation_activities WHERE conversation_id=$1 AND kind='usage'),
+ completed.input+COALESCE(live.input_tokens,0),completed.output+COALESCE(live.output_tokens,0),completed.cache+COALESCE(live.cache_read_tokens,0)
+FROM completed LEFT JOIN live ON true`, id).Scan(&stats.Turns, &stats.InputTokens, &stats.OutputTokens, &stats.CacheReadTokens)
+	return stats, err
 }
 
 // UpdateConversationProfile sets (or clears) the LLM profile override for a conversation.
@@ -138,23 +177,120 @@ func (d *DB) UpdateConversationProfile(id int64, llmProfileID *int64) error {
 	return tx.Commit()
 }
 
-// ListConversations returns all threads, most-recently-updated first.
-func (d *DB) ListConversations() ([]*Conversation, error) {
-	rows, err := d.Query(`SELECT ` + convCols + ` FROM conversations
-ORDER BY (pinned_at IS NOT NULL) DESC, pinned_at DESC NULLS LAST, updated_at DESC, id DESC`)
+type ConversationFilter struct {
+	SkipStats           bool
+	Scope, Agent, Query string
+	RunningIDs          []int64
+}
+type ConversationGroupCount struct {
+	Total   int `json:"total"`
+	Running int `json:"running"`
+}
+type ConversationListMeta struct {
+	Total    int                               `json:"total"`
+	AllTotal int                               `json:"all_total"`
+	Groups   map[string]ConversationGroupCount `json:"groups"`
+	Agents   map[string]int                    `json:"agents"`
+}
+
+func (f ConversationFilter) where() (string, []any) {
+	query := strings.NewReplacer("\\", "\\\\", "%", "\\%", "_", "\\_").Replace(strings.TrimSpace(f.Query))
+	return ` WHERE ($1='' OR agent_key=$1)
+ AND (title||' #'||id::text||' '||COALESCE(source_task_id::text,'')) ILIKE $2 ESCAPE '\'
+ AND ($3 IN ('','all') OR ($3='manual' AND (source<>'automation' OR pinned_at IS NOT NULL OR id=ANY($4::bigint[]))) OR ($3='automation' AND source='automation'))`,
+		[]any{f.Agent, "%" + query + "%", f.Scope, f.RunningIDs}
+}
+func (d *DB) ConversationIDs(f ConversationFilter) ([]int64, error) {
+	where, args := f.where()
+	rows, err := d.Query(`SELECT id FROM conversations`+where, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
+	ids := []int64{}
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+func (d *DB) ListConversationsPage(f ConversationFilter, limit, offset int) ([]*Conversation, ConversationListMeta, error) {
+	meta := ConversationListMeta{Groups: map[string]ConversationGroupCount{}, Agents: map[string]int{}}
+	where, args := f.where()
+	if !f.SkipStats {
+		if err := d.QueryRow(`SELECT count(*),(SELECT count(*) FROM conversations) FROM conversations`+where, args...).Scan(&meta.Total, &meta.AllTotal); err != nil {
+			return nil, meta, err
+		}
+		counts, err := d.Query(`SELECT CASE WHEN source='automation' THEN 'task:'||COALESCE(source_task_id,0)::text ELSE agent_key END,count(*),count(*) FILTER(WHERE id=ANY($4::bigint[])) FROM conversations`+where+` AND pinned_at IS NULL GROUP BY 1`, args...)
+		if err != nil {
+			return nil, meta, err
+		}
+		for counts.Next() {
+			var key string
+			var count ConversationGroupCount
+			if err := counts.Scan(&key, &count.Total, &count.Running); err != nil {
+				counts.Close()
+				return nil, meta, err
+			}
+			meta.Groups[key] = count
+		}
+		err = counts.Err()
+		counts.Close()
+		if err != nil {
+			return nil, meta, err
+		}
+		agents, err := d.Query(`SELECT agent_key,count(*) FROM conversations GROUP BY agent_key`)
+		if err != nil {
+			return nil, meta, err
+		}
+		for agents.Next() {
+			var key string
+			var count int
+			if err := agents.Scan(&key, &count); err != nil {
+				agents.Close()
+				return nil, meta, err
+			}
+			meta.Agents[key] = count
+		}
+		err = agents.Err()
+		agents.Close()
+		if err != nil {
+			return nil, meta, err
+		}
+	}
+	// Limit threads before probing their latest result, using the partial result index.
+	if limit <= 0 {
+		limit = 100
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	args = append(args, limit, offset)
+	rows, err := d.Query(`WITH page AS (SELECT * FROM conversations`+where+` ORDER BY (pinned_at IS NOT NULL) DESC,pinned_at DESC NULLS LAST,updated_at DESC,id DESC LIMIT $5 OFFSET $6)
+ SELECT c.id,c.agent_key,c.title,c.llm_profile_id,c.pinned_at,c.created_at,c.updated_at,c.source,c.source_task_id,COALESCE(last.outcome,'') FROM page c
+ LEFT JOIN LATERAL(SELECT CASE WHEN COALESCE(summary,'') LIKE '%timeout%' THEN 'timeout' WHEN is_error THEN 'failed' ELSE 'completed' END AS outcome FROM conversation_activities WHERE conversation_id=c.id AND kind='result' ORDER BY id DESC LIMIT 1) last ON true
+ ORDER BY (c.pinned_at IS NOT NULL) DESC,c.pinned_at DESC NULLS LAST,c.updated_at DESC,c.id DESC`, args...)
+	if err != nil {
+		return nil, meta, err
+	}
+	defer rows.Close()
 	out := []*Conversation{}
 	for rows.Next() {
-		c, err := scanConv(rows)
-		if err != nil {
-			return nil, err
+		var c Conversation
+		var pinned sql.NullTime
+		if err := rows.Scan(&c.ID, &c.AgentKey, &c.Title, &c.LLMProfileID, &pinned, &c.CreatedAt, &c.UpdatedAt, &c.Source, &c.SourceTaskID, &c.Outcome); err != nil {
+			return nil, meta, err
+		}
+		if pinned.Valid {
+			c.Pinned = true
+			c.PinnedAt = &pinned.Time
 		}
 		out = append(out, &c)
 	}
-	return out, rows.Err()
+	return out, meta, rows.Err()
 }
 
 // GetConversation returns one thread (nil, nil if absent).
@@ -167,6 +303,17 @@ func (d *DB) GetConversation(id int64) (*Conversation, error) {
 		return nil, err
 	}
 	return &c, nil
+}
+
+// LatestConversationOutcome also supplies status for deep links outside the list page.
+func (d *DB) LatestConversationOutcome(id int64) (string, error) {
+	var outcome string
+	err := d.QueryRow(`SELECT CASE WHEN COALESCE(summary,'') LIKE '%timeout%' THEN 'timeout' WHEN is_error THEN 'failed' ELSE 'completed' END
+FROM conversation_activities WHERE conversation_id=$1 AND kind='result' ORDER BY id DESC LIMIT 1`, id).Scan(&outcome)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return outcome, err
 }
 
 // UpdateConversation applies a partial title/pin mutation and returns the updated
