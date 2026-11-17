@@ -82,7 +82,12 @@ func (s *Store) Append(path string, recs ...Record) error {
 		return err
 	}
 	defer f.Close()
+	var before os.FileInfo
+	if cachedTranscript(path).info != nil {
+		before, _ = f.Stat()
+	}
 	w := bufio.NewWriter(f)
+	var written int64
 	for _, r := range recs {
 		b, err := json.Marshal(r)
 		if err != nil {
@@ -94,8 +99,20 @@ func (s *Store) Append(path string, recs ...Record) error {
 		if err := w.WriteByte('\n'); err != nil {
 			return err
 		}
+		written += int64(len(b) + 1)
 	}
-	return w.Flush()
+	if err := w.Flush(); err != nil {
+		return err
+	}
+	if before != nil {
+		// Windows may publish the new modification time only after close.
+		if err := f.Close(); err != nil {
+			return err
+		}
+		after, _ := os.Stat(path)
+		noteTranscriptAppend(path, before, after, written)
+	}
+	return nil
 }
 
 // Load reads all records from a transcript file. A missing file yields no
@@ -109,6 +126,10 @@ func (s *Store) Load(path string) ([]Record, error) {
 		return nil, err
 	}
 	defer f.Close()
+	return loadRecords(f)
+}
+
+func loadRecords(f *os.File) ([]Record, error) {
 	var recs []Record
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64*1024), 64*1024*1024) // tolerate large tool results

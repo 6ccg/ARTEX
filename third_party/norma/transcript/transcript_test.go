@@ -3,10 +3,51 @@ package transcript
 import (
 	"context"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/Autumn-27/norma/llm"
 )
+
+func TestResumeHistoryReusesVerifiedAppendAndIsolatesMessages(t *testing.T) {
+	store := NewStore(t.TempDir())
+	path := store.MainPath("long")
+	longText := strings.Repeat("x", minCachedTranscript)
+	first := Record{UUID: "first", Message: &llm.Message{Role: llm.RoleUser, Content: []llm.ContentBlock{
+		llm.ToolResultText("call", longText, false),
+	}}}
+	if err := store.Append(path, first); err != nil {
+		t.Fatal(err)
+	}
+	msgs, _, last, err := store.ResumeHistory("long")
+	if err != nil || len(msgs) != 1 || last != "first" {
+		t.Fatalf("first replay: %d %q %v", len(msgs), last, err)
+	}
+	snapshot := cachedTranscript(path)
+	if snapshot.info == nil {
+		t.Fatal("long transcript was not cached")
+	}
+	msgs[0].Content[0].Content[0].Text = "session-local edit"
+	second := Record{UUID: "second", Message: &llm.Message{Role: llm.RoleAssistant}, Usage: &llm.Usage{OutputTokens: 7}}
+	if err := store.Append(path, second); err != nil {
+		t.Fatal(err)
+	}
+	appended := cachedTranscript(path)
+	if appended.info == nil || appended.info.Size() <= snapshot.info.Size() || appended.offset != snapshot.offset {
+		t.Fatal("append failed to retain the verified prefix")
+	}
+	msgs, usage, last, err := store.ResumeHistory("long")
+	if err != nil || len(msgs) != 2 || msgs[0].Content[0].Content[0].Text != longText || last != "second" || usage.OutputTokens != 7 {
+		t.Fatalf("after append: %d %+v %q %v", len(msgs), usage, last, err)
+	}
+	if err := os.WriteFile(path, []byte("{\"uuid\":\"replacement\",\"message\":{\"role\":\"user\"}}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	msgs, _, last, err = store.ResumeHistory("long")
+	if err != nil || len(msgs) != 1 || last != "replacement" {
+		t.Fatalf("after replacement: %d %q %v", len(msgs), last, err)
+	}
+}
 
 func TestRecordAndLoadRoundTrip(t *testing.T) {
 	s := NewStore(t.TempDir())
