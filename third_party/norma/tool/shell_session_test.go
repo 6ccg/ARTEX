@@ -8,6 +8,21 @@ import (
 	"time"
 )
 
+func TestShellToolsRespectPlatformAndDisableSetting(t *testing.T) {
+	t.Setenv("AGENT_CORE_DISABLE_INTERACTIVE_SHELL", "")
+	want := 0
+	if ptySupported() {
+		want = 5
+	}
+	if tools := ShellSessionTools(); len(tools) != want || InteractiveShellDisabled() != !ptySupported() {
+		t.Fatalf("PTY supported=%v, disabled=%v, tools=%d", ptySupported(), InteractiveShellDisabled(), len(tools))
+	}
+	t.Setenv("AGENT_CORE_DISABLE_INTERACTIVE_SHELL", "1")
+	if !InteractiveShellDisabled() || len(ShellSessionTools()) != 0 {
+		t.Fatal("disabled interactive shell must not advertise tools")
+	}
+}
+
 // TestShellToolsJSONSessionID drives the tools via their JSON input (snake_case
 // session_id) to guard against missing json tags — without tags session_id never
 // binds and every read/send/close reports "会话不存在".

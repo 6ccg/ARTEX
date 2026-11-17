@@ -34,9 +34,12 @@ const (
 	sessWaitCapMs   = 120000 // default hard wait ceiling for shell_send(wait)
 )
 
-// InteractiveShellDisabled reports whether interactive shell sessions are turned off
-// via AGENT_CORE_DISABLE_INTERACTIVE_SHELL (mirrors BackgroundTasksDisabled).
+// InteractiveShellDisabled reports unsupported platforms and the explicit
+// AGENT_CORE_DISABLE_INTERACTIVE_SHELL opt-out.
 func InteractiveShellDisabled() bool {
+	if !ptySupported() {
+		return true
+	}
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("AGENT_CORE_DISABLE_INTERACTIVE_SHELL"))) {
 	case "1", "true", "yes", "on":
 		return true

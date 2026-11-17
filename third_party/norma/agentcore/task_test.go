@@ -2,9 +2,11 @@ package agentcore
 
 import (
 	"context"
+	"encoding/json"
 	"iter"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -20,9 +22,14 @@ import (
 // the start of the next prompt, and Close removes the session's task directory.
 func TestBackgroundTaskEndToEnd(t *testing.T) {
 	dir := t.TempDir()
+	command := "sleep 1; echo e2e-out"
+	if runtime.GOOS == "windows" {
+		command = "Start-Sleep -Seconds 1; Write-Output e2e-out"
+	}
+	input, _ := json.Marshal(map[string]any{"command": command, "run_in_background": true})
 
 	turns := [][]llm.StreamEvent{
-		toolTurn("b1", "Bash", `{"command":"sleep 1; echo e2e-out","run_in_background":true}`),
+		toolTurn("b1", "Bash", string(input)),
 		textTurn("launched"), // completes prompt #1 while the task is still running
 		textTurn("ack"),      // prompt #2; the notification is drained before this turn
 	}
@@ -46,6 +53,7 @@ func TestBackgroundTaskEndToEnd(t *testing.T) {
 		WorkingDir:     dir,
 		Deps:           harness.QueryDeps{CallModel: callModel},
 	})
+	t.Cleanup(func() { _ = sess.Close() })
 
 	// The task tools are auto-registered alongside Bash.
 	for _, name := range []string{"TaskOutput", "TaskStop", "TaskList", "Monitor"} {
@@ -72,7 +80,13 @@ func TestBackgroundTaskEndToEnd(t *testing.T) {
 	}
 
 	// Wait for the command to finish so its notification is queued.
-	time.Sleep(1500 * time.Millisecond)
+	tasks := sess.tasks.List()
+	if len(tasks) != 1 {
+		t.Fatalf("expected one background task, got %d", len(tasks))
+	}
+	if info, done := sess.tasks.Wait(t.Context(), tasks[0].ID, 5*time.Second); !done || info.Status != tool.TaskCompleted {
+		t.Fatalf("background task did not complete: %+v", info)
+	}
 
 	// Prompt #2: the completion notification is injected before the new turn.
 	for range mustEvents(t, sess, "anything new?") {

@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"runtime"
 	"sync"
 
 	"github.com/lqqyt2423/go-mitmproxy/internal/helper"
@@ -160,10 +161,12 @@ func (c *wrapServerConn) Close() error {
 	if closed {
 		return c.closeErr
 	}
-	if !tls {
+	if !tls && runtime.GOOS != "windows" {
 		c.connCtx.ClientConn.Conn.(*wrapClientConn).Conn.(*net.TCPConn).CloseRead()
 	} else {
-		// if keep-alive connection close
+		// Windows CloseRead does not reliably wake the pending HTTP read. Close
+		// an idle downstream connection as for TLS, allowing clients to redial.
+		// A Connection: close response must finish before the HTTP server closes it.
 		if !c.connCtx.closeAfterResponse.Load() {
 			c.connCtx.ClientConn.Conn.Close()
 		}

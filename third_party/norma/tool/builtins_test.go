@@ -368,7 +368,10 @@ func mustFetch(t *testing.T, raw []byte) string {
 // subprocess environment (and overrides inherited values).
 func TestBashEnvInjection(t *testing.T) {
 	t.Setenv("HTTP_PROXY", "inherited-should-be-overridden")
-	raw, _ := json.Marshal(map[string]any{"command": "echo proxy=$HTTP_PROXY ca=$SSL_CERT_FILE"})
+	raw, _ := json.Marshal(map[string]any{"command": shellTestCommand(
+		"echo proxy=$HTTP_PROXY ca=$SSL_CERT_FILE",
+		`Write-Output "proxy=$env:HTTP_PROXY ca=$env:SSL_CERT_FILE"`,
+	)})
 	tc := &ToolContext{Env: []string{
 		"HTTP_PROXY=http://127.0.0.1:8080",
 		"SSL_CERT_FILE=/etc/ca.pem",

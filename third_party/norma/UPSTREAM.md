@@ -12,5 +12,6 @@ Local fixes:
 - Give settlement tools a live parent context and enforce disabled tools at execution.
 - Bound model calls and settlement with separate deadlines.
 - Allow bounded consecutive stop-hook corrections and an absolute primary deadline.
+- Describe native Windows PowerShell, keep Start-Sleep timeouts foreground-only, and hide unsupported PTY tools; run shell tests with platform-appropriate commands.
 
 Update this record and `go.mod` together when syncing upstream.

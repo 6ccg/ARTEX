@@ -5,10 +5,19 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
 )
+
+// Exercise the native shell on each OS; Windows does not require Bash or WSL.
+func shellTestCommand(bash, powershell string) string {
+	if runtime.GOOS == "windows" {
+		return powershell
+	}
+	return bash
+}
 
 func runTC(t *testing.T, tl CoreTool, tc *ToolContext, in any) Result {
 	t.Helper()
@@ -52,7 +61,7 @@ func TestManagerSpawnCompleteNotifies(t *testing.T) {
 	m := newTestManager(t)
 	// Output ("42") deliberately differs from the command text so we can assert the
 	// notification carries the path, not the output.
-	task, err := m.Spawn(SpawnSpec{Command: `expr 6 \* 7`})
+	task, err := m.Spawn(SpawnSpec{Command: shellTestCommand(`expr 6 \* 7`, `6 * 7`)})
 	if err != nil {
 		t.Fatalf("Spawn: %v", err)
 	}
@@ -130,7 +139,7 @@ func TestBashAutoBackgroundOnTimeout(t *testing.T) {
 	m := newTestManager(t)
 	tc := &ToolContext{Tasks: m}
 	res := runTC(t, NewBash(), tc, map[string]any{
-		"command":    "while true; do echo tick; sleep 0.1; done",
+		"command":    shellTestCommand("while true; do echo tick; sleep 0.1; done", "while ($true) { Write-Output tick; Start-Sleep -Milliseconds 100 }"),
 		"timeout_ms": 300,
 	})
 	if res.IsError || !strings.Contains(res.Flatten(), "background") {
@@ -155,7 +164,7 @@ func TestBashAutoBackgroundOnTimeout(t *testing.T) {
 func TestBashSleepTimesOutNotBackgrounded(t *testing.T) {
 	m := newTestManager(t)
 	tc := &ToolContext{Tasks: m}
-	res := runTC(t, NewBash(), tc, map[string]any{"command": "sleep 5", "timeout_ms": 200})
+	res := runTC(t, NewBash(), tc, map[string]any{"command": shellTestCommand("sleep 5", "Start-Sleep -Seconds 5"), "timeout_ms": 200})
 	if !res.IsError || !strings.Contains(res.Flatten(), "timed out") {
 		t.Fatalf("expected timeout error: %q (err=%v)", res.Flatten(), res.IsError)
 	}
@@ -198,7 +207,7 @@ func TestMonitorBackgrounds(t *testing.T) {
 func TestTaskOutputBlock(t *testing.T) {
 	m := newTestManager(t)
 	tc := &ToolContext{Tasks: m}
-	task, _ := m.Spawn(SpawnSpec{Command: "sleep 0.3; echo done"})
+	task, _ := m.Spawn(SpawnSpec{Command: shellTestCommand("sleep 0.3; echo done", "Start-Sleep -Milliseconds 300; Write-Output done")})
 	m.Background(task.ID)
 	out := runTC(t, NewTaskOutput(), tc, map[string]any{"task_id": task.ID, "block": true, "timeout_ms": 5000}).Flatten()
 	if !strings.Contains(out, "done") || !strings.Contains(out, "completed") {

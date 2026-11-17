@@ -14,9 +14,12 @@ import (
 // returns all five. They require a task Manager on the ToolContext (tc.Tasks) — that is
 // where the PTY sessions live and get cleaned up. See docs/交互式shell设计.md.
 
-// ShellSessionTools returns the five interactive-shell tools. Callers add them to
-// Options.Tools only when interactive shell is enabled for the agent.
+// ShellSessionTools returns the interactive tools supported and enabled on this
+// platform. Callers add them only when interactive shell is enabled for the agent.
 func ShellSessionTools() []CoreTool {
+	if InteractiveShellDisabled() {
+		return nil
+	}
 	return []CoreTool{NewShellOpen(), NewShellSend(), NewShellRead(), NewShellClose(), NewShellList()}
 }
 
@@ -55,6 +58,10 @@ func jsonResult(v any) (Result, error) {
 }
 
 func sessManager(tc *ToolContext) (*Manager, *Result) {
+	if !ptySupported() {
+		r := Errorf("交互式 shell(PTY) 在当前平台不支持")
+		return nil, &r
+	}
 	if InteractiveShellDisabled() {
 		r := Errorf("交互式 shell 已被全局停用(AGENT_CORE_DISABLE_INTERACTIVE_SHELL)")
 		return nil, &r

@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os/exec"
 	"regexp"
+	"runtime"
 	"strings"
 	"time"
 
@@ -44,6 +45,12 @@ func NewBash() CoreTool {
 		desc += fmt.Sprintf(" A per-command memory cap (%s) kills a command whose process group exceeds it; the error names the cap.", humanBytes(limit))
 	}
 	prompt := "The command runs through the shell, so you are not limited to one command: chain steps with && or ;, use pipes, and pass multi-line scripts or heredocs. For anything beyond a simple one-liner — loops, parsing, string/JSON handling, HTTP logic, computation — prefer writing a short script (Python, Node, shell, etc.) and executing it (e.g. via a heredoc or by writing a file then running it) rather than forcing everything into a single command. A timeout (default 120s, max 600s) applies. Avoid commands needing interactive input."
+	if runtime.GOOS == "windows" {
+		desc += " On Windows, commands run in native Windows PowerShell (-NoProfile -NonInteractive)."
+		prompt = "Use Windows PowerShell syntax: read environment variables as $env:NAME, use ; between commands, and use Start-Sleep for delays. Bash loops, heredocs, and && are not supported by Windows PowerShell. For complex work, write a short Python, Node, or PowerShell script with the file tools and execute it. A timeout (default 120s, max 600s) applies. Avoid commands needing interactive input."
+	} else {
+		desc += " Commands run in Bash."
+	}
 	if !BackgroundTasksDisabled() {
 		props["run_in_background"] = map[string]any{
 			"type":        "boolean",
@@ -220,6 +227,12 @@ func autoBackgroundAllowed(command string) bool {
 	base := fields[0]
 	if i := strings.LastIndexAny(base, "/\\"); i >= 0 {
 		base = base[i+1:]
+	}
+	if runtime.GOOS == "windows" {
+		base = strings.ToLower(base)
+		if base == "start-sleep" {
+			return false
+		}
 	}
 	for _, d := range disallowedAutoBackground {
 		if base == d {
