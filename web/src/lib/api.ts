@@ -659,8 +659,9 @@ export const api = {
   // 某资产在本任务里关联的意图 / 事实 / 发现（覆盖图节点抽屉用）。
   taskAssetRefs: (id: string, assetId: number) => get<CoverageAssetRefs>(`/tasks/${id}/asset-refs?asset_id=${assetId}`),
 
-  taskFiles: (id: string, path = "") => get<TaskFileListing>(`/tasks/${id}/files?path=${encodeURIComponent(path)}`),
-  taskFilesAll: (id: string) => get<TaskFileListing>(`/tasks/${id}/files/all`),
+  taskFiles: (id: string, path = "", signal?: AbortSignal) =>
+    http<TaskFileListing>(`/tasks/${id}/files?path=${encodeURIComponent(path)}`, { signal }),
+  taskFilesAll: (id: string, signal?: AbortSignal) => http<TaskFileListing>(`/tasks/${id}/files/all`, { signal }),
   taskFileRead: (id: string, path: string) =>
     get<WorkspaceFile>(`/tasks/${id}/files/read?path=${encodeURIComponent(path)}`),
   // Browser downloads stream to disk using the same auth cookie as SSE. Avoid

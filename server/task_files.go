@@ -139,6 +139,7 @@ func (s *Server) taskFilesList(w http.ResponseWriter, r *http.Request) {
 		taskFileError(w, err)
 		return
 	}
+	intentEntries := make(map[int64][]int)
 	for _, e := range entries {
 		info, err := e.Info()
 		if errors.Is(err, fs.ErrNotExist) {
@@ -152,26 +153,39 @@ func (s *Server) taskFilesList(w http.ResponseWriter, r *http.Request) {
 		if rel == "." && entry.Dir && strings.HasPrefix(e.Name(), "i") && t.Store != nil {
 			id, err := strconv.ParseInt(strings.TrimPrefix(e.Name(), "i"), 10, 64)
 			if err == nil {
-				node, err := t.Store.GetNode(id)
-				if err != nil {
-					writeErr(w, 500, "taskFiles.failed")
-					return
-				}
-				if node != nil && node.Kind == "intent" {
-					var payload map[string]any
-					_ = json.Unmarshal(node.Payload, &payload)
-					entry.IntentID, entry.IntentState = id, node.State
-					entry.IntentTitle, _ = payload["summary"].(string)
-					if entry.IntentTitle == "" {
-						entry.IntentTitle, _ = payload["title"].(string)
-					}
-					if entry.IntentTitle == "" {
-						entry.IntentTitle = rawString(node.Payload)
-					}
-				}
+				intentEntries[id] = append(intentEntries[id], len(out.Entries))
 			}
 		}
 		out.Entries = append(out.Entries, entry)
+	}
+	if len(intentEntries) > 0 {
+		ids := make([]int64, 0, len(intentEntries))
+		for id := range intentEntries {
+			ids = append(ids, id)
+		}
+		nodes, err := t.Store.NodesByIDs(ids)
+		if err != nil {
+			writeErr(w, 500, "taskFiles.failed")
+			return
+		}
+		for _, node := range nodes {
+			if node.Kind != "intent" {
+				continue
+			}
+			var payload map[string]any
+			_ = json.Unmarshal(node.Payload, &payload)
+			title, _ := payload["summary"].(string)
+			if title == "" {
+				title, _ = payload["title"].(string)
+			}
+			if title == "" {
+				title = rawString(node.Payload)
+			}
+			for _, index := range intentEntries[node.ID] {
+				entry := &out.Entries[index]
+				entry.IntentID, entry.IntentState, entry.IntentTitle = node.ID, node.State, title
+			}
+		}
 	}
 	sort.Slice(out.Entries, func(i, j int) bool {
 		a, b := out.Entries[i], out.Entries[j]
