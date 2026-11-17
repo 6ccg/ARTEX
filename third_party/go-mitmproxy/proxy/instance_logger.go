@@ -5,7 +5,7 @@ import (
 	"os"
 	"strings"
 
-	uuid "github.com/satori/go.uuid"
+	uuid "github.com/google/uuid"
 	log "github.com/sirupsen/logrus"
 )
 
@@ -37,7 +37,7 @@ func NewInstanceLoggerWithFile(addr string, instanceName string, logFilePath str
 	}
 
 	il := &InstanceLogger{
-		InstanceID:   uuid.NewV4().String()[:8],
+		InstanceID:   uuid.New().String()[:8],
 		InstanceName: instanceName,
 		Port:         port,
 		LogFilePath:  logFilePath,

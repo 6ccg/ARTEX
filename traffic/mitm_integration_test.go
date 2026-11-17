@@ -1,9 +1,11 @@
 package traffic
 
 import (
+	"bufio"
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -72,5 +74,71 @@ func TestMITMDecryptsHTTPSAndRecordsBody(t *testing.T) {
 	}
 	if string(recorded) != string(body) {
 		t.Fatalf("MITM did not record decrypted body: %q", recorded)
+	}
+}
+
+func TestSOCKS5FailureReturns502AndReportsUpstream(t *testing.T) {
+	socks, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer socks.Close()
+	go func() {
+		conn, err := socks.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		_, _ = conn.Write([]byte{5, 0xff}) // Reject the SOCKS5 authentication methods.
+	}()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := listener.Addr().String()
+	listener.Close()
+	tr, err := Open(t.TempDir(), addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tr.Close()
+	if err := tr.SetUpstreamProxy("socks5://" + socks.Addr().String()); err != nil {
+		t.Fatal(err)
+	}
+	failure := make(chan error, 1)
+	tr.SetUpstreamFailureHandler(func(err error) { failure <- err })
+	go tr.Start()
+	var conn net.Conn
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		conn, err = net.DialTimeout("tcp", addr, 50*time.Millisecond)
+		if err == nil {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(deadline)
+	if _, err := fmt.Fprint(conn, "CONNECT 127.0.0.1:443 HTTP/1.1\r\nHost: 127.0.0.1:443\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	response, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: http.MethodConnect})
+	if err != nil {
+		t.Fatalf("CONNECT was dropped instead of returning 502: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusBadGateway {
+		t.Fatalf("CONNECT status=%d", response.StatusCode)
+	}
+	select {
+	case err := <-failure:
+		if err == nil {
+			t.Fatal("missing upstream failure")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("upstream failure callback was not called")
 	}
 }

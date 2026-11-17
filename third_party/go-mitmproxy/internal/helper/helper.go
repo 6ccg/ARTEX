@@ -71,19 +71,29 @@ func IsTls(buf []byte) bool {
 	}
 }
 
-func IsWebSocket(buf []byte) bool {
-	// 使用 http.ReadRequest 解析 WebSocket 握手请求
+type TunnelType int
+
+const (
+	TunnelTypeOther TunnelType = iota
+	TunnelTypeHttp
+	TunnelTypeWebSocket
+)
+
+func GetTunnelType(buf []byte) TunnelType {
 	req, err := http.ReadRequest(bufio.NewReader(bytes.NewReader(buf)))
 	if err != nil {
-		return false
+		return TunnelTypeOther
 	}
 
-	// 检查 Upgrade 和 Connection 头
 	upgrade := req.Header.Get("Upgrade")
 	connection := req.Header.Get("Connection")
 
-	return strings.ToLower(upgrade) == "websocket" &&
-		strings.Contains(strings.ToLower(connection), "upgrade")
+	if strings.ToLower(upgrade) == "websocket" &&
+		strings.Contains(strings.ToLower(connection), "upgrade") {
+		return TunnelTypeWebSocket
+	}
+
+	return TunnelTypeHttp
 }
 
 type ResponseCheck struct {
